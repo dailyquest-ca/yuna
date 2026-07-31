@@ -130,10 +130,15 @@ def main():
     with connect() as conn:
         with Heartbeat(conn, "backtest-compounders") as hb:
             with conn.cursor() as cur:
+                # §3.1 Gate C1 excludes banks and insurers in v1 — EBITDA is meaningless for
+                # them. The point-in-time gate rebuilds C1 from filings, which carry no sector,
+                # so the exclusion has to come from the identity row. Without it a reinsurer
+                # and an asset manager took two of six slots, including the biggest winner.
                 cur.execute("""select f.ticker, f.raw, f.quote_ok, u.sector, u.industry
                                from v_fundamentals_latest f join universe u on u.ticker=f.ticker
                                where u.kind='stock' and u.status='active' and u.in_l0
-                                 and f.quote_ok and f.raw is not null""")
+                                 and f.quote_ok and f.raw is not null
+                                 and not coalesce(f.is_financial, false)""")
                 names = {}
                 for tk, raw, ok, sec, ind in cur.fetchall():
                     r = raw if isinstance(raw, dict) else json.loads(raw)
