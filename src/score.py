@@ -190,9 +190,13 @@ def main():
 
             if not dry():
                 with conn.cursor() as cur:
-                    # gate failure evicts immediately (§3.1) — a name we can no longer score
-                    # has failed the data gate, so it does not get the two-month seatbelt
-                    cur.execute("delete from bench where ticker = any(%s)", (unscored,))
+                    # §3.1: gate failure evicts immediately — no two-month seatbelt. Without
+                    # this a name that later fails C1 keeps its stale row, and Phase 0 reads it
+                    # as a live candidate (Karooooo survived the currency gate exactly this way).
+                    failed = unscored + [o["ticker"] for o in out if not o["c1_pass"]]
+                    cur.execute("""delete from bench where ticker = any(%s)
+                                   and ticker not in (select ticker from universe where is_holding)""",
+                                (failed,))
                     cur.execute("""update bench set months_outside_top60 = months_outside_top60 + 1
                                    where ticker <> all(%s)""", ([o["ticker"] for o in bench],))
                     cur.execute("""delete from bench where months_outside_top60 >= 2

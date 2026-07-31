@@ -111,50 +111,111 @@ def main():
                 theme_weight[th] = theme_weight.get(th, 0.0) + intended
 
             # ---------------- the two opportunity lists ----------------
-            comp_list = sorted(
+            # These are candidate pools. What Zak gets is a *conforming target book* drawn
+            # from them: §2.1 name counts and sleeve ceilings, §2.2 independence, §3.3
+            # blackout. Handing over ten momentum names at 6% each would be 63% of NAV in a
+            # sleeve capped at 40% — a list, not a plan.
+            with conn.cursor() as cur:
+                cur.execute("""select ticker from earnings
+                               where report_date >= current_date
+                                 and report_date <= current_date + 8""")
+                blackout = {r[0] for r in cur.fetchall()}
+                cur.execute("select ticker, sector, industry from universe")
+                sec = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+
+            comp_pool = sorted(
                 [dict(ticker=t, **b) for t, b in bench.items()
                  if b["c1"] and b["ccn"] is not None and b["ccn"] >= ENTER
                  and b["gap"] is not None and b["gap"] <= 0],
                 key=lambda x: -x["ccn"])
-            for c_ in comp_list:
-                c_["size_pct"] = flat
-                c_["size_cad"] = flat * nav if nav else None
-                c_["shares"] = int((flat * nav) / (float(c_["px"]) * fx)) if nav and c_["px"] else None
 
             with conn.cursor() as cur:
                 cur.execute("""select q.ticker, u.name, q.mcn, q.trigger_price, q.limit_price,
-                                      q.stop_suggest, q.proximity, q.note, c.last_close
+                                      q.stop_suggest, q.proximity, q.note
                                from queue q join universe u on u.ticker=q.ticker
-                               left join candidates c on c.ticker=q.ticker
                                where q.source='momentum' and q.state='BUY'
-                               order by q.proximity""")
-                mom_list = []
-                for tk, nm, mcn, trig, lim, stop, prox, note, px in cur.fetchall():
+                               order by q.mcn desc nulls last""")
+                mom_pool = []
+                for tk, nm, mcn, trig, lim, stop, prox, note in cur.fetchall():
                     mcn = float(mcn); trig = float(trig); stop = float(stop)
                     risk = float(budgets.get("85" if mcn >= FULL else "70", 0.005))
                     dist = max((trig - stop) / trig, 0.0001)
                     if dist > max_stop:                      # §3.2 never wider than 8%
                         stop = trig * (1 - max_stop); dist = max_stop
                     size_pct = min(risk / dist, 0.12)        # capped by the momentum band
-                    mom_list.append(dict(ticker=tk, name=nm, mcn=mcn, trigger=trig, limit=float(lim),
-                                         stop=stop, stop_limit=stop * 0.97,
+                    mom_pool.append(dict(ticker=tk, name=nm, mcn=mcn, trigger=trig,
+                                         limit=float(lim), stop=stop, stop_limit=stop * 0.97,
                                          away_pct=100 * float(prox), base=note,
-                                         risk_budget=risk, stop_distance=dist,
-                                         size_pct=size_pct,
+                                         risk_budget=risk, stop_distance=dist, size_pct=size_pct,
                                          shares=int((size_pct * nav) / (trig * fx)) if nav else None))
+
+            # ---------------- select the conforming target book ----------------
+            groups, themes = dict(group_count), dict(theme_weight)
+
+            def admit(tk, weight):
+                """§2.2: at most two names per industry group, no theme above 35% on entry."""
+                th, g = sec.get(tk, (None, None))
+                g, th = g or "unknown", th or "unknown"
+                if groups.get(g, 0) >= per_group:
+                    return None, f"§2.2 — already {per_group} names in {g}"
+                if themes.get(th, 0.0) + weight > theme_cap:
+                    return None, f"§2.2 — {th} theme would exceed {theme_cap:.0%}"
+                return (g, th), None
+
+            comp_list, comp_rejected = [], []
+            comp_room = 0.60
+            for c_ in comp_pool:
+                if len(comp_list) >= 5 or comp_room < flat:
+                    comp_rejected.append({**c_, "held_back": "§2.1 — compounder sleeve full"}); continue
+                if c_["ticker"] in blackout:
+                    comp_rejected.append({**c_, "held_back": "§3.3 — earnings blackout"}); continue
+                keys, why = admit(c_["ticker"], flat)
+                if not keys:
+                    comp_rejected.append({**c_, "held_back": why}); continue
+                g, th = keys
+                groups[g] = groups.get(g, 0) + 1
+                themes[th] = themes.get(th, 0.0) + flat
+                comp_room -= flat
+                c_.update(size_pct=flat, size_cad=flat * nav if nav else None,
+                          shares=int((flat * nav) / (float(c_["px"]) * fx)) if nav and c_["px"] else None)
+                comp_list.append(c_)
+
+            mom_list, mom_rejected = [], []
+            mom_room = 0.40
+            for m in mom_pool:
+                if len(mom_list) >= 4 or mom_room < m["size_pct"]:
+                    mom_rejected.append({**m, "held_back": "§2.1 — momentum sleeve full"}); continue
+                if m["ticker"] in blackout:
+                    mom_rejected.append({**m, "held_back": "§3.3 — earnings blackout"}); continue
+                keys, why = admit(m["ticker"], m["size_pct"])
+                if not keys:
+                    mom_rejected.append({**m, "held_back": why}); continue
+                g, th = keys
+                groups[g] = groups.get(g, 0) + 1
+                themes[th] = themes.get(th, 0.0) + m["size_pct"]
+                mom_room -= m["size_pct"]
+                mom_list.append(m)
 
             # ---------------- write it down ----------------
             exits = [v for v in verdicts if v["verdict"] == "EXIT"]
             keeps = [v for v in verdicts if v["verdict"] == "KEEP"]
             step5 = [v for v in verdicts if v["verdict"] == "STEP 5"]
             summary = (f"{len(keeps)} keep · {len(exits)} exit · {len(step5)} to Step 5 | "
-                       f"{len(comp_list)} compounders at/below hurdle · {len(mom_list)} momentum triggers | "
+                       f"target book: {len(comp_list)} compounders (of {len(comp_pool)} at/below hurdle) · "
+                       f"{len(mom_list)} momentum (of {len(mom_pool)} triggered) | "
                        f"NAV {'CAD ' + format(nav, ',.0f') if anchored else 'equities-only CAD ' + format(nav, ',.0f') + ' (provisional)'}")
             detail = dict(nav_cad=round(nav, 2), equities_cad=round(equities, 2),
                           cash_cad=round(cash, 2), debt_cad=round(debt, 2), usdcad=fx,
                           balances_captured=anchored, accounts=n["accounts"],
                           book_equities_cad=round(n["book_equities"], 2), verdicts=verdicts,
-                          compounder_list=comp_list, momentum_list=mom_list)
+                          compounder_list=comp_list, momentum_list=mom_list,
+                          compounder_pool=comp_pool, momentum_pool=mom_pool,
+                          held_back=comp_rejected + mom_rejected,
+                          blackout=sorted(blackout & (set(c["ticker"] for c in comp_pool)
+                                                      | set(m["ticker"] for m in mom_pool))),
+                          target_weights=dict(compounders=round(0.60 - comp_room, 3),
+                                              momentum=round(0.40 - mom_room, 3)),
+                          groups=groups, themes={k: round(v, 3) for k, v in themes.items()})
 
             if not dry():
                 with conn.cursor() as cur:
@@ -174,7 +235,7 @@ def main():
                                          %s,%s,%s,%s,%s,'proposed',%s,%s)""",
                                     (m["ticker"], m["trigger"], m["limit"], m["shares"], m["stop"],
                                      m["stop_limit"], brief_id, f"MCN {m['mcn']:.1f} · {m['base']}"))
-                    for c_ in comp_list[:5]:
+                    for c_ in comp_list:
                         cur.execute("""insert into tickets(ticker,account,sleeve,action,reason,order_type,
                                          limit_price,qty,state,brief_id,note)
                                        values (%s,'TFSA','compounders','buy','hurdle','limit',
