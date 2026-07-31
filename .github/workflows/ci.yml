@@ -36,7 +36,16 @@ jobs:
       # finding here fails the build (the action exits 1 on leaks detected).
       #
       # Pinned to a full commit SHA, not the moving `v2` tag: tags are mutable, and this action
-      # executes with the repository checked out. The SHA below is what v2/v2.3.9 resolve to.
+      # executes with the repository checked out. The SHA below is what v2/v2.3.9 resolve to,
+      # confirmed by git ls-remote against upstream rather than copied from a README.
+      #
+      # LICENCE CAVEAT, checked rather than assumed: this action exits 1 with "missing gitleaks
+      # license" when the repository owner is an Organization — and also when its owner lookup
+      # simply fails. `dailyquest-ca` is a personal account ("type": "User", verified against the
+      # GitHub API 2026-07-31), so no GITLEAKS_LICENSE is needed and the zero-secret guarantee
+      # holds. If this repo ever moves under an org, this step starts failing every run: the
+      # drop-in fix is the gitleaks CLI, which carries no licence logic and needs no token —
+      # .gitleaks.toml works with it unchanged.
       - name: gitleaks — secret scan
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7   # v2.3.9
         env:
