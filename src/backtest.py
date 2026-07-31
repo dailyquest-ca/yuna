@@ -179,7 +179,7 @@ def rank_week(w, t, ind):
 def run(w, ind, m1, hb):
     dates = list(w["close"].index)
     O, H, L, C, V = (w[k] for k in ("open", "high", "low", "close", "vol"))
-    v50 = V.rolling(50).mean()
+    v50 = V.shift(1).rolling(50).mean()      # prior 50 days: the breakout day is the test, not the baseline
 
     budgets = {70: 0.007, 85: 0.009}          # §3.2 steady-state risk budgets
     MAXSTOP, CEIL, MAXN, BAND = 0.08, 0.40, 4, 0.12
@@ -187,8 +187,9 @@ def run(w, ind, m1, hb):
     nav, cash = START_NAV, START_NAV
     book, trades, equity = {}, [], []
     queue = pd.DataFrame()
+    fired = {}                               # ticker -> pivot already filled; re-arms on a new base
     diag = dict(weeks=0, l1m=0, valid=0, touched=0, no_fill_gap=0, no_volume=0,
-                no_room=0, taken=0, days_slots_free=0)
+                no_room=0, taken=0, days_slots_free=0, already_fired=0)
 
     for t in range(WARMUP, len(dates)):
         day = dates[t]
@@ -291,6 +292,9 @@ def run(w, ind, m1, hb):
                 tk = r.ticker
                 if tk in book or len(book) >= MAXN:
                     continue
+                if fired.get(tk) == round(float(r.pivot), 4):
+                    diag["already_fired"] += 1
+                    continue                                # this order already filled once
                 hi, op = H[tk].iloc[t], O[tk].iloc[t]
                 if np.isnan(hi) or hi < r.pivot:
                     continue
@@ -313,6 +317,7 @@ def run(w, ind, m1, hb):
                     diag["no_room"] += 1
                     continue
                 diag["taken"] += 1
+                fired[tk] = round(float(r.pivot), 4)
                 first = target * 0.5                        # pyramid step 1
                 q = first / fill
                 cash -= first
