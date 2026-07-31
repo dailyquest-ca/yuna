@@ -1,4 +1,7 @@
 name: duties
+# Filename stays daily.yml on purpose: workflow_dispatch registration lives on the default
+# branch, so renaming the file would make this job undispatchable until a merge. The job, the
+# heartbeat and the code it runs are all `duties`.
 on:
   workflow_dispatch:
     inputs:
