@@ -172,7 +172,7 @@ def rank_week(w, t, ind):
                             depth=depth, blen=blen, clow=clow, px=px,
                             stop=np.maximum(clow, pivot * 0.92)))
     l1m = out[out.m2].sort_values("mcn", ascending=False).head(150)
-    return l1m
+    return out.set_index("ticker"), l1m
 
 
 # ------------------------------------------------------------------ simulation
@@ -187,7 +187,8 @@ def run(w, ind, m1, hb):
     nav, cash = START_NAV, START_NAV
     book, trades, equity = {}, [], []
     queue = pd.DataFrame()
-    bench0 = None
+    diag = dict(weeks=0, l1m=0, valid=0, touched=0, no_fill_gap=0, no_volume=0,
+                no_room=0, taken=0, days_slots_free=0)
 
     for t in range(WARMUP, len(dates)):
         day = dates[t]
@@ -195,23 +196,28 @@ def run(w, ind, m1, hb):
 
         # ---- weekly re-rank (Fridays), exactly as weekly-rank does it
         if pd.Timestamp(day).weekday() == 4 or queue.empty:
-            l1m = rank_week(w, t, ind)
-            if l1m is not None:
-                queue = l1m
-                live = {p["ticker"] for p in book.values()}
-                keep = set(l1m.ticker)
+            got = rank_week(w, t, ind)
+            if got is not None:
+                scored, queue = got
+                diag["weeks"] += 1
+                diag["l1m"] += len(queue); diag["valid"] += int(queue.valid.sum())
+                # §3.2 lists exactly three exits: the stop, the trend template failing, and
+                # MCN < 55. Falling out of the top 150 is NOT one of them — L1-M is a
+                # candidate list, not a holding rule, and treating it as one ejected every
+                # position within days and made the sleeve untradeable.
                 for tk in list(book):
-                    if tk not in keep:                     # trend template failed, or MCN fell out
-                        p = book[tk]
-                        px = C[tk].iloc[t]
-                        if not np.isnan(px):
-                            close_trade(book, trades, tk, day, px, "template/rank fail", t)
-                            cash += p["qty"] * px
-                    elif float(l1m.set_index("ticker").mcn.get(tk, 100)) < 55:
-                        p = book[tk]; px = C[tk].iloc[t]
-                        if not np.isnan(px):
-                            close_trade(book, trades, tk, day, px, "MCN < 55", t)
-                            cash += p["qty"] * px
+                    if tk not in scored.index:
+                        continue                            # no longer scoreable; leave it to the stop
+                    row = scored.loc[tk]
+                    px = C[tk].iloc[t]
+                    if np.isnan(px):
+                        continue
+                    if not bool(row.m2):
+                        cash += book[tk]["qty"] * px
+                        close_trade(book, trades, tk, day, px, "trend template fail", t)
+                    elif float(row.mcn) < 55:
+                        cash += book[tk]["qty"] * px
+                        close_trade(book, trades, tk, day, px, "MCN < 55", t)
 
         # ---- gate off: the sleeve goes to cash (§3.3 crash protocol)
         if not on and book:
@@ -264,6 +270,7 @@ def run(w, ind, m1, hb):
 
         # ---- entries
         if on and len(book) < MAXN and not queue.empty:
+            diag["days_slots_free"] += 1
             exposure = sum(p["qty"] * C[p["ticker"]].iloc[t] for p in book.values()
                            if not np.isnan(C[p["ticker"]].iloc[t]))
             for _, r in queue[queue.valid].sort_values("mcn", ascending=False).iterrows():
@@ -273,12 +280,15 @@ def run(w, ind, m1, hb):
                 hi, op = H[tk].iloc[t], O[tk].iloc[t]
                 if np.isnan(hi) or hi < r.pivot:
                     continue
+                diag["touched"] += 1
                 limit = r.pivot * 1.02
                 fill = r.pivot if (np.isnan(op) or op <= r.pivot) else op
                 if fill > limit:
+                    diag["no_fill_gap"] += 1
                     continue                                # gapped through the limit — no fill
                 vv, v5 = V[tk].iloc[t], v50[tk].iloc[t]
                 if np.isnan(vv) or np.isnan(v5) or vv < 1.4 * v5:
+                    diag["no_volume"] += 1
                     continue                                # §3.2: breakout needs 1.4x volume
                 stop = max(r.clow, fill * (1 - MAXSTOP))
                 dist = max((fill - stop) / fill, 1e-4)
@@ -286,7 +296,9 @@ def run(w, ind, m1, hb):
                 size = min(budget / dist, BAND)
                 target = size * nav
                 if exposure + target > CEIL * nav or cash < target * 0.5:
+                    diag["no_room"] += 1
                     continue
+                diag["taken"] += 1
                 first = target * 0.5                        # pyramid step 1
                 q = first / fill
                 cash -= first
@@ -294,14 +306,17 @@ def run(w, ind, m1, hb):
                 book[tk] = dict(ticker=tk, entry=fill, qty=q, stop=stop, pivot=r.pivot,
                                 hi_close=fill, step=1, target_cad=target, mcn=float(r.mcn),
                                 entry_date=day, entry_idx=t, init_stop=stop, size=size,
-                                mfe=0.0, mae=0.0)
+                                mfe=0.0, mae=0.0, last_mark=fill)
 
         # ---- mark
         held = 0.0
         for p in book.values():
             px = C[p["ticker"]].iloc[t]
-            if not np.isnan(px):
-                held += p["qty"] * px
+            if np.isnan(px):
+                px = p["last_mark"]                        # carry, never drop to zero
+            else:
+                p["last_mark"] = px
+            held += p["qty"] * px
         nav = cash + held
         b = w["close"]["SPY.US"].iloc[t] if "SPY.US" in w["close"].columns else np.nan
         equity.append((day, nav, held / nav if nav else 0, len(book), "ON" if on else "OFF", b))
@@ -313,7 +328,7 @@ def run(w, ind, m1, hb):
         if not np.isnan(px):
             cash += book[tk]["qty"] * px
             close_trade(book, trades, tk, dates[t], px, "end of test", t)
-    return trades, equity
+    return trades, equity, diag
 
 
 def close_trade(book, trades, tk, day, price, reason, t):
@@ -379,8 +394,11 @@ def main():
             hb.detail["bars"] = int(w["close"].shape[0])
             print(f"backtest: {w['close'].shape[1]} tickers x {w['close'].shape[0]} bars")
             m1 = m1_series(spx)
-            trades, equity = run(w, ind, m1, hb)
+            trades, equity, diag = run(w, ind, m1, hb)
+            hb.detail["diagnostics"] = diag
+            print("  diagnostics:", diag)
             summary = summarise(trades, equity, spx)
+            summary["stats"]["diagnostics"] = diag
             print(f"  {summary['trades']} trades | CAGR {summary['cagr']:.1%} | "
                   f"maxDD {summary['max_drawdown']:.1%} | win {summary['win_rate'] or 0:.0%}")
             if not dry():
