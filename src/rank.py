@@ -2,7 +2,7 @@
 Effective L0 (bar filters) -> M1 latch -> M2 template -> MCN (3x33%, windows end t-10)
 -> L1-M top 150 -> base/pivot scan (M3 constraints) -> candidates + queue (cap 20).
 """
-import os, sys, json, math, datetime as dt
+import os, sys, json, math, traceback, datetime as dt
 import numpy as np
 import psycopg
 
@@ -192,7 +192,7 @@ def main():
         except Exception as e:
             with conn.cursor() as cur:
                 cur.execute("update runs set finished_at=now(), status='red', detail=%s where id=%s",
-                            (json.dumps({"fatal":f"{type(e).__name__}: {e}"}),run_id))
+                            (json.dumps({"fatal":f"{type(e).__name__}: {e}","trace":traceback.format_exc()[-900:]}),run_id))
             conn.commit(); raise
 
 if __name__=="__main__": sys.exit(main())

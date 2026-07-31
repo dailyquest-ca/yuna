@@ -3,7 +3,7 @@ Census: US exchange symbol list (common stock, NYSE/NASDAQ/AMEX) x screener (cap
 Bar-dependent filters (price >= $5, ADDV >= $10M, listed >= 6 mo) are re-applied from our own bars
 inside weekly-rank, so L0 stays honest between censuses. Stage 2 (Gate C1 -> CCN funnel) arrives in Phase D.
 FORCE=true skips the 1st-Saturday guard (manual runs)."""
-import os, sys, json, time, datetime as dt, urllib.request, urllib.error
+import os, sys, json, time, traceback, datetime as dt, urllib.request, urllib.error
 import psycopg
 
 DRY = os.environ.get("DRY_RUN","false").lower() in ("1","true","yes")
@@ -42,20 +42,25 @@ def main():
             print(f"listing census: {len(common)} common stocks on NYSE/NASDAQ/AMEX")
             # 2) screener sweep: cap >= $300M, descending, harvest industry/sector/cap
             rows={}
-            offset=0
-            while True:
-                filt=json.dumps([["market_capitalization",">",300000000],["exchange","=","us"]])
-                data=get(f"https://eodhd.com/api/screener?api_token={K}&sort=market_capitalization.desc&filters={urllib.request.quote(filt)}&limit=100&offset={offset}", calls)
-                batch=(data or {}).get("data",[])
-                if not batch: break
-                for b in batch:
-                    code=b.get("code")
-                    if code in common and code not in rows:
-                        rows[code]=(b.get("name"), b.get("sector") or "Unknown", b.get("industry") or "Unknown",
-                                    float(b.get("market_capitalization") or 0))
-                offset+=100
-                if offset>=10000: break
-                if float(batch[-1].get("market_capitalization") or 0) < 300000000: break
+            ceiling=None            # screener offset caps at 999 -> descend in market-cap bands
+            for sweep in range(12):
+                added=0
+                for offset in range(0,1000,100):
+                    f=[["market_capitalization",">",300000000],["exchange","=","us"]]
+                    if ceiling is not None: f.append(["market_capitalization","<",ceiling])
+                    filt=json.dumps(f)
+                    data=get(f"https://eodhd.com/api/screener?api_token={K}&sort=market_capitalization.desc&filters={urllib.request.quote(filt)}&limit=100&offset={offset}", calls)
+                    batch=(data or {}).get("data",[])
+                    if not batch: break
+                    for b in batch:
+                        code=b.get("code"); cap=float(b.get("market_capitalization") or 0)
+                        ceiling = cap+1 if ceiling is None else min(ceiling, cap+1)
+                        if code in common and code not in rows:
+                            rows[code]=(b.get("name"), b.get("sector") or "Unknown", b.get("industry") or "Unknown", cap)
+                            added+=1
+                    if len(batch)<100: break
+                print(f"  sweep {sweep+1}: +{added} names, floor now ${(ceiling or 0)/1e9:.2f}B")
+                if added==0 or (ceiling is not None and ceiling<=300000001): break
             print(f"screener census: {len(rows)} names >= $300M cap")
             # 3) upsert universe: coarse L0 membership
             if not DRY:
@@ -77,7 +82,7 @@ def main():
         except Exception as e:
             with conn.cursor() as cur:
                 cur.execute("update runs set finished_at=now(), status='red', calls_used=%s, detail=%s where id=%s",
-                            (calls[0], json.dumps({"fatal":f"{type(e).__name__}: {e}"}), run_id))
+                            (calls[0], json.dumps({"fatal":f"{type(e).__name__}: {e}","trace":traceback.format_exc()[-900:]}), run_id))
             conn.commit(); raise
 
 if __name__=="__main__": sys.exit(main())
