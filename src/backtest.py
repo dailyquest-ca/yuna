@@ -228,6 +228,20 @@ def run(w, ind, m1, hb):
                     cash += book[tk]["qty"] * px
                     close_trade(book, trades, tk, day, px, "market gate OFF", t)
 
+        # ---- §5.1: a breakout that did not carry 1.4x volume is a failed breakout. The
+        # broker order has already filled overnight, so the brief instructs an exit at the
+        # next open — not a refusal to enter, which is what the first run modelled.
+        for tk in list(book):
+            p = book[tk]
+            if p["vol_ok"] or p["entry_idx"] == t:
+                continue
+            px = O[tk].iloc[t]
+            if np.isnan(px):
+                px = C[tk].iloc[t]
+            if not np.isnan(px):
+                cash += p["qty"] * px
+                close_trade(book, trades, tk, day, px, "volume unconfirmed", t)
+
         # ---- stops and trails on what we hold
         for tk in list(book):
             p = book[tk]
@@ -245,7 +259,7 @@ def run(w, ind, m1, hb):
 
             # pyramid — 50 / 25 / 25 at the pivot, +2.5%, +4.5%
             for step, mult in ((2, 1.025), (3, 1.045)):
-                if p["step"] == step - 1 and hi >= p["pivot"] * mult and on:
+                if p["vol_ok"] and p["step"] == step - 1 and hi >= p["pivot"] * mult and on:
                     add_cost = p["target_cad"] * 0.25
                     if cash >= add_cost:
                         fill = max(p["pivot"] * mult, op if not np.isnan(op) else 0)
@@ -287,9 +301,9 @@ def run(w, ind, m1, hb):
                     diag["no_fill_gap"] += 1
                     continue                                # gapped through the limit — no fill
                 vv, v5 = V[tk].iloc[t], v50[tk].iloc[t]
-                if np.isnan(vv) or np.isnan(v5) or vv < 1.4 * v5:
-                    diag["no_volume"] += 1
-                    continue                                # §3.2: breakout needs 1.4x volume
+                vol_ok = bool(not np.isnan(vv) and not np.isnan(v5) and vv >= 1.4 * v5)
+                if not vol_ok:
+                    diag["no_volume"] += 1                  # filled anyway; exits at tomorrow's open
                 stop = max(r.clow, fill * (1 - MAXSTOP))
                 dist = max((fill - stop) / fill, 1e-4)
                 budget = budgets[85] if r.mcn >= 85 else budgets[70]
@@ -306,7 +320,7 @@ def run(w, ind, m1, hb):
                 book[tk] = dict(ticker=tk, entry=fill, qty=q, stop=stop, pivot=r.pivot,
                                 hi_close=fill, step=1, target_cad=target, mcn=float(r.mcn),
                                 entry_date=day, entry_idx=t, init_stop=stop, size=size,
-                                mfe=0.0, mae=0.0, last_mark=fill)
+                                mfe=0.0, mae=0.0, last_mark=fill, vol_ok=vol_ok)
 
         # ---- mark
         held = 0.0
