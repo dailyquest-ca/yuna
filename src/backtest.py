@@ -34,6 +34,13 @@ START_NAV = float(os.environ.get("START_NAV", "200754.38"))
 LABEL = os.environ.get("LABEL", "momentum v1")
 WARMUP = 280
 
+# ---- variant knobs. Defaults reproduce the plan exactly; every deviation is a hypothesis
+# about the friction the baseline exposed, not a change to §3.2, which is FINAL.
+VOL_MODE = os.environ.get("VOL_MODE", "fill_then_exit")   # fill_then_exit (§5.1) | confirm_first
+BREAKEVEN_STEP = int(os.environ.get("BREAKEVEN_STEP", "3"))   # §3.2: breakeven at full size
+MCN_EXIT = float(os.environ.get("MCN_EXIT", "55"))            # §3.3 exit-review threshold
+MIN_HOLD = int(os.environ.get("MIN_HOLD_DAYS", "0"))          # §1: one-week intended hold
+
 
 # ------------------------------------------------------------------ data
 def load(cur):
@@ -216,10 +223,12 @@ def run(w, ind, m1, hb):
                     px = C[tk].iloc[t]
                     if np.isnan(px):
                         continue
+                    if t - book[tk]["entry_idx"] < MIN_HOLD:
+                        continue                            # §1 minimum intended hold; stops exempt
                     if not bool(row.m2):
                         cash += book[tk]["qty"] * px
                         close_trade(book, trades, tk, day, px, "trend template fail", t)
-                    elif float(row.mcn) < 55:
+                    elif float(row.mcn) < MCN_EXIT:
                         cash += book[tk]["qty"] * px
                         close_trade(book, trades, tk, day, px, "MCN < 55", t)
 
@@ -282,7 +291,7 @@ def run(w, ind, m1, hb):
                 cand = max(cand, p["hi_close"] * 0.95)
             elif win >= 0.15:
                 cand = max(cand, p["hi_close"] * 0.90)
-            elif p["step"] >= 3:
+            elif p["step"] >= BREAKEVEN_STEP:
                 cand = max(cand, p["entry"])
             p["stop"] = max(p["stop"], cand)               # ratchets up, never down
 
@@ -298,19 +307,36 @@ def run(w, ind, m1, hb):
                 if fired.get(tk) == round(float(r.pivot), 4):
                     diag["already_fired"] += 1
                     continue                                # this order already filled once
-                hi, op = H[tk].iloc[t], O[tk].iloc[t]
-                if np.isnan(hi) or hi < r.pivot:
-                    continue
-                diag["touched"] += 1
-                limit = r.pivot * 1.02
-                fill = r.pivot if (np.isnan(op) or op <= r.pivot) else op
-                if fill > limit:
-                    diag["no_fill_gap"] += 1
-                    continue                                # gapped through the limit — no fill
-                vv, v5 = V[tk].iloc[t], v50[tk].iloc[t]
-                vol_ok = bool(not np.isnan(vv) and not np.isnan(v5) and vv >= 1.4 * v5)
-                if not vol_ok:
-                    diag["no_volume"] += 1                  # filled anyway; exits at tomorrow's open
+                op = O[tk].iloc[t]
+                if VOL_MODE == "confirm_first":
+                    # wait for yesterday to CLOSE above the pivot on 1.4x volume, then buy this
+                    # open. Costs a day of drift; never pays for a breakout that did not carry.
+                    pc, pv, pv5 = C[tk].iloc[t - 1], V[tk].iloc[t - 1], v50[tk].iloc[t - 1]
+                    if np.isnan(pc) or pc < r.pivot:
+                        continue
+                    diag["touched"] += 1
+                    if np.isnan(pv) or np.isnan(pv5) or pv < 1.4 * pv5:
+                        diag["no_volume"] += 1
+                        continue
+                    vol_ok = True
+                    fill = op if not np.isnan(op) else pc
+                    if fill > r.pivot * 1.05:               # §3.2 gap-up tolerance
+                        diag["no_fill_gap"] += 1
+                        continue
+                else:
+                    hi = H[tk].iloc[t]
+                    if np.isnan(hi) or hi < r.pivot:
+                        continue
+                    diag["touched"] += 1
+                    limit = r.pivot * 1.02
+                    fill = r.pivot if (np.isnan(op) or op <= r.pivot) else op
+                    if fill > limit:
+                        diag["no_fill_gap"] += 1
+                        continue                            # gapped through the limit — no fill
+                    vv, v5 = V[tk].iloc[t], v50[tk].iloc[t]
+                    vol_ok = bool(not np.isnan(vv) and not np.isnan(v5) and vv >= 1.4 * v5)
+                    if not vol_ok:
+                        diag["no_volume"] += 1              # filled anyway; exits at tomorrow's open
                 stop = max(r.clow, fill * (1 - MAXSTOP))
                 dist = max((fill - stop) / fill, 1e-4)
                 budget = budgets[85] if r.mcn >= 85 else budgets[70]

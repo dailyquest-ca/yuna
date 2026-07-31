@@ -8,6 +8,18 @@ on:
       start_nav:
         description: 'starting NAV in CAD'
         default: '200754.38'
+      vol_mode:
+        description: 'fill_then_exit (plan §5.1) | confirm_first'
+        default: 'fill_then_exit'
+      breakeven_step:
+        description: 'pyramid step at which the stop moves to breakeven (§3.2 = 3)'
+        default: '3'
+      mcn_exit:
+        description: 'MCN below which a position exits (§3.3 = 55)'
+        default: '55'
+      min_hold_days:
+        description: 'minimum intended hold; stops always exempt (§1 = one week)'
+        default: '0'
       dry_run:
         description: 'simulate, write nothing'
         default: 'false'
@@ -26,6 +38,10 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           LABEL: ${{ inputs.label || 'momentum v1' }}
           START_NAV: ${{ inputs.start_nav || '200754.38' }}
+          VOL_MODE: ${{ inputs.vol_mode || 'fill_then_exit' }}
+          BREAKEVEN_STEP: ${{ inputs.breakeven_step || '3' }}
+          MCN_EXIT: ${{ inputs.mcn_exit || '55' }}
+          MIN_HOLD_DAYS: ${{ inputs.min_hold_days || '0' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
       - name: autopsy on failure
         if: failure()
