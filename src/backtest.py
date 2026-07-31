@@ -40,6 +40,7 @@ def load(cur):
     cur.execute("""select p.ticker, p.d, p.open, p.high, p.low, p.close, p.adj_close, p.volume
                    from prices p join universe u on u.ticker = p.ticker
                    where u.kind='stock' and u.status='active' and (u.in_l0 or u.is_holding)
+                     and u.ticker like '%.US'
                    order by p.d""")
     df = pd.DataFrame(cur.fetchall(),
                       columns=["ticker", "d", "open", "high", "low", "close", "adj", "vol"])
@@ -127,7 +128,7 @@ def rank_week(w, t, ind):
 
     # setup proximity — four equal sub-scores
     tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
-    atr = pd.DataFrame(tr).rolling(14).mean().values
+    atr = pd.DataFrame(tr).rolling(14, min_periods=8).mean().values
     hist = atr[-252:]
     s_atr = 100.0 - 100.0 * np.nanmean(hist <= atr[-1], axis=0)
     dd_r = 1 - np.min(c[-20:], axis=0) / np.max(c[-20:], axis=0)
@@ -179,7 +180,9 @@ def rank_week(w, t, ind):
 def run(w, ind, m1, hb):
     dates = list(w["close"].index)
     O, H, L, C, V = (w[k] for k in ("open", "high", "low", "close", "vol"))
-    v50 = V.shift(1).rolling(50).mean()      # prior 50 days: the breakout day is the test, not the baseline
+    # prior 50 days: the breakout day is the test, not the baseline. min_periods matters —
+    # without it one missing bar anywhere in the window returns NaN and silently fails the gate.
+    v50 = V.shift(1).rolling(50, min_periods=25).mean()
 
     budgets = {70: 0.007, 85: 0.009}          # §3.2 steady-state risk budgets
     MAXSTOP, CEIL, MAXN, BAND = 0.08, 0.40, 4, 0.12
