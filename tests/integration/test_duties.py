@@ -1,0 +1,638 @@
+"""End-to-end tests for the nightly job, over a real database.
+
+Each test states its whole world, runs `duties.main()`, and asserts on what the machine concluded.
+The vendor call is stubbed — the earnings calendar is the only outside dependency, and a test that
+needs the network is not a test.
+"""
+import datetime as dt
+import sys
+import pathlib
+
+import pytest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "src"))
+import duties                                                             # noqa: E402
+import fixtures as world                                                     # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def no_vendor(monkeypatch):
+    """The earnings sync is the job's only outside call; tests supply earnings directly."""
+    monkeypatch.setattr(duties, "sync_earnings", lambda conn, hb: 0)
+
+
+def run():
+    assert duties.main() == 0
+
+
+def armed(conn, kind=None, ticker=None):
+    q = "select kind,ticker,sleeve,reason,urgency,trigger_price,limit_price,stop,qty,size_pct," \
+        "score,blocked_by,note,detail from armed where true"
+    args = []
+    if kind:
+        q += " and kind=%s"; args.append(kind)
+    if ticker:
+        q += " and ticker=%s"; args.append(ticker)
+    with conn.cursor() as cur:
+        cur.execute(q, args)
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def book_row(conn, ticker):
+    with conn.cursor() as cur:
+        cur.execute("""select qty, avg_cost, pyramid_step, stop, trail_mode, pivot, target_qty,
+                              confirmed, theme, status, pyramid_stalled_since
+                       from book where ticker=%s""", (ticker,))
+        r = cur.fetchone()
+        if not r:
+            return None
+        return dict(zip(["qty", "avg_cost", "step", "stop", "trail_mode", "pivot", "target_qty",
+                         "confirmed", "theme", "status", "stalled"], r))
+
+
+# --------------------------------------------------------------------------- the fill loop (§4.5)
+
+def test_a_fill_opens_a_position_at_half_size_carrying_its_pivot_and_target(db, fx):
+    """§3.2's first position is 50% of full size. The pivot and the full-size target must travel
+    from the ticket to the book row, or the pyramid has nothing to size off and the hair-trigger
+    has no reference — both were broken until migration 022."""
+    with db.cursor() as cur:
+
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US")
+        world.gate(cur)
+        tid = world.ticket(cur, "AAA.US", qty=100, target=200, trigger=110.0)
+        world.fill(cur, tid, "AAA.US", qty=100, price=110.0)
+        world.balances(cur)
+    db.commit()
+    run()
+
+    row = book_row(db, "AAA.US")
+    assert row["qty"] == 100 and row["target_qty"] == 200        # half now, full is the target
+    assert row["pivot"] == pytest.approx(110.0)
+    assert row["theme"] == "test theme"                          # §2.2 theme rides the ticket
+    assert row["stalled"] is not None                            # §3.2's four-week clock started
+    with db.cursor() as cur:
+        cur.execute("select state from tickets where id=%s", (tid,))
+        assert cur.fetchone()[0] == "provisional"                # §4.5 proposed→approved→provisional
+        cur.execute("select applied_at from transactions where ticker='AAA.US'")
+        assert cur.fetchone()[0] is not None
+
+
+def test_running_twice_does_not_apply_a_fill_twice(db, fx):
+    """Idempotence is the property no amount of code-reading proves. §4.2: all jobs are safe to
+    re-run, and the retry job exists precisely to re-run them."""
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US")
+        world.gate(cur)
+        tid = world.ticket(cur, "AAA.US", qty=100, target=200)
+        world.fill(cur, tid, "AAA.US", qty=100, price=110.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    first = book_row(db, "AAA.US")
+    run()
+    again = book_row(db, "AAA.US")
+    assert first["qty"] == again["qty"] == 100
+    with db.cursor() as cur:
+        cur.execute("select count(*) from book where ticker='AAA.US' and status='open'")
+        assert cur.fetchone()[0] == 1
+
+
+def test_a_sell_fill_closes_the_position(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US")
+        world.gate(cur)
+        world.position(cur, "AAA.US", qty=100)
+        tid = world.ticket(cur, "AAA.US", action="sell", qty=100)
+        world.fill(cur, tid, "AAA.US", side="sell", qty=100, price=115.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert book_row(db, "AAA.US")["status"] == "closed"
+
+
+# --------------------------------------------------------------------------- protection (§3.2/§4.6)
+
+def test_a_crossed_stop_arms_a_protective_exit(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        # the session's low pierces the stop at 101.2
+        world.flat_then_base(cur, "AAA.US", last_close=100.0, last_low=99.0, last_open=100.5)
+        world.gate(cur)
+        world.position(cur, "AAA.US", stop=101.2)
+        world.balances(cur)
+    db.commit()
+    run()
+    rows = armed(db, "exit", "AAA.US")
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "stop" and rows[0]["urgency"] == "protective"
+
+
+def test_a_gap_below_the_stop_limit_arms_a_market_sell_at_open(db, fx):
+    """§4.6: the rare case — price opens below the limit, the resting sell never fills, and the
+    instruction becomes market sell at open."""
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", last_open=90.0, last_close=91.0, last_low=89.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", stop=101.2)          # stop_limit is 0.97 x stop = 98.16
+        world.balances(cur)
+    db.commit()
+    run()
+    row = armed(db, "exit", "AAA.US")[0]
+    assert row["reason"] == "gap" and row["urgency"] == "protective"
+    assert "market sell at open" in row["note"]
+
+
+def test_the_gate_going_off_sends_the_momentum_sleeve_to_cash(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US")
+        world.gate(cur, "OFF")
+        world.position(cur, "AAA.US", stop=None)
+        world.balances(cur)
+    db.commit()
+    run()
+    row = armed(db, "exit", "AAA.US")[0]
+    assert row["reason"] == "gate_off" and row["urgency"] == "protective"
+
+
+def test_an_unconfirmed_breakout_closing_below_its_pivot_exits(db, fx):
+    """§3.2's one hair-trigger while unconfirmed. It keys off the pivot the position was ENTERED
+    on — reading it from `queue` broke as soon as the base re-scanned."""
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", last_close=108.0)     # below the 110 pivot
+        world.gate(cur)
+        world.position(cur, "AAA.US", confirmed=False, pivot=110.0, stop=95.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    row = armed(db, "exit", "AAA.US")[0]
+    assert row["reason"] == "unconfirmed" and row["urgency"] == "protective"
+
+
+def test_a_confirmed_breakout_holding_above_its_pivot_is_left_alone(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", last_close=112.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", confirmed=True, pivot=110.0, stop=95.0, step=1, target=200)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert armed(db, "exit", "AAA.US") == []
+
+
+# --------------------------------------------------------------------------- the pyramid (§3.2)
+
+def test_a_confirmed_breakout_arms_both_pyramid_steps_with_the_ceiling_limit(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", last_close=111.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", confirmed=True, pivot=100.0, step=1, target=200, stop=95.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    adds = sorted(armed(db, "add", "AAA.US"), key=lambda r: r["trigger_price"])
+    assert [r["trigger_price"] for r in adds] == pytest.approx([102.0, 104.0])
+    assert [r["limit_price"] for r in adds] == pytest.approx([105.0, 105.0])
+    assert [r["qty"] for r in adds] == pytest.approx([50.0, 50.0])       # 25% of 200 each
+
+
+def test_an_unconfirmed_breakout_arms_no_pyramid_at_all(db, fx):
+    """§3.2: unconfirmed freezes the pyramid at step 1. Half size, and it stays half size."""
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", last_close=111.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", confirmed=False, pivot=100.0, step=1, target=200, stop=95.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert armed(db, "add", "AAA.US") == []
+
+
+def test_volume_confirms_a_breakout_from_the_bars_themselves(db, fx):
+    """The breakout session is measured against the 50 sessions BEFORE it, never its own."""
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        days = world.flat_then_base(cur, "AAA.US", volume=1_000_000, last_close=111.0,
+                                 last_volume=2_000_000)                    # 2.0x the baseline
+        world.gate(cur)
+        world.position(cur, "AAA.US", opened_days_ago=0, pivot=110.0, stop=95.0, confirmed=None)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert book_row(db, "AAA.US")["confirmed"] is True
+
+
+def test_thin_volume_leaves_a_breakout_unconfirmed_without_exiting_it(db, fx):
+    """The amended §3.2: no exit on volume alone. The old rule exited next morning and cost 4.7%
+    of NAV over two years in the backtest."""
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", volume=1_000_000, last_close=111.0,
+                          last_volume=1_000_000)                           # 1.0x — not 1.4x
+        world.gate(cur)
+        world.position(cur, "AAA.US", opened_days_ago=0, pivot=110.0, stop=95.0, confirmed=None)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert book_row(db, "AAA.US")["confirmed"] is None       # still inside the 3-session window
+    assert armed(db, "exit", "AAA.US") == []                 # and emphatically not an exit
+
+
+# --------------------------------------------------------------------------- stops ratchet (§3.2)
+
+def test_full_size_ratchets_the_stop_to_breakeven_and_arms_the_move(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", level=100.0, last_close=101.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", cost=100.0, stop=95.0, step=3, confirmed=True, target=200,
+                    opened_days_ago=120)
+        world.balances(cur)
+    db.commit()
+    run()
+    row = book_row(db, "AAA.US")
+    assert row["trail_mode"] == "breakeven" and row["stop"] == pytest.approx(100.0)
+    move = armed(db, "stop_move", "AAA.US")[0]
+    assert move["urgency"] == "protective" and move["stop"] == pytest.approx(100.0)
+
+
+def test_a_stop_never_ratchets_down(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", level=100.0, last_close=100.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", cost=100.0, stop=99.0, step=0, confirmed=True,
+                    opened_days_ago=120)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert book_row(db, "AAA.US")["stop"] == pytest.approx(99.0)
+    assert armed(db, "stop_move", "AAA.US") == []
+
+
+# --------------------------------------------------------------------------- entries and caps
+
+def test_a_live_trigger_arms_a_half_size_entry_with_its_stop_pair(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "BBB.US")
+        world.flat_then_base(cur, "BBB.US")
+        world.gate(cur)
+        world.candidate(cur, "BBB.US", mcn=80.0, pivot=125.0, stop=115.0, last_close=120.0)
+        world.queued(cur, "BBB.US", trigger=125.0, stop=115.0, mcn=80.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    row = armed(db, "entry", "BBB.US")[0]
+    assert row["blocked_by"] is None
+    # the nightly re-scan owns these numbers, not the seeded queue row: pivot 110 from the base,
+    # stop at the higher of the contraction low and pivot - 8%
+    assert row["trigger_price"] == pytest.approx(110.0)
+    assert row["stop"] == pytest.approx(110.0 * 0.92, abs=1.5)
+    assert "50% of a" in row["note"]
+    assert row["detail"]["target_qty"] > row["qty"]              # half now, full as the target
+
+
+def test_an_earnings_blackout_blocks_an_entry_without_deleting_it(db, fx):
+    """§3.3. The row still exists so R1 can name it as context — 'at its trigger but reporting
+    Thursday' is information, not noise."""
+    with db.cursor() as cur:
+        world.add_name(cur, "BBB.US")
+        world.flat_then_base(cur, "BBB.US")
+        world.gate(cur)
+        world.candidate(cur, "BBB.US", pivot=125.0, stop=115.0)
+        world.queued(cur, "BBB.US", trigger=125.0, stop=115.0)
+        world.earnings_on(cur, "BBB.US", dt.date.today() + dt.timedelta(days=2))
+        world.balances(cur)
+    db.commit()
+    run()
+    row = armed(db, "entry", "BBB.US")[0]
+    assert "blackout" in row["blocked_by"]
+
+
+def test_two_names_in_a_group_blocks_a_third(db, fx):
+    """§2.2's hard cap — maximum two names per industry group."""
+    with db.cursor() as cur:
+        for t in ("AAA.US", "CCC.US"):
+            world.add_name(cur, t, industry="Steel")
+            world.flat_then_base(cur, t)
+            world.position(cur, t, sleeve="momentum", stop=None, cost=90.0, confirmed=True,
+                            step=3)
+        world.add_name(cur, "BBB.US", industry="Steel")
+        world.flat_then_base(cur, "BBB.US")
+        world.gate(cur)
+        world.candidate(cur, "BBB.US", pivot=125.0, stop=115.0)
+        world.queued(cur, "BBB.US", trigger=125.0, stop=115.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    row = armed(db, "entry", "BBB.US")[0]
+    assert "already 2 names in Steel" in row["blocked_by"]
+
+
+def test_a_full_sleeve_swaps_when_the_challenger_clears_the_ten_point_margin(db, fx):
+    """§3.3 displacement, both legs armed: the weakest incumbent exits, the challenger enters."""
+    with db.cursor() as cur:
+        for i, t in enumerate(("H1.US", "H2.US", "H3.US", "H4.US")):
+            world.add_name(cur, t, industry=f"Group{i}")
+            world.flat_then_base(cur, t)
+            world.position(cur, t, sleeve="momentum", stop=None, qty=200, cost=90.0,
+                            confirmed=True, step=3)
+            world.candidate(cur, t, mcn=60.0 + i, rank=10 + i)       # H1 weakest at 60
+        world.add_name(cur, "BBB.US", industry="Fresh")
+        world.flat_then_base(cur, "BBB.US")
+        world.gate(cur)
+        world.candidate(cur, "BBB.US", mcn=85.0, pivot=125.0, stop=115.0, rank=1)
+        world.queued(cur, "BBB.US", trigger=125.0, stop=115.0, mcn=85.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    swap = [r for r in armed(db, "exit") if r["reason"] == "swap"]
+    assert len(swap) == 1 and swap[0]["ticker"] == "H1.US"
+    assert armed(db, "entry", "BBB.US")[0]["blocked_by"] is None
+
+
+def test_a_full_sleeve_with_no_weak_incumbent_blocks_instead(db, fx):
+    with db.cursor() as cur:
+        for i, t in enumerate(("H1.US", "H2.US", "H3.US", "H4.US")):
+            world.add_name(cur, t, industry=f"Group{i}")
+            world.flat_then_base(cur, t)
+            world.position(cur, t, sleeve="momentum", stop=None, qty=200, cost=90.0,
+                            confirmed=True, step=3)
+            world.candidate(cur, t, mcn=84.0, rank=10 + i)
+        world.add_name(cur, "BBB.US", industry="Fresh")
+        world.flat_then_base(cur, "BBB.US")
+        world.gate(cur)
+        world.candidate(cur, "BBB.US", mcn=85.0, pivot=125.0, stop=115.0, rank=1)
+        world.queued(cur, "BBB.US", trigger=125.0, stop=115.0, mcn=85.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert [r for r in armed(db, "exit") if r["reason"] == "swap"] == []
+    assert "no incumbent is 10 points weaker" in armed(db, "entry", "BBB.US")[0]["blocked_by"]
+
+
+def test_no_entry_is_armed_while_the_gate_is_off(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "BBB.US")
+        world.flat_then_base(cur, "BBB.US")
+        world.gate(cur, "OFF")
+        world.candidate(cur, "BBB.US", pivot=125.0, stop=115.0)
+        world.queued(cur, "BBB.US", trigger=125.0, stop=115.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert armed(db, "entry") == []
+
+
+# --------------------------------------------------------------------------- housekeeping
+
+def test_a_blackout_cancels_a_live_entry_order_and_says_stops_remain(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US")
+        world.gate(cur)
+        world.ticket(cur, "AAA.US", state="approved", trigger=110.0)
+        world.earnings_on(cur, "AAA.US", dt.date.today() + dt.timedelta(days=1))
+        world.balances(cur)
+    db.commit()
+    run()
+    row = armed(db, "cancel", "AAA.US")[0]
+    assert row["urgency"] == "protective"
+    assert "protective stops remain" in row["note"]
+
+
+def test_the_brief_records_effective_bets_and_flags_a_concentrated_book(db, fx):
+    """§2.2: printed on every draft ticket, warned below 4, and never a blocker."""
+    with db.cursor() as cur:
+        for t in ("AAA.US", "CCC.US"):
+            world.add_name(cur, t, industry=f"G{t}")
+            world.flat_then_base(cur, t, wobble=0.03)      # identical series → perfectly correlated
+            world.position(cur, t, sleeve="momentum", stop=None, cost=90.0, confirmed=True,
+                            step=3)
+        world.gate(cur)
+        world.balances(cur)
+    db.commit()
+    run()
+    with db.cursor() as cur:
+        cur.execute("""select freshness, summary, detail from briefs where kind='nightly'
+                       order by id desc limit 1""")
+        freshness, summary, detail = cur.fetchone()
+    assert detail["effective_bets"] == pytest.approx(1.0, abs=0.05)   # two identical names = 1 bet
+    assert detail["effective_bets_warn"] is True
+    assert freshness
+
+
+def test_a_stalled_pyramid_completes_on_a_new_base_rather_than_exiting(db, fx):
+    """§3.2: it 'either completes on the next base or exits'. With a valid base, completion wins."""
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", last_close=100.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", step=1, target=200, qty=100, confirmed=True, stop=90.0,
+                    stalled_days_ago=40, opened_days_ago=40)
+        world.candidate(cur, "AAA.US", state="BUY", pivot=110.0, stop=101.2, mcn=75.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    stall_add = [r for r in armed(db, "add", "AAA.US") if r["reason"] == "stall"]
+    assert len(stall_add) == 1 and stall_add[0]["qty"] == pytest.approx(100.0)   # 200 target - 100
+    assert [r for r in armed(db, "exit", "AAA.US") if r["reason"] == "stall"] == []
+
+
+def test_a_stalled_pyramid_with_no_base_exits(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        # a close above the pivot spends the base (§3.2), so there is nothing to complete on
+        world.flat_then_base(cur, "AAA.US", last_close=115.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", step=1, target=200, qty=100, confirmed=True, stop=90.0,
+                    stalled_days_ago=40, opened_days_ago=40)
+        world.candidate(cur, "AAA.US", state="WAIT", pivot=None, stop=None, mcn=75.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert [r for r in armed(db, "exit", "AAA.US") if r["reason"] == "stall"]
+
+
+def test_stale_bars_suppress_entries_but_never_protection(db, fx):
+    """§4.7's law, and the one that most needs a test: stale data ⇒ no new tickets, protective
+    moves only. The brief still sends — silence is the alarm."""
+    old = world.trading_days(n=300, end=dt.date.today() - dt.timedelta(days=10))
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", days=old, last_close=100.0, last_low=99.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", stop=101.2)
+        world.add_name(cur, "BBB.US")
+        world.flat_then_base(cur, "BBB.US", days=old)
+        world.candidate(cur, "BBB.US", pivot=125.0, stop=115.0)
+        world.queued(cur, "BBB.US", trigger=125.0, stop=115.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    with db.cursor() as cur:
+        cur.execute("""select freshness, detail from briefs where kind='nightly'
+                       order by id desc limit 1""")
+        freshness, detail = cur.fetchone()
+    assert "stale" in freshness and detail["tickets_allowed"] is False
+    assert [r for r in armed(db, "exit", "AAA.US") if r["urgency"] == "protective"]
+
+
+# --------------------------------------------------------------------------- compounders (§3.1)
+
+def bench_row(cur, ticker, *, ccn=80.0, hurdle=100.0, last_close=95.0, approved=True,
+              confidence="full"):
+    cur.execute("""insert into bench (ticker,rank,cohort,ccn,c1_pass,hurdle_price,last_close,
+                                      gap_to_hurdle,approved,data_confidence)
+                   values (%s,1,'large',%s,true,%s,%s,%s,%s,%s)""",
+                (ticker, ccn, hurdle, last_close, (last_close - hurdle) / hurdle, approved,
+                 confidence))
+
+
+def test_an_unapproved_bench_name_at_its_hurdle_arms_nothing(db, fx):
+    """§3.1: nothing joins the bench without Zak's ruling, so nothing is bought on it either.
+    This is why the compounder sleeve reads zero until the first R5 — by design, not by accident."""
+    with db.cursor() as cur:
+        world.add_name(cur, "CMP.US")
+        world.flat_then_base(cur, "CMP.US", level=95.0)
+        world.gate(cur)
+        bench_row(cur, "CMP.US", approved=False)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert armed(db, "entry", "CMP.US") == []
+
+
+def test_an_approved_name_below_its_hurdle_arms_a_full_size_entry(db, fx):
+    """Compounders enter at full size in a single order (§3.1) — no pyramid, no half position."""
+    with db.cursor() as cur:
+        world.add_name(cur, "CMP.US")
+        world.flat_then_base(cur, "CMP.US", level=95.0)
+        world.gate(cur)
+        bench_row(cur, "CMP.US", ccn=82.0, hurdle=100.0, last_close=95.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    row = armed(db, "entry", "CMP.US")[0]
+    assert row["sleeve"] == "compounders" and row["blocked_by"] is None
+    assert row["size_pct"] == pytest.approx(0.12)        # §3.1 flat 12% until an R5 ruling
+    assert row["limit_price"] == pytest.approx(95.0)
+
+
+def test_a_partially_scored_compounder_needs_manual_sign_off(db, fx):
+    """§3.3: an incompletely-scored name is capped at the bottom of its band and requires manual
+    sign-off. It must not arm as an ordinary entry."""
+    with db.cursor() as cur:
+        world.add_name(cur, "CMP.US")
+        world.flat_then_base(cur, "CMP.US", level=95.0)
+        world.gate(cur)
+        bench_row(cur, "CMP.US", confidence="2of3")
+        world.balances(cur)
+    db.commit()
+    run()
+    assert "sign-off" in armed(db, "entry", "CMP.US")[0]["blocked_by"]
+
+
+def test_a_held_compounder_ten_percent_below_hurdle_arms_a_half_size_add(db, fx):
+    """§3.1's averaging-down tiers: 5-15% below the hurdle adds 50% of original size."""
+    with db.cursor() as cur:
+        world.add_name(cur, "CMP.US")
+        world.flat_then_base(cur, "CMP.US", level=90.0)
+        world.gate(cur)
+        bench_row(cur, "CMP.US", ccn=80.0, hurdle=100.0, last_close=90.0)
+        world.position(cur, "CMP.US", sleeve="compounders", account="RRSP", qty=100, cost=100.0,
+                       stop=None, step=0, pivot=None, target=None, opened_days_ago=200)
+        world.balances(cur)
+    db.commit()
+    run()
+    add = armed(db, "add", "CMP.US")[0]
+    assert add["sleeve"] == "compounders"
+    assert add["size_pct"] == pytest.approx(0.06)         # 50% of a 12% position
+    assert "50% of original size" in add["note"]
+
+
+def test_a_compounder_twenty_percent_below_hurdle_adds_a_full_size(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "CMP.US")
+        world.flat_then_base(cur, "CMP.US", level=80.0)
+        world.gate(cur)
+        bench_row(cur, "CMP.US", ccn=80.0, hurdle=100.0, last_close=80.0)
+        world.position(cur, "CMP.US", sleeve="compounders", account="RRSP", qty=100, cost=100.0,
+                       stop=None, step=0, pivot=None, target=None, opened_days_ago=200)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert armed(db, "add", "CMP.US")[0]["size_pct"] == pytest.approx(0.12)
+
+
+def test_a_compounder_carries_no_stop_and_no_trail(db, fx):
+    """§3.1: no trailing stops, no market gate — weakness is the opportunity."""
+    with db.cursor() as cur:
+        world.add_name(cur, "CMP.US")
+        world.flat_then_base(cur, "CMP.US", level=95.0, last_close=70.0)   # deeply down
+        world.gate(cur, "OFF")                                             # and the gate is shut
+        world.position(cur, "CMP.US", sleeve="compounders", qty=100, cost=100.0, stop=None,
+                       step=0, pivot=None, target=None)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert armed(db, "stop_move", "CMP.US") == []
+    assert [r for r in armed(db, "exit", "CMP.US") if r["reason"] == "gate_off"] == []
+
+
+# --------------------------------------------------------------------------- earnings (§3.3)
+
+def test_a_momentum_position_without_the_cushion_exits_before_its_print(db, fx):
+    """§3.3: it holds through only at 1.08x average cost — one full stop-width of profit."""
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", level=103.0, last_close=103.0)   # +3% on a 100 cost
+        world.gate(cur)
+        world.position(cur, "AAA.US", cost=100.0, stop=90.0, confirmed=True, step=3)
+        world.earnings_on(cur, "AAA.US", dt.date.today() + dt.timedelta(days=1))
+        world.balances(cur)
+    db.commit()
+    run()
+    row = [r for r in armed(db, "exit", "AAA.US") if r["reason"] == "earnings"]
+    assert len(row) == 1 and "cushion" in row[0]["note"]
+
+
+def test_a_momentum_position_with_the_cushion_holds_through(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", level=112.0, last_close=112.0)   # +12%
+        world.gate(cur)
+        world.position(cur, "AAA.US", cost=100.0, stop=90.0, confirmed=True, step=3)
+        world.earnings_on(cur, "AAA.US", dt.date.today() + dt.timedelta(days=1))
+        world.balances(cur)
+    db.commit()
+    run()
+    assert [r for r in armed(db, "exit", "AAA.US") if r["reason"] == "earnings"] == []
+
+
+# --------------------------------------------------------------------------- §2.3 the hard caps
+
+def test_a_position_that_would_exceed_the_single_name_cap_is_blocked(db, fx):
+    """§2.3's 25% ceiling, entry-only. Config seeded it long ago; nothing read it until now."""
+    with db.cursor() as cur:
+        world.add_name(cur, "BBB.US")
+        world.flat_then_base(cur, "BBB.US")
+        world.gate(cur)
+        world.candidate(cur, "BBB.US", mcn=90.0)
+        world.queued(cur, "BBB.US", trigger=110.0, stop=109.9, mcn=90.0)   # a 0.1% stop
+        world.balances(cur)
+        cur.execute("""insert into config (key,value,note,set_by)
+                       values ('single_name_entry_cap','0.05','test override','test')""")
+    db.commit()
+    run()
+    assert "single-name entry cap" in armed(db, "entry", "BBB.US")[0]["blocked_by"]

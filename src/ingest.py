@@ -4,16 +4,13 @@ Heartbeat: every run writes a runs row — green | amber | red. DRY_RUN fetches 
 """
 import os, sys, json, time, datetime as dt, urllib.request, urllib.error
 import psycopg
+sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent))
+from db import db_url
 
 API = "https://eodhd.com/api/eod/{t}?api_token={k}&fmt=json&from={f}"
 JOB = os.environ.get("JOB_NAME", "nightly-ingest")
 DRY = os.environ.get("DRY_RUN", "false").lower() in ("1", "true", "yes")
 
-def db_url():
-    url = os.environ["DATABASE_URL"]
-    if "sslmode" not in url:
-        url += ("&" if "?" in url else "?") + "sslmode=require"
-    return url
 
 def get_config(cur, key, default):
     cur.execute("select value from config where key=%s order by set_at desc limit 1", (key,))

@@ -10,8 +10,21 @@ EODHD = "https://eodhd.com/api"
 
 
 def db_url():
+    """The connection string, with TLS required unless told otherwise.
+
+    Handles both shapes Postgres accepts: a URI (`postgresql://…`) and a keyword/value DSN
+    (`host=… dbname=…`). The old version appended `?sslmode=require` unconditionally, which turns
+    a keyword/value DSN's database name into `postgres?sslmode=require` — found the first time a
+    job was pointed at a local test database. `DB_SSLMODE` exists for exactly that case; production
+    sets nothing and gets `require`.
+    """
     u = os.environ["DATABASE_URL"]
-    return u + ("" if "sslmode" in u else ("&" if "?" in u else "?") + "sslmode=require")
+    mode = os.environ.get("DB_SSLMODE", "require")
+    if not mode or "sslmode" in u:
+        return u
+    if "://" in u:
+        return u + ("&" if "?" in u else "?") + f"sslmode={mode}"
+    return f"{u} sslmode={mode}"
 
 
 def connect():

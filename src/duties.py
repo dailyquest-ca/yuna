@@ -478,9 +478,11 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                                 note=f"displaced by {tk} — {score:.1f} vs {swap['score']:.1f}, "
                                      f"+{swap['margin']:.1f} clears the §3.3 margin")
                     else:
-                        blocked = ("§2.1 — sleeve full and no incumbent is 10 points weaker"
-                                   if positions >= caps["max_positions"]
-                                   else "§2.1 — momentum sleeve has no room")
+                        full = (f"§2.1 — {positions} positions open"
+                                if positions >= caps["max_positions"]
+                                else "§2.1 — momentum sleeve has no room")
+                        blocked = (f"{full}; no incumbent is "
+                                   f"{caps['displace_margin']:.0f} points weaker (§3.3)")
                 elif group_count.get(industry or "unknown", 0) >= caps["per_group"]:
                     blocked = f"§2.2 — already {caps['per_group']} names in {industry}"
                 elif sg.in_blackout(dt.date.today(), report, holidays=holidays):
@@ -560,9 +562,11 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                             note=f"displaced by {tk} — CCN {ccn_score:.1f} vs "
                                  f"{swap['score']:.1f}, +{swap['margin']:.1f} clears §3.3")
                 else:
-                    blocked = ("§2.1 — sleeve full and no incumbent is 10 points weaker"
-                               if positions >= caps["max_positions"]
-                               else "§2.1 — compounder sleeve has no room")
+                    full = (f"§2.1 — {positions} positions open"
+                            if positions >= caps["max_positions"]
+                            else "§2.1 — compounder sleeve has no room")
+                    blocked = (f"{full}; no incumbent is "
+                               f"{caps['displace_margin']:.0f} points weaker (§3.3)")
             elif group_count.get(industry or "unknown", 0) >= caps["per_group"]:
                 blocked = f"§2.2 — already {caps['per_group']} names in {industry}"
             elif in_bo:
@@ -651,7 +655,11 @@ def book_effective_bets(conn, bars, fx):
 
 def freshness(conn):
     with conn.cursor() as cur:
-        cur.execute("select max(d) from prices")
+        # stock bars only. FX and the index come from the same nightly pull, so in a clean run this
+        # is the same date — but a half-failed ingest that landed USDCAD and no equities would
+        # otherwise read as fresh, and "stale data ⇒ no new tickets" would quietly not apply.
+        cur.execute("""select max(p.d) from prices p join universe u on u.ticker = p.ticker
+                       where u.kind = 'stock'""")
         last_bar = cur.fetchone()[0]
         cur.execute("""select distinct on (job) job, status from runs
                        where started_at > now() - interval '36 hours' order by job, id desc""")

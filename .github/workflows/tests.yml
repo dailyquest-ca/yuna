@@ -1,6 +1,8 @@
 name: tests
-# The formula tests need no database and no vendor key, so they run on every push and every PR.
-# A red suite here means a number that sizes real money changed without anyone deciding to.
+# Two suites, both on every push. The formula tests need nothing; the integration tests need a
+# throwaway Postgres, which is why one lives in a service container here and not in the plan's
+# five scheduled jobs. Every defect that has actually bitten this build lived at a seam, and a seam
+# is only visible when the job runs over data.
 on:
   push:
   pull_request:
@@ -8,13 +10,29 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: yuna-test
+          POSTGRES_DB: yuna_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # a throwaway database, so TLS is off — production sets nothing and gets sslmode=require
+      DATABASE_URL: postgresql://postgres:yuna-test@localhost:5432/yuna_test
+      DB_SSLMODE: disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: python -m pytest tests/ -q
+      - name: formulas
+        run: python -m pytest tests/ -q --ignore=tests/integration
+      - name: integration — real migrations, real jobs, real database
+        run: python -m pytest tests/integration -q
       - name: compile every job
         run: python -m compileall -q src/

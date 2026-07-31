@@ -1,11 +1,10 @@
-"""Apply migrations/*.sql in order, once each. Tracker: _migrations table."""
-import os, sys, pathlib, psycopg
+"""Apply migrations/*.sql in order, once each. Tracker: _migrations table.
 
-def db_url():
-    url = os.environ["DATABASE_URL"]
-    if "sslmode" not in url:
-        url += ("&" if "?" in url else "?") + "sslmode=require"
-    return url
+DRY_RUN lists what would be applied and applies nothing (§4.2 — all jobs carry it).
+"""
+import os, sys, pathlib, psycopg
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from db import db_url, dry
 
 def main():
     mig_dir = pathlib.Path(__file__).resolve().parent.parent / "migrations"
@@ -16,6 +15,12 @@ def main():
             conn.commit()
             cur.execute("select name from _migrations")
             done = {r[0] for r in cur.fetchall()}
+        pending = [p for p in files if p.name not in done]
+        if dry():
+            for p in pending:
+                print(f"would apply {p.name}")
+            print(f"migrate: dry run — {len(pending)} pending, nothing written")
+            return
         for p in files:
             if p.name in done:
                 print(f"skip   {p.name} (already applied)"); continue

@@ -6,14 +6,13 @@ fundamentals.py (the sweep) and score.py (Gate C1 -> CCN -> hurdle -> bench).
 FORCE=true skips the 1st-Saturday guard (manual runs)."""
 import os, sys, json, time, traceback, datetime as dt, urllib.request, urllib.error
 import psycopg
+sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent))
+from db import db_url
 
 DRY = os.environ.get("DRY_RUN","false").lower() in ("1","true","yes")
 FORCE = os.environ.get("FORCE","false").lower() in ("1","true","yes")
 K = os.environ["EODHD_API_KEY"]
 
-def db_url():
-    u=os.environ["DATABASE_URL"]
-    return u + ("" if "sslmode" in u else ("&" if "?" in u else "?")+"sslmode=require")
 
 def get(url, calls, tries=3):
     for a in range(tries):
