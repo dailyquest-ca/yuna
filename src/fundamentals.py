@@ -18,6 +18,7 @@ from db import connect, config, get, dry, Heartbeat
 
 WORKERS = int(os.environ.get("WORKERS", "8"))
 BATCH = 100
+TOLERANCE = 0.05          # |engine - revenue CAGR| floor before the engine is distrusted
 FIN_SECTORS = {"financial services", "financials", "financial"}
 FIN_WORDS = ("bank", "insur", "capital markets", "credit services", "reinsur",
              "savings", "thrift", "mortgage finance")
@@ -144,7 +145,9 @@ def extract(ticker, r):
     rev_cagr = cagr(rev_new, rev_old, span)
     agrees = None
     if engine is not None and rev_cagr is not None:
-        agrees = abs(engine - rev_cagr) <= max(0.10, 0.5 * abs(rev_cagr))
+        # 10pp was too loose in absolute terms: a 7% grower squeaked through and then
+        # underwrote at 16%. Growth dominates the hurdle, so the floor is 5pp.
+        agrees = abs(engine - rev_cagr) <= max(TOLERANCE, 0.5 * abs(rev_cagr))
 
     # ---- cash conversion
     def fcf_of(row):
@@ -236,6 +239,7 @@ def extract(ticker, r):
         currency=G.get("CurrencyCode"), sector=sector, industry=industry,
         gic_sector=gic_s, gic_industry=gic_i,
         ipo_date=day(G.get("IPODate")), is_financial=is_fin,
+        primary_ticker=G.get("PrimaryTicker"), quote_ok=None,
         market_cap=mcap, shares_out=shares, fiscal_years=n_years,
         ebit_3y=ebit_3y, tax_rate=tax_rate, nopat_3y=nopat_3y,
         invested_capital=ic_avg, invested_capital_ex_gw=ic_avg_ex,
@@ -267,7 +271,7 @@ COLS = ["ticker", "filing_date", "period_end", "currency", "sector", "industry",
         "ni_3y", "cash_conversion", "fcf_ttm", "fcf_positive", "net_issuance_3y", "net_debt",
         "ebitda", "net_debt_ebitda", "debt_grows_faster", "goodwill", "goodwill_jump", "c1_pass",
         "c1_fail_reason", "pfcf_current", "pfcf_median", "pfcf_obs", "eps_yoy_latest",
-        "eps_yoy_prev", "m4_pass", "data_confidence", "raw"]
+        "eps_yoy_prev", "m4_pass", "data_confidence", "primary_ticker", "quote_ok", "raw"]
 
 
 def flush(conn, rows, errors):
@@ -285,6 +289,10 @@ def flush(conn, rows, errors):
         with conn.cursor() as cur:
             cur.executemany(sql, [tuple(r[c] for c in COLS) for r in rows])
             cur.executemany(upd, [(r["name"], r["sector"], r["industry"], r["market_cap"], r["ticker"]) for r in rows])
+        cur.execute("""update fundamentals f set quote_ok =
+                         (f.currency is not null and u.currency is not null and f.currency = u.currency)
+                       from universe u where u.ticker = f.ticker and f.ticker = any(%s)""",
+                    ([r["ticker"] for r in rows],))
         conn.commit()
         return len(rows)
     except Exception as e:

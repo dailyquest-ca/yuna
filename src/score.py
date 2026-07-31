@@ -89,11 +89,12 @@ def main():
                 fair_cap = float(config(cur, "hurdle_fair_multiple_cap", 30))
                 fair_cap_short = float(config(cur, "hurdle_fair_multiple_cap_short", 25))
                 floor = float(config(cur, "hurdle_min_return", 0.15))
+                tol = float(config(cur, "engine_agreement_tolerance", 0.05))
 
                 cur.execute("""select f.ticker, f.engine, f.cash_conversion, f.market_cap, f.shares_out,
                                       f.fcf_ttm, f.c1_pass, f.c1_fail_reason, f.roic, f.reinvest_rate,
                                       f.pfcf_current, f.data_confidence, f.goodwill_jump,
-                                      f.engine_agrees, f.revenue_cagr_3y, f.raw, u.is_holding
+                                      f.engine_agrees, f.revenue_cagr_3y, f.quote_ok, f.raw, u.is_holding
                                from v_fundamentals_latest f
                                join universe u on u.ticker=f.ticker
                                where u.kind='stock' and u.status='active' and (u.in_l0 or u.is_holding)""")
@@ -116,7 +117,7 @@ def main():
 
             out, unscored = [], []
             for (tk, engine, cc, mcap, shares, fcf, c1, c1why, roic, reinv,
-                 pfcf_cur, conf, gw_jump, agrees, rev_cagr, raw, is_hold) in rows:
+                 pfcf_cur, conf, gw_jump, agrees, rev_cagr, quote_ok, raw, is_hold) in rows:
                 parts = [("engine", eng_p.get(tk)), ("cash_conv", cc_p.get(tk)),
                          ("size", size_p.get(tk))]
                 have = [(n, v) for n, v in parts if v is not None]
@@ -130,11 +131,13 @@ def main():
                 ccn = sum(v for _, v in have) / len(have)      # equal weight, renormalized (§3.3)
                 confidence = conf if len(have) == 3 else "2of3"
 
-                raw_d = raw if isinstance(raw, dict) else (json.loads(raw) if raw else {})
+                # statements in one currency divided by a market cap in another is not a
+                # multiple, it is a category error — so it produces no hurdle at all (§009)
+                raw_d = {} if quote_ok is False else (raw if isinstance(raw, dict) else (json.loads(raw) if raw else {}))
                 pfcf_med, obs = pfcf_history(raw_d, closes.get(tk, {}))
                 if obs >= 8 and pfcf_med:
                     fair = min(pfcf_med, fair_cap)
-                elif pfcf_cur:
+                elif pfcf_cur and quote_ok is not False:
                     fair = min(pfcf_cur, fair_cap_short)
                 else:
                     fair = None
@@ -142,6 +145,10 @@ def main():
                 # it must agree with observed revenue growth. When it doesn't — usually a net-cash
                 # balance sheet shrinking invested capital toward zero and sending ROIC to the moon
                 # — we underwrite on the number we can check, never on the flattering one.
+                # agreement is re-decided here, not read from the sweep: the tolerance is a
+                # scoring policy and belongs with the scorer, where changing it costs no API calls
+                if engine is not None and rev_cagr is not None:
+                    agrees = abs(engine - rev_cagr) <= max(tol, 0.5 * abs(rev_cagr))
                 g = min(growth_cap, engine) if engine is not None else 0.0
                 if engine is not None and agrees is False:
                     g = max(0.0, min(g, rev_cagr if rev_cagr is not None else 0.0))
@@ -159,7 +166,7 @@ def main():
                     engine_growth=g, fair_multiple=fair,
                     derating_drag=(max(0.0, 1 - (fair / pfcf_cur) ** 0.2) if fair and pfcf_cur else None),
                     last_close=px, gap_to_hurdle=gap,
-                    data_confidence=("flagged" if agrees is False else confidence),
+                    data_confidence=("flagged" if (agrees is False or quote_ok is False) else confidence),
                     serial_acquirer=bool(gw_jump),
                     pfcf_obs=obs, engine_agrees=agrees, is_holding=is_hold))
 
