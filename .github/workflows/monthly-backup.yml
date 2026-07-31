@@ -1,0 +1,48 @@
+name: monthly-backup
+on:
+  schedule:
+    - cron: '0 14 * * 6'   # weekly Sat 14:00 UTC; in-job guard keeps real runs to the 1st Saturday
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'back up regardless of date'
+        default: 'false'
+permissions:
+  contents: write
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install "psycopg[binary]==3.2.*"
+      - name: 1st-Saturday guard
+        id: guard
+        run: |
+          # GitHub cron ORs dom and dow — never trust '1-7 * 6'. Guard the date here.
+          if [ "${{ inputs.force }}" = "true" ] || [ "$(date -u +%d)" -le 07 ]; then
+            echo "run=true" >> $GITHUB_OUTPUT
+          else
+            echo "run=false" >> $GITHUB_OUTPUT; echo "not the 1st Saturday — backup skipped"
+          fi
+      - name: dump
+        if: steps.guard.outputs.run == 'true'
+        run: set -o pipefail; python src/backup.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: commit
+        if: steps.guard.outputs.run == 'true'
+        run: |
+          git config user.name  "yuna-backup[bot]"
+          git config user.email "yuna-backup@users.noreply.github.com"
+          git add backups/
+          git diff --cached --quiet || git commit -m "backup: $(date -u +%Y-%m-%d) (bars excluded)"
+          git push
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py monthly-backup /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

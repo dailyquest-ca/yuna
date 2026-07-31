@@ -23,6 +23,12 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: daily duties
+        run: set -o pipefail; python src/daily.py 2>&1 | tee -a /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py nightly-ingest /tmp/job.out
