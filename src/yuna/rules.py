@@ -25,6 +25,7 @@ it cannot rot without turning the build red.
 """
 from __future__ import annotations
 
+import ast
 import dataclasses
 import re
 from collections.abc import Callable
@@ -128,6 +129,82 @@ def sql_sites(migrations: Path | None = None) -> list[Site]:
     return found
 
 
+JOB_MODULES = ("ingest", "daily", "rank", "funnel", "fundamentals", "score",
+               "phase0", "backup", "migrate", "db", "report_fail")
+
+
+def reachable_policy_functions(src: Path | None = None) -> set[str]:
+    """Which functions in `policy` a running job can actually reach.
+
+    `wired` used to be a boolean somebody typed, and it was wrong in nine places:
+    the rule really was enforced in the job, but by the job's own inline copy, not
+    by the policy function that claimed the clause. Two implementations existed and
+    only the untested one ran — which is the precise failure the ledger was built
+    to prevent, reproduced inside the ledger itself.
+
+    So it is derived instead. This walks the import aliases in each job module,
+    collects the policy functions they call directly, then closes over calls
+    *within* policy — `ccn` reaches `composite`, `ratchet_stop` reaches
+    `is_euphoric`, and those are genuinely live.
+
+    Static, so it cannot see a call made through getattr or a dispatch table. None
+    exist here, and if one is ever added the honest fix is to stop doing that
+    rather than to weaken this.
+    """
+    root = src or Path(__file__).resolve().parent
+    policy_src = root / "policy.py"
+    if not policy_src.is_file():
+        return set()
+    tree = ast.parse(policy_src.read_text(encoding="utf-8"))
+    defs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+    reached: set[str] = set()
+    for name in JOB_MODULES:
+        path = root / f"{name}.py"
+        if not path.is_file():
+            continue
+        mod = ast.parse(path.read_text(encoding="utf-8"))
+        alias: dict[str, str] = {}
+        for node in ast.walk(mod):
+            if isinstance(node, ast.ImportFrom) and node.module == "yuna.policy":
+                for a in node.names:
+                    alias[a.asname or a.name] = a.name
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id in alias):
+                reached.add(alias[node.func.id])
+
+    changed = True
+    while changed:                                  # close over policy-internal calls
+        changed = False
+        for fn in list(reached):
+            body = defs.get(fn)
+            if body is None:
+                continue
+            for node in ast.walk(body):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id in defs and node.func.id not in reached):
+                    reached.add(node.func.id)
+                    changed = True
+    return reached
+
+
+def is_wired(key: str, src: Path | None = None) -> bool:
+    """Whether a running job actually reaches this clause's implementation.
+
+    A site in a job module is live by definition — the job is the caller. A site in
+    `policy` is live only if some job reaches it.
+    """
+    reached = reachable_policy_functions(src)
+    for s in sites():
+        if s.key != key:
+            continue
+        if not s.module.endswith("policy"):
+            return True
+        if s.qualname.split(".")[0] in reached:
+            return True
+    return False
+
+
 def clauses() -> dict[str, Clause]:
     return dict(_BY_KEY)
 
@@ -172,10 +249,12 @@ CLAUSES: tuple[Clause, ...] = (
     Clause("2.1/sleeve-counts",
            "compounders 60% / 4-5 names / 12-15% entries; momentum up to 40% / 3-4 names / "
            "8-12% entries; the momentum ceiling is not a quota",
-           BUILT, wired=True),
+           BUILT,
+           note="DUAL IMPLEMENTATION: phase0 enforces the counts and sleeve room with its own inline accumulators; policy.sleeve_has_room is not called"),
     Clause("2.2/max-2-per-group",
            "at most 2 names per vendor industry group",
-           BUILT, wired=True),
+           BUILT,
+           note="DUAL IMPLEMENTATION: phase0's admit() closure enforces it inline against a config value; policy.group_has_room is not called"),
     Clause("2.2/theme-cap-35",
            "no new capital enters a theme above 35% of NAV; a winner that grows past is not "
            "forced out",
@@ -190,11 +269,13 @@ CLAUSES: tuple[Clause, ...] = (
            "jobs arm candidates; only sessions write tickets, because theme is judgment",
            OPEN, note="phase0.py writes tickets directly"),
     Clause("2.3/position-floor", "minimum position 4% of NAV on intended full size",
-           BUILT, wired=True),
+           BUILT,
+           note="DUAL IMPLEMENTATION: phase0 compares against a config floor inline; policy.size_is_admissible is not called, so the 25% ceiling is enforced nowhere"),
     Clause("2.3/single-name-cap", "single-name ceiling 25% of NAV, entry only", BUILT),
     Clause("2.3/risk-not-dollars",
            "risk = position size x distance to stop; sizing is compared on risk",
-           BUILT, wired=True, note="momentum only; compounders size flat per §3.1"),
+           BUILT,
+           note="DUAL IMPLEMENTATION: phase0 computes budget/stop inline; policy.momentum_size is not called"),
     Clause("2.4/no-averaging-down-momentum",
            "the momentum sleeve never averages down",
            OPEN, note="not enforced anywhere"),
@@ -221,9 +302,8 @@ CLAUSES: tuple[Clause, ...] = (
     Clause("3.1/c1-gate", "Gate C1 eligibility on the coarse L0", BUILT, wired=True),
     Clause("3.1/c1-excludes-financials",
            "banks and insurers are out of the compounder universe",
-           BUILT, wired=True,
-           note="vendor industry prefix, not sector — the sector also holds exchanges and "
-                "payment networks, which are exactly the toll-booth compounders this wants"),
+           BUILT,
+           note="DUAL IMPLEMENTATION, AND THE LIVE ONE IS WRONG: fundamentals.py excludes the whole Financial Services sector plus a word list naming 'capital markets' and 'credit services' — which §3.1 says remain eligible. policy.is_excluded_financial is correct, tested, and never called"),
     Clause("3.1/ccn-score",
            "CCN v1.0: engine, cash conversion, inverted log size — equal weight, L0 percentiles",
            BUILT, wired=True),
@@ -283,7 +363,8 @@ CLAUSES: tuple[Clause, ...] = (
     Clause("3.1/compounder-sizing",
            "CCN 70-84 sizes 12% of NAV and 85+ sizes 15%, flat 12% until Zak unlocks the upper "
            "tier at a monthly approval",
-           BUILT, wired=True),
+           BUILT,
+           note="DUAL IMPLEMENTATION: phase0 reads a flat size from config; policy.compounder_size is not called, so the 15%-tier unlock exists only in policy"),
     Clause("3.1/averaging-down",
            "CCN >= 70 and below hurdle: 5-15% below adds 50% of original size, more than 15% "
            "below adds 100%, at most 2 adds per name per 12 months",
@@ -344,7 +425,8 @@ CLAUSES: tuple[Clause, ...] = (
            OPEN),
     Clause("3.2/stop-8pct",
            "initial stop is the higher of the final-contraction low or entry - 8%, never wider",
-           BUILT, wired=True),
+           BUILT,
+           note="DUAL IMPLEMENTATION: phase0 caps the stop distance inline; policy.initial_stop is not called, and no caller applies the final-contraction-low branch"),
     Clause("3.2/euphoria-ratchet",
            "a close more than 2 standard deviations above the own 50-day tightens the trail "
            "to 5% below the highest close",
@@ -359,7 +441,8 @@ CLAUSES: tuple[Clause, ...] = (
     Clause("3.2/momentum-sizing",
            "risk budget 0.7% of NAV at MCN 70-84 and 0.9% at 85+, halved to 0.5%/0.7% for the "
            "first 90 days; size = budget / stop distance, capped by the band",
-           BUILT, wired=True, note="running the start-low budgets"),
+           BUILT,
+           note="DUAL IMPLEMENTATION: phase0 computes it inline; policy.momentum_size is not called"),
     Clause("3.2/momentum-exits",
            "exits are stop fired, trend template failed, or MCN < 55; a stop-out carries no "
            "cooldown and re-entry needs only a valid base and all gates",
@@ -375,7 +458,8 @@ CLAUSES: tuple[Clause, ...] = (
            OPEN, note="reading 7 — R1 drafts it, not a job"),
     Clause("3.3/blackout",
            "no new entries and no adds within 5 trading days of a scheduled report, both sleeves",
-           BUILT, wired=True),
+           BUILT,
+           note="DUAL IMPLEMENTATION: daily.py and phase0.py each count the window themselves, in calendar days; policy.in_blackout is not called"),
     Clause("3.3/blackout-trading-days",
            "the window is counted in trading days, and lifts the first session after the report",
            BUILT, note="policy.in_blackout counts sessions; the nightly still approximates "

@@ -116,3 +116,24 @@ def test_report(capsys: pytest.CaptureFixture[str]) -> None:
         unwired = [c for c in built if not c.wired]
         if unwired:
             print(f"    built but not wired ({len(unwired)}): {', '.join(c.key for c in unwired)}")
+
+
+def test_wired_is_true_only_when_a_job_actually_calls_it() -> None:
+    """`wired` must be derived, not asserted.
+
+    This check exists because the flag was wrong in nine places at once. Each of
+    those clauses really was enforced by the running system — but by the job's own
+    inline copy of the rule, while the `policy` function that claimed the clause
+    sat untested-in-production and uncalled. Two implementations, and only the one
+    nobody tested actually ran. That is the exact failure the ledger was built to
+    catch, reproduced inside the ledger.
+
+    So the ledger no longer gets to say. A clause is wired when a job module calls
+    its implementation, transitively, and not otherwise.
+    """
+    wrong = []
+    for c in rules.CLAUSES:
+        actual = rules.is_wired(c.key)
+        if c.wired != actual:
+            wrong.append(f"{c.key}: ledger says wired={c.wired}, call graph says {actual}")
+    assert not wrong, "the wired flag disagrees with the call graph:\n  " + "\n  ".join(wrong)
