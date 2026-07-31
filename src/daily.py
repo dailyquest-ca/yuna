@@ -206,11 +206,17 @@ def freshness(conn):
                        order by job, id desc""")
         recent = cur.fetchall()
     bad = [f"{j} {s}" for j, s, _ in recent if s in ("red", "amber")]
+    # §4.7: an amber job makes its own domain stale, not every domain. Only the price feed
+    # gates tickets — a wobble in the fundamentals sweep must not stop a momentum entry.
+    price_bad = [f"{j} {s}" for j, s, _ in recent
+                 if s in ("red", "amber") and j in ("nightly-ingest", "nightly-retry", "daily")]
     stale_days = (dt.date.today() - last_bar).days if last_bar else 999
-    if bad:
-        return f"⚠️ {', '.join(sorted(set(bad)))} — data {last_bar}", False
     if stale_days > 4:
         return f"⚠️ bars stale — last close {last_bar} ({stale_days}d)", False
+    if price_bad:
+        return f"⚠️ {', '.join(sorted(set(price_bad)))} — data {last_bar}, tickets held", False
+    if bad:
+        return f"data {last_bar} close ✓ · {', '.join(sorted(set(bad)))} (that domain only)", True
     return f"data {last_bar} close ✓ all green", True
 
 

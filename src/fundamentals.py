@@ -386,8 +386,13 @@ def main():
             # EODHD bills a fundamentals request at 10 units — calls_used counts requests
             hb.detail.update(written=done, failed=fail, errors=errors,
                              api_units=hb.calls[0] * 10)
-            if fail:
-                hb.amber(f"{fail} names without usable fundamentals")
+            # SPACs, preferreds and trusts have no fiscal years and never will — counting them
+            # as a failure leaves the pipeline permanently amber, and a permanently amber
+            # pipeline never writes a ticket. Structural misses are recorded, not alarmed.
+            transient = sum(1 for e in errors.values() if "no fiscal years" not in str(e))
+            if transient:
+                hb.amber(f"{transient} names failed to fetch or parse")
+            hb.detail["structural_misses"] = fail - transient
             if "_batch_fallback" in errors:
                 hb.amber("batch insert fell back to row-by-row — a per-row step may have been skipped")
             print(f"fundamentals: {done} written, {fail} failed, {hb.calls[0]} calls")
