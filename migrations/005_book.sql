@@ -200,6 +200,7 @@ alter table earnings        enable row level security;
 alter table _migrations     enable row level security;
 
 -- ---------- guard: computed tables are written by jobs only (§4.3) ----------
+-- implements: 4.3/guard-triggers — refuses writes to the computed tables from any role but the migrator
 -- Jobs connect as the owner role through DATABASE_URL; every session connector (today the
 -- read-only MCP, tomorrow a read-write one) arrives as some other role and is refused.
 -- Role-based on purpose: it carries no session state, so a pooler cannot silently drop it.

@@ -3,12 +3,24 @@ Census: US exchange symbol list (common stock, NYSE/NASDAQ/AMEX) x screener (cap
 Bar-dependent filters (price >= $5, ADDV >= $10M, listed >= 6 mo) are re-applied from our own bars
 inside weekly-rank, so L0 stays honest between censuses. Stage 2 (Gate C1 -> CCN funnel) arrives in Phase D.
 FORCE=true skips the 1st-Saturday guard (manual runs)."""
-import os, sys, json, time, traceback, datetime as dt, urllib.request, urllib.error
+import datetime as dt
+import json
+import os
+import sys
+import time
+import traceback
+import urllib.error
+import urllib.request
+
 import psycopg
 
 DRY = os.environ.get("DRY_RUN","false").lower() in ("1","true","yes")
 FORCE = os.environ.get("FORCE","false").lower() in ("1","true","yes")
-K = os.environ["EODHD_API_KEY"]
+
+def key():
+    # read at call time, not import time: a module that demands a secret to be
+    # importable cannot be inspected, tested, or linted without one
+    return os.environ["EODHD_API_KEY"]
 
 def db_url():
     u=os.environ["DATABASE_URL"]
@@ -34,14 +46,13 @@ def main():
             run_id=cur.fetchone()[0]; conn.commit()
         try:
             # 1) listing census: common stocks on NYSE / NASDAQ / AMEX only
-            syms = get(f"https://eodhd.com/api/exchange-symbol-list/US?api_token={K}&fmt=json", calls)
-            ok_ex = {"NYSE","NASDAQ","AMEX","NYSE MKT","NYSE ARCA"}  # ARCA excluded below via type
-    
+            syms = get(f"https://eodhd.com/api/exchange-symbol-list/US?api_token={key()}&fmt=json", calls)
+
             common = {s["Code"] for s in syms
                       if s.get("Type")=="Common Stock" and s.get("Exchange") in {"NYSE","NASDAQ","AMEX","NYSE MKT"}}
             print(f"listing census: {len(common)} common stocks on NYSE/NASDAQ/AMEX")
             # 1b) liquidity census: bulk last-day bars for the whole US tape (cheap)
-            bulk = get(f"https://eodhd.com/api/eod-bulk-last-day/US?api_token={K}&fmt=json", calls)
+            bulk = get(f"https://eodhd.com/api/eod-bulk-last-day/US?api_token={key()}&fmt=json", calls)
             liquid = {}
             for b in bulk:
                 code=b.get("code"); px=float(b.get("close") or 0); vol=float(b.get("volume") or 0)
@@ -58,7 +69,7 @@ def main():
                     f.append(["market_capitalization","<",ceiling] if ceiling is not None
                              else ["market_capitalization",">",300000000])
                     filt=json.dumps(f)
-                    data=get(f"https://eodhd.com/api/screener?api_token={K}&sort=market_capitalization.desc&filters={urllib.request.quote(filt)}&limit=100&offset={offset}", calls)
+                    data=get(f"https://eodhd.com/api/screener?api_token={key()}&sort=market_capitalization.desc&filters={urllib.request.quote(filt)}&limit=100&offset={offset}", calls)
                     batch=(data or {}).get("data",[])
                     if not batch: break
                     for b in batch:

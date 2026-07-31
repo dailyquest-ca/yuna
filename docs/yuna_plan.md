@@ -1,13 +1,12 @@
 # Yuna — Zak's Trading Agent
 
-**Status: All sections FINAL — 2026-07-30. Changes only by announced edit.**
-**Opened:** 2026-07-29
-**Owner:** Zak (decisions, execution) · Yuna (research, ranking, tickets)
-**Rule:** Nothing is FINAL until Zak signs off on that section. One section at a time.
+*Updated: 2026-07-31 16:37 UTC*
+**Opened:** 2026-07-29 · **Owner:** Zak (decisions, execution) · Yuna (research, ranking, tickets)
+**Rule:** This document is law. Changes only by announced edit — exact section, exact old line, exact new line, Zak's approval — and every edit bumps the Updated stamp.
 
 ---
 
-## Section 1 — VISION ✅ **FINAL** (2026-07-29)
+## Section 1 — VISION
 
 > I'm building an AI-run research and automation operation that lets me build serious wealth while running a day job. The machine watches the entire US market and brings me the highest-conviction opportunities with a game plan and a recommendation already attached. I review, decide, and execute.
 >
@@ -19,7 +18,7 @@
 
 ---
 
-## Section 2 — PORTFOLIO ARCHITECTURE ✅ **FINAL** (2026-07-29)
+## Section 2 — PORTFOLIO ARCHITECTURE
 
 All weights are percentages of NAV. NAV = equities + cash − debt.
 
@@ -32,7 +31,7 @@ All weights are percentages of NAV. NAV = equities + cash − debt.
 - **The levered layer sits outside the sleeves** — a third bucket funded by borrowed money, governed by the §2.5 facility rules, not by sleeve percentages. Its holdings don't consume sleeve room or count against the single-name cap. This is what lets gross exposure exceed 100% by design.
 - **Exception — independence and theme caps see the whole book**, levered positions included. Correlation doesn't care whose money paid. Three AI names in the sleeves plus a tech-heavy levered ETF is real concentration, and the check counts it.
 - **Balances are truth, prices are the extrapolation.** Sunday reconciliation captures per-account cash and positions plus available credit on each facility (Zak reads them off Wealthsimple, or tells Yuna in chat). Deposits, dividends, and interest are absorbed automatically without modeling them individually. Weekday NAV extrapolates from the last confirmed balances using price moves — provisional, labeled, trued up Sunday.
-- **Every ticket names an account**, and is only written if that account holds the cash — or, for the levered layer, the available credit — to fill it. NAV-level sizing, account-level execution.
+- **Every ticket names an account**, and is only written if that account holds the cash — or, for the levered layer, the available credit — to fill it. Cash includes unsettled proceeds of same-account sells already filled or ticketed ahead of it (T+1 reuse is broker-supported); proceeds never cross accounts inside a settlement window. NAV-level sizing, account-level execution.
 
 ### 2.1 Sleeves
 
@@ -56,6 +55,10 @@ Correlated names are one bet. Four names at 0.85 correlation is 1.1 independent 
 - No single theme above **35% of NAV** — **entry-only**: no new capital enters a theme above 35%. A winner that grows past 35% is not forced out.
 - Target **4–6 effective independent bets**
 
+**Definitions:** *industry group* = the vendor industry field, mechanical. A *theme* is a shared macro driver that would make positions fall together — "AI infrastructure" spans semis, power, and industrials, and no data field catches it. Theme is **Yuna's judgment, assigned in the session that writes the ticket and recorded on the ticket and the book** — jobs arm candidates; only sessions write tickets (§4.3). Sector and industry are inputs, never the definition. Zak may override; overrides are logged.
+
+**Effective bets = 1 ÷ Σᵢⱼ wᵢwⱼρᵢⱼ** — *w* = position weights normalized across the whole book (levered included, per §2.0) · *ρ* = pairwise correlation of daily returns over 126 sessions · names with shorter history use what exists (minimum 60 sessions). Worked check: four equal names at 0.85 correlation → 1.1 bets. The check is a guardrail, not an optimizer — the band never blocks: R1 computes and prints the number on every draft ticket, and a ticket that would leave the book below 4 carries a ⚠️ concentration line. The hard caps above are the only blockers.
+
 ### 2.3 Position sizing
 
 - Minimum position **4%** — applies to intended full size
@@ -72,7 +75,7 @@ Correlated names are one bet. Four names at 0.85 correlation is 1.1 independent 
 | On a fall | Check the thesis | Price is the thesis — exit |
 | Averaging down | Permitted — CCN ≥ 70 and below hurdle | Never |
 
-Stop widths and trail mechanics are set in Phase 7.
+Stop widths and trail mechanics are set in §3.2.
 
 ### 2.5 Leverage
 
@@ -115,7 +118,7 @@ Stop widths and trail mechanics are set in Phase 7.
 
 ---
 
-## Section 3 — FINDING & CHOOSING ✅ **FINAL** (2026-07-29)
+## Section 3 — FINDING & CHOOSING
 
 Two pipelines. They share only the raw universe.
 
@@ -127,7 +130,7 @@ Two pipelines. They share only the raw universe.
 | Candidates | 40–60 bench · monthly | 100–150 · weekly |
 | Gates | Quality floor (computed) · Business model (judgment) | Market stage · Trend template · Setup · Earnings |
 | Score | CCN v1.0 | MCN v1.0 |
-| Entry signal | Price ≤ hurdle (checked daily) | Pivot break on volume |
+| Entry signal | Price ≤ hurdle (checked daily) | Pivot break — volume confirms at EOD |
 | First position | Full size | 50%, pyramid to full |
 | Add on | Weakness below hurdle | Strength above pivot |
 | Stops | None | ≤ 8%, ratchet up only |
@@ -149,7 +152,9 @@ Two pipelines. They share only the raw universe.
 
 **L0 filters:** common stock on NYSE, NASDAQ, or NYSE American (no OTC) · price ≥ $5 · **ADDV** (average daily dollar volume = shares × price, 50-day median) ≥ $10M · market cap ≥ $300M · listed ≥ 6 months · delisted names retained for backtesting.
 
-**L2 composition:** top-10 MCN names in BUY or near-BUY state + every bench name within 10% of its hurdle + all current holdings. Cap 20 — holdings always included; remaining seats by trigger proximity, then score.
+**Foreign issuers:** US-listed foreign issuers and ADRs are full L0 and momentum members — price and volume are USD, and price doesn't care where the headquarters is. For the compounder pipeline they are eligible only when FCF and market cap are expressed in one currency (financials converted at fiscal-period-end FX; market cap: the vendor's USD figure — §3.1); if conversion data is unavailable → data-confidence path (§3.3).
+
+**L2 composition:** top-10 MCN names in BUY state + every bench name within 10% of its hurdle (price ≤ 1.10 × hurdle) + all current holdings. Cap 20 — holdings always included; remaining seats by trigger proximity (= |last close − trigger| ÷ last close), then score; spare seats fill from L1-M by MCN rank, for visibility. **Holdings are always scored, by both pipelines — membership lists never drop a name the book owns.**
 
 **Score semantics:** all components are cross-sectional percentiles within L0 at run time — scores are relative and move when others move. Relative scores govern entry, ranking, and displacement. Compounder exits are judged **absolute**, against raw component values snapshotted at entry (§3.1). Momentum exits stay relative by design (§3.2).
 
@@ -199,7 +204,7 @@ Bench built **half smaller-cap, half larger-cap by mechanism**: the funnel takes
 - Positive free cash flow
 - Growth funded internally: net share issuance ≤ 2%/yr (3-yr avg) · net debt not growing faster than EBITDA
 - Leverage: net debt / EBITDA ≤ 2.5×
-- Banks and insurers excluded in v1 (EBITDA is meaningless for them)
+- Banks and insurers excluded — vendor industries named `Banks - …` or `Insurance - …`; Insurance Brokers, Credit Services, Capital Markets and the rest of Financial Services remain eligible (EBITDA is meaningless for underwriters and deposit-takers, not for fee businesses). A name with no vendor industry is not excludable by this test — the gap is named on its C2 memo
 - Goodwill jumps don't fail the gate — they route a serial-acquirer flag to the C2 memo
 
 **Gate C2 — Business model** *(judgment · logged)*
@@ -211,18 +216,18 @@ Every memo and every decision logged as an observation.
 
 | Component | Weight | Definition |
 |---|---|---|
-| Compounding engine | 33% | ROIC × reinvestment rate, 3-yr smoothed. Requires ≥ 3 fiscal years, else → data-confidence path |
+| Compounding engine | 33% | ROIC × reinvestment rate, 3-yr smoothed. Requires ≥ 3 fiscal years, else → data-confidence path (§3.3) |
 | Cash conversion | 33% | 3-yr FCF ÷ 3-yr net income |
 | Size | 33% | Percentile of log market cap, inverted — smaller scores higher |
 
 **Formulas:** NOPAT = EBIT × (1 − effective tax) · Invested capital = debt + equity − cash · Reinvestment rate = (capex − D&A + ΔWC) ÷ NOPAT, floored at 0, capped at 150%.
 
-**Engine reliability check:** growth = ROIC × reinvestment is an identity. Compute the engine from cash-flow components, compare to observed revenue growth — agreement = trustworthy, divergence = flag, never silently score. Run ROIC with and without goodwill; same quintile = high confidence.
+**Engine reliability check:** growth = ROIC × reinvestment is an identity. Compute the engine from cash-flow components, compare to observed 3-yr revenue growth — agreement (within **5 percentage points**) = trustworthy · beyond 5pp = divergence: the engine component routes down the data-confidence path (§3.3) and the flag lands on the C2 memo · never silently score.
 
 **Entry hurdle v1.0** — separate from the CCN, computed daily per bench name:
 
 > **Expected return at price P = FCF yield + engine growth − derating drag**
-> - FCF yield = TTM free cash flow ÷ market cap at P
+> - FCF yield = TTM free cash flow ÷ market cap at P — **market cap is the vendor's USD figure** (it resolves ADR ratios, listing currency, and share class); cap at price P uses **effective shares = vendor cap ÷ last close** · vendor cap missing → data-confidence path (§3.3)
 > - Engine growth capped at **25%**
 > - Derating drag = annualized 5-yr slide from current P/FCF down to the **fair multiple** = lower of the stock's own 5-yr median P/FCF or **30×**. Names with < 3 yrs of history: fair = lower of current or 25×
 > - The drag is **never a credit** — cheapness earns no bonus. The margin of safety lives here
@@ -230,9 +235,9 @@ Every memo and every decision logged as an observation.
 
 15% is an underwriting floor, not the expectation — growth is capped and rerating earns nothing, so what underwrites at 15% has historically realized above it. Analyst target prices are never an input (documented optimism bias); they serve only as a data-sanity flag when our hurdle diverges wildly from the street.
 
-**Sizing:** CCN 70–84 → **12%** of NAV · CCN 85+ → **15%** · flat 12% until the shadow book validates the scores · capped by the sleeve ceiling — the last name entered sizes to the remaining room. Full position in a single order at or below the hurdle.
+**Sizing:** CCN 70–84 → **12%** of NAV · CCN 85+ → **15%** · flat 12% for at least the first two full calendar quarters after cutover (Phase 0, §6, complete) — at a monthly approval (R5) thereafter, the shadow-book cohort comparison (85+ vs 70–84) is presented and Zak rules whether 15% sizing unlocks; absent a ruling, flat 12% continues · capped by the sleeve ceiling — the last name entered sizes to the remaining room. Full position in a single order at or below the hurdle.
 
-**Adding / averaging down — permitted.** CCN ≥ 70 and price below hurdle: 5–15% below → add 25–50% of original size · > 15% below → up to 100% · max 2 adds per name per 12 months (crash-protocol tactical adds exempt) · the 25% single-name entry ceiling still applies.
+**Adding / averaging down — permitted.** CCN ≥ 70 and price below hurdle: 5–15% below → add **50%** of original size · more than 15% below → add **100%** · max 2 adds per name per 12 months (crash-protocol tactical adds exempt) · the 25% single-name entry ceiling still applies.
 
 **Entry snapshot:** at purchase, raw component values (engine, cash conversion, margins) are recorded. Exits are judged against this snapshot — **absolute, not relative.**
 
@@ -243,7 +248,7 @@ Every memo and every decision logged as an observation.
 
 **Bench eviction seatbelts:** gate failure evicts immediately. Rank eviction requires **two consecutive months** outside the top 60 — and never applies to current holdings or names within 10% of their hurdle. All evictions listed in the monthly digest.
 
-**Rejected names:** 12-month cooldown before re-proposal, unless a new filing moves the CCN by ≥ 10 points.
+**Rejected names:** 12-month cooldown before re-proposal. Early escape requires both a **new filing** since rejection and current CCN ≥ the CCN recorded at rejection + 10 — measured against today's field; every rejection row records its CCN at rejection.
 
 ---
 
@@ -264,7 +269,9 @@ Every memo and every decision logged as an observation.
 
 **M2 — Trend template:** above the 150 & 200-day · 150 above 200 · 200-day rising (above its value 21 sessions ago) · above the 50-day · ≥ 30% off the 52-week low · within 25% of the 52-week high.
 
-**M3 — Setup:** Stage 2 breakout from a valid base — base ≥ 25 sessions long, ≤ 25% deep, **pivot = highest high of the base** — on breakout-day volume ≥ 1.4× the 50-day average.
+**M3 — Setup:** Stage 2 breakout from a valid base — base ≥ 25 sessions long, ≤ 25% deep, **pivot = the base's ceiling — its defining high** (detection rule below). Volume ≥ 1.4× the 50-day average is the **confirmation standard**, judged at EOD per the breakout-confirmation rule below — never an entry pre-condition.
+
+**Base detection** *(deterministic — every detected base is ≥ 25 sessions by construction)*: the **pivot** is the highest high in the window **120 to 25 sessions ago**; the base runs from the pivot's session to today. A base is **broken** by either: any later session **closing** above the pivot — the breakout happened — or any later session's **high** exceeding pivot × 1.005 without such a close — the pivot was tested and rejected, spent. Either way, WAIT for the next base. Highs within the 0.5% grace are noise; closes decide whether a breakout succeeded, highs beyond noise decide whether the pivot survives. An unbroken base is **valid** when depth (pivot to lowest low) ≤ 25%. **Final-contraction low = the lowest low of the last 10 sessions.** Entry and initial stop per the entry mechanic (§5.1) and the Stops rule below.
 
 **M4 — Earnings acceleration:** latest reported quarter YoY EPS growth ≥ 25%, **or** accelerating for two consecutive quarters with the latest ≥ 15%.
 
@@ -273,37 +280,39 @@ Every memo and every decision logged as an observation.
 | Component | Weight | Definition |
 |---|---|---|
 | Momentum quality | 33% | 90-day exponential regression slope of log price, annualized · × R² of the same regression · ÷ 90-day volatility |
-| Setup proximity | 33% | Equal-weight of 4 sub-scores: ATR percentile vs own 1-yr range (inverted) · pullback-depth contraction · volume dry-up through the base · proximity to 52-week high |
-| Industry group strength | 33% | EODHD industry classification · equal-weighted 6-month group return · percentile across groups |
+| Setup proximity | 33% | Equal-weight of 3 sub-scores: **ATR(14)** percentile vs own trailing 252 sessions, inverted · **volume dry-up** = 10-day average volume ÷ 50-day average, inverted · **52-week-high proximity** = close ÷ 252-session high |
+| Industry group strength | 33% | EODHD industry classification · equal-weighted 6-month (126-session) return across the industry's L0 members · percentile across groups · names lacking an industry mapping score this component 50 (neutral) until mapped |
 
 **Gates and stops always use current price. Rank is calm; protection is real-time.**
 
-**States:** **BUY** — valid pivot exists; entry at pivot, stop below the base. **WAIT** — extended; trigger pre-written for the next base.
+**States:** **BUY** — valid pivot exists; entry at pivot, stop per the Stops rule. **WAIT** — no valid base yet; re-scanned nightly.
 
 **Pyramiding schedule:**
 
 | Step | Trigger | Add | Cumulative |
 |---|---|---|---|
-| 1 | Pivot break on volume | 50% | 50% |
-| 2 | +2–3% above pivot | 25% | 75% |
-| 3 | +4–5% above pivot | 25% | 100% |
+| 1 | Pivot break (volume judged at EOD) | 50% | 50% |
+| 2 | +2% above pivot | 25% | 75% |
+| 3 | +4% above pivot | 25% | 100% |
 | — | Beyond +5% | Nothing — wait for the next base | — |
 | Full | — | Stop moves to breakeven | — |
 
-One gap-up completion at market is permitted if price is within ~5% of the pivot.
+Steps 2–3 ship as add stop-limits — trigger pivot + 2% and trigger pivot + 4%, **both with limit pivot × 1.05**, the schedule's ceiling. A gap that skips a band completes at the open automatically; a gap beyond +5% fills nothing — the ceiling enforces itself at the broker, unwatched. Deliberate residue, accepted with eyes open: a larger gap fading back to +5% intraday fills at the ceiling — a price sanctioned in advance, on a name still 5% above a confirmed breakout.
+
+**Breakout confirmation** — volume decides how much money rides; price decides whether you stay. Entry is mechanical: the buy stop-limit fills at the pivot regardless of volume. At EOD the breakout is classified — session volume ≥ 1.4× the 50-day average → **confirmed**, and pyramid steps 2–3 arm per schedule. Below → **unconfirmed**: no exit on volume alone; the pyramid **freezes at step 1 (50%)**. If any of the first three sessions (breakout day included) prints ≥ 1.4× — each session measured against its own trailing 50-day average — the name confirms late and the pyramid unlocks. While unconfirmed, one hair-trigger applies — **a close back below the pivot → exit next morning**; that is a failed breakout by the only judge that matters. A name that never confirms stays at half size under normal stops, and the stalled-pyramid rule below resolves it.
 
 A pyramid stalled below full size for 4 weeks either completes on the next base or exits — no permanent sub-scale positions.
 
 **Stops:**
 - Initial: higher of the base's final-contraction low, or entry − 8%. **Never wider than 8%.**
-- Ratchet: full size → breakeven · +15% from average cost → trail 10% below highest close · stops ratchet up, never down.
-- **Euphoria rule** — tighten, never sell: when price closes > 2 standard deviations above its own 50-day (std dev of closes, 50-day window), **or** on the largest single-day % gain since entry → trail tightens to **5%** below highest close.
+- Ratchet: full size → breakeven · +15% from average cost → trail 10% below highest close since entry · stops ratchet up, never down.
+- **Euphoria rule** — tighten, never sell: when price closes > 2 standard deviations above its own 50-day (std dev of closes, 50-day window) → trail tightens to **5%** below highest close since entry.
 
-**Sizing:** conviction sets the risk budget — **0.7% of NAV** at MCN 70–84, **0.9%** at 85+ (first quarter runs 0.5% / 0.7% per the start-low rule) · stop distance is the divisor · **size = budget ÷ stop**, capped by the Section 2 bands and by the sleeve ceiling — the last name entered sizes to the remaining room.
+**Sizing:** conviction sets the risk budget — **0.7% of NAV** at MCN 70–84, **0.9%** at 85+ (the first 90 calendar days from the system's first momentum entry fill run 0.5% / 0.7% — the start-low rule) · stop distance is the divisor · **size = budget ÷ stop**, capped by the Section 2 bands and by the sleeve ceiling — the last name entered sizes to the remaining room.
 
-*Why these numbers:* the budget is how much NAV is lost if the stop fires. Wide stop → smaller position; tight stop → bigger. At an 8% stop these budgets yield ~8.8% and ~11.3% positions — inside the band, so the formula genuinely governs; genuinely tight stops still clip at the 12% ceiling. Four momentum names stopping out together costs ~3.6% of NAV. During the validation quarter the reduced budgets may size below the 8% band floor — the start-low rule overrides the floor; the 4% NAV minimum still binds.
+*Why these numbers:* the budget is how much NAV is lost if the stop fires. Wide stop → smaller position; tight stop → bigger. At an 8% stop these budgets yield ~8.8% and ~11.3% positions — inside the band, so the formula genuinely governs; genuinely tight stops still clip at the 12% ceiling. Four momentum names stopping out together costs ~3.6% of NAV. During the start-low window the reduced budgets may size below the 8% band floor — the start-low rule overrides the floor; the 4% NAV minimum still binds.
 
-**Exits — relative by design:** stop fires · trend template fails · MCN < 55. We rent the strongest; if others got stronger, that *is* the thesis decaying.
+**Exits — relative by design:** stop fires · trend template fails · MCN < 55. We rent the strongest; if others got stronger, that *is* the thesis decaying. A stop-out carries no cooldown — re-entry requires a valid base and all gates, nothing more.
 
 ---
 
@@ -321,9 +330,11 @@ A pyramid stalled below full size for 4 weeks either completes on the next base 
 
 Displacement is **within-sleeve only** — a momentum 85 never displaces a compounder 72. If a trigger fires while the sleeve is full, the challenger needs +10 over the **weakest incumbent**; the swap ticket is auto-drafted, Zak executes both legs.
 
-**Earnings blackout:** no new entries and no adds within 5 trading days of a scheduled report. Both sleeves. Entering the window also **cancels any live entry or add orders at the broker** (the stop sheet says so); protective stops remain, always.
+**Earnings blackout:** no new entries and no adds within 5 trading days of a scheduled report. Both sleeves. Entering the window also **cancels any live entry or add orders at the broker** (the stop sheet says so); protective stops remain, always. The blackout lifts the first session after the report session — uniform for pre-open and post-close prints; the nightly digests the numbers before new risk goes on.
 
-**Data confidence:** never assume a missing value — drop the component, renormalize remaining weights to 100, mark the name as scored on 2 of 3. An incompletely-scored name is capped at the bottom of its size band and requires manual sign-off.
+**Holding through earnings (momentum):** on the last session before a scheduled report, a position holds through the print only with a cushion — last close ≥ 1.08 × average cost (one full stop-width of profit absorbs the gap). Below that cushion → exit ticket that evening. Stops stay placed either way. Compounders hold through earnings by design — the thesis, not the print, is the exit.
+
+**Data confidence:** never assume a missing value — drop the component, renormalize remaining weights to 100, mark the name as scored on 2 of 3. An incompletely-scored name is capped at the bottom of its size band and requires manual sign-off. A failed engine cross-check (§3.1) routes here the same way.
 
 **Data discipline (non-negotiable):** fundamentals used as of **filing date**, never fiscal period end. Delisted names retained in the universe.
 
@@ -331,16 +342,16 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 
 **Crash protocol:** market gate shuts → momentum stops fire, sleeve to cash → compounder hurdles breach and adds fire in **time-spaced tranches — 3 tranches, minimum 10 sessions apart** → freed momentum capital may fund compounder adds beyond standard sizing, tagged **tactical** at purchase → when the gate reopens, tactical lots are the funding source for momentum re-entry. **Core lots are never touched.** No cap on tactical allocation.
 
-**Dual qualification:** a name passing both screens goes to Compounders. Longer horizon wins.
+**Dual qualification:** a name passing both screens goes to Compounders. Longer horizon wins. A momentum **holding** that later qualifies converts only through the monthly approval — C2 memo, Zak's sign-off; on approval it re-sizes under §3.1 and its stops come off that day. Never an automatic relabel.
 
-**Shadow book:** every pass and every exit snapshots score + price, marked at 30 / 60 / 90 days. Mechanics in Phase 8.
+**Shadow book:** every pass and every exit snapshots score + price, marked at 30 / 60 / 90 days. Mechanics live with the build (§4.8).
 
-**Versioning:** CCN v1.0 · MCN v1.0 · Hurdle v1.0 · M1 v1.0. Changes increment and are logged so later versions can be measured against earlier ones. All formulas are **version 1 of an experiment** — a reasoned prior, not evidence. The shadow book converts one into the other.
+**Versioning:** CCN v1.0 · MCN v1.0 · Hurdle v1.0 · M1 v1.0. Changes increment and are logged so later versions can be measured against earlier ones. All formulas are **version 1 of an experiment** — a reasoned prior, not evidence. The shadow book converts one into the other. **Only formulas carry version labels** — rules, mechanisms, and the plan itself stay unversioned until the system is live.
 
 
 ---
 
-## Section 4 — MECHANICS & BUILD 🔵 **DRAFT — awaiting Zak review** (2026-07-29)
+## Section 4 — MECHANICS & BUILD
 
 **Design principle: jobs compute · database remembers · Yuna judges · Zak acts.** No number lives in anyone's head between sessions.
 
@@ -349,7 +360,7 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 | Box | In one line | Full detail |
 |---|---|---|
 | **Data** | EODHD All-In-One: bulk prices nightly · FX · fundamentals on filing · earnings calendar. Bars kept 3 years, fundamentals forever | → §4.1 |
-| **Compute** | Five GitHub Actions jobs: `nightly-ingest` · `nightly-retry` · `weekly-rank` · `monthly-funnel` · `monthly-backup` | → §4.2 |
+| **Compute** | Five scheduled jobs — `nightly-ingest` · `nightly-retry` · `weekly-rank` · `monthly-funnel` · `monthly-backup` — plus dispatch-only tooling | → §4.2 |
 | **Store** | One Supabase Postgres project — 11 tables (universe → book → briefs) + human views for browsing | → §4.3 |
 | **Judge** | Five Yuna sessions: evening stop sheet · pre-open brief · Sat deep-dive · Sun reconciliation · monthly approval. Prompts live in Section 5 | → §4.4 |
 | **Execute** | Zak places every order: entry pairs · stop moves · gap exits · fill confirmations · monthly approvals | → §4.5 |
@@ -366,13 +377,13 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 |---|---|---|
 | Bulk EOD | The whole US market's daily bars in one request | Nightly |
 | Index | S&P 500 (`GSPC.INDX`) for the M1 market gate | Nightly |
-| USDCAD | FX for CAD NAV — every CAD figure carries its rate and `as_of` | Nightly |
+| FX | USDCAD for CAD NAV + statement currencies for foreign filers (fiscal-period-end rates) — every CAD figure carries its rate and `as_of` | Nightly |
 | Splits & dividends | Corporate actions → trigger per-name history refresh | Nightly |
 | Fundamentals | Full statements per name — pulled only when a company files | On filing (~quarterly per name) |
 | Earnings calendar | Report dates for the blackout and interrupts | Weekly |
 
 **API budget** (100,000 calls/day · 1,000 requests/min):
-- Prices in bulk — ~a few hundred calls nightly regardless of universe size, never 1,500 per-ticker pulls.
+- Prices in bulk — ~a few hundred calls nightly regardless of universe size, never 1,500 per-ticker pulls as the routine. Per-ticker calls remain the tool for exactly four things: cold start, corporate-action refreshes, gap repair, and names entering L0.
 - Fundamentals cached by filing date — steady state ≈ 1,200 calls/week. **Computation never calls the API** — every score reads the database.
 - Backoff-then-amber on rate-limit errors (exponential, max 3 retries, then run from cache; heartbeat shows it).
 - Every run meters its calls via EODHD's usage endpoint; the brief alarms past ~70% of daily quota.
@@ -390,7 +401,7 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 
 ### 4.2 Compute — the jobs
 
-Five GitHub Actions workflows in the private repo. All idempotent (upserts — safe to re-run), all carry `DRY_RUN`, all write a heartbeat row (§4.7).
+Five **scheduled** jobs form the operating cadence — the canonical set every freshness line covers. Dispatch-only workflows (migrations, backtests, repairs) are tooling under the same heartbeat discipline; **nothing new joins the schedule without a plan edit.** All idempotent (upserts — safe to re-run), all carry `DRY_RUN`, all write a heartbeat row (§4.7).
 
 | Job | When | What it does |
 |---|---|---|
@@ -412,7 +423,7 @@ One Supabase Postgres project. **Everything lives here, including L0**; the repo
 | bench | 60 names · CCN + components · hurdle · C2 status · approval | overwrite |
 | candidates | 150 momentum · MCN · BUY/WAIT · pivot/stop | overwrite |
 | queue | ~20 pre-written triggers | overwrite |
-| book | Positions · lots (core/tactical) · stops · thesis + invalidators · entry snapshots | overwrite |
+| book | Positions · lots (core/tactical) · stops · theme · thesis + invalidators · entry snapshots | overwrite |
 | tickets | proposed → approved → filled (provisional/confirmed) → cancelled | append |
 | transactions | Every confirmed fill | append |
 | observations | Passes, exits, gate flips, C2 calls · marked 30/60/90d | append |
@@ -422,6 +433,7 @@ One Supabase Postgres project. **Everything lives here, including L0**; the repo
 
 - **Human views** (`v_book`, `v_queue`, `v_bench`) shape what Zak browses in Studio — sorted, joined, readable.
 - **Guard triggers** on computed tables (universe, candidates, bench, queue, book): writes are rejected unless made by a job. Sessions may write only briefs, tickets, observations, and config — "Yuna never computes scores by hand," enforced by the schema, not by promise.
+- **The plan is law; config is its runtime copy.** Any config change that moves a plan-stated number requires the announced plan edit first — a config row never quietly overrules this document.
 - Free projects pause after ~1 week idle — nightly writes keep it alive; a week-long pipeline outage would pause the DB too (heartbeat screams days earlier; restore is one click).
 
 ### 4.4 Judge — Yuna's sessions
@@ -467,7 +479,7 @@ The pipeline looks at prices once a night; an 8% stop can be breached by lunch. 
 
 | Phase | Builds | Unblocked by |
 |---|---|---|
-| **A** | Repo scaffold · core migration (runs, config, universe, prices) · nightly ingest · heartbeat | Extended (live now) |
+| **A** | Repo scaffold · core migration (runs, config, universe, prices) · nightly ingest · heartbeat | Data feed live |
 | **B** | Momentum stack — M1–M3, MCN, queue states | A |
 | **C** | Full schema migrations · briefs · scheduled sessions | B |
 | **D** | Fundamentals stack — C1, CCN, hurdle, funnel, M4 | All-In-One live |
@@ -478,7 +490,7 @@ The pipeline looks at prices once a night; an 8% stop can be breached by lunch. 
 
 **Security:** Yuna pushes via a **fine-grained PAT** (single repo, Contents + Workflows + Actions read-write — the Actions scope is how she triggers runs and reads their logs) pasted in-session, revocable anytime. **`EODHD_API_KEY` + `DATABASE_URL` (session-pooler URI) → GitHub Actions repository secrets, set by Zak in the UI** — the connection string is god-mode and exists nowhere else. Yuna's session access is the **Supabase MCP** custom connector (added exactly like EODHD was); RLS default-deny — nothing publicly reachable. Weights and thresholds live in the config table — every change is a logged row, not code archaeology. Yuna debugs live runs by reading Actions logs through the GitHub API.
 
-**Backtest honesty:** the momentum backtest is clean — adjusted prices, delisted names retained. The compounder side **cannot be honestly backtested today** (point-in-time fundamentals history isn't for sale at our budget — §4.1 explains how we build it ourselves over time); the shadow book validates it forward-only. Chat-based backtests are sanity checks, not validation — the two classic sins (using data before its filing date, forgetting dead companies) both fake good results.
+**Backtest honesty:** the momentum backtest is clean — adjusted prices, delisted names retained. The compounder side is **runnable but graded indicative-only**: vendor statements carry filing dates, so a past date's CCN can be rebuilt from filings that existed then — but restated figures can silently overwrite as-filed numbers, and delisted-name fundamentals coverage is unverified, so it is never validation. Validation is the shadow book, forward-only; our own filing-stamped archive (§4.1) matures into the honest backtest as the system runs. Every backtest output states its grade. The two classic sins (using data before its filing date, forgetting dead companies) both fake good results.
 
 ### 4.9 Accepted costs
 
@@ -492,7 +504,7 @@ The pipeline looks at prices once a night; an 8% stop can be breached by lunch. 
 
 ---
 
-## Section 5 — SESSION RUNBOOKS 🔵 **DRAFT — awaiting Zak review** (2026-07-29)
+## Section 5 — SESSION RUNBOOKS
 
 The runbooks are the judgment layer's code — same review, same versioning as the formulas. Each session reads the database, never computes scores by hand, and always produces its output even when the news is "nothing."
 
@@ -519,11 +531,11 @@ Yuna writes like a sharp friend who happens to run a research desk — not like 
 | 3 | **Gaps ±7%** | Momentum gapped below its stop-limit → order unfilled → **manual exit at open** ticket · Compounder gapped down → check invalidators + hurdle (a gap can create an add) |
 | 4 | **Fired stops** | Price crossed a stop → position marked *presumed stopped* → brief asks Zak to confirm the fill |
 | 5 | **Gate transition** (Mondays) | M1 flips only on Friday close · OFF → momentum exit tickets · ON → queue re-armed |
-| 6 | **Triggers & hurdles** | Entry/add tickets for whatever the nightly job armed · blackout, sleeve room, theme entry-cap, add-caps enforced before any ticket is written · **max 2 new-entry tickets per brief** — extras wait in queue order |
+| 6 | **Triggers & hurdles** | Entry/add tickets for whatever the nightly job armed · blackout, sleeve room, theme entry-cap, add-caps enforced before any ticket is written · effective-bets count printed on every draft ticket (⚠️ below 4 — §2.2) · **max 2 new-entry tickets per brief** — extras wait in queue order |
 | 7 | **Unconfirmed stop moves** | Repeat as one line until Zak confirms |
 | 8 | **Compose** | Snapshot first (freshness · NAV + move · tickets as broker-ready pairs · "**You:** …") · context below as needed · written to briefs |
 
-**Entry mechanic ✅ RULED (2026-07-29):** breakout entries execute as **GTC buy stop-limit orders at the pivot** (trigger = pivot · limit = pivot + 2%), placed from the brief when a name reaches BUY state. The volume condition cannot live inside a broker order, so it is verified at EOD: breakout-day volume < 1.4× the 50-day average → next morning's brief instructs an exit. Low-volume breakouts are failures in the method anyway. Pyramid steps 2–3 ship as add stop-limits in the brief after step 1 confirms.
+**Entry mechanic ✅ RULED (2026-07-29 · confirmation amended 2026-07-31):** breakout entries execute as **GTC buy stop-limit orders at the pivot** (trigger = pivot · limit = pivot + 2%), placed from the brief when a name reaches BUY state. The volume condition cannot live inside a broker order, so it is judged at EOD under the **breakout-confirmation rule (§3.2)**: confirmed → the pyramid arms · unconfirmed → the pyramid freezes at 50%, three sessions to confirm late, exit only on a close back below the pivot. Pyramid steps 2–3 ship as add stop-limits in the brief once the breakout confirms (both limits at pivot × 1.05 — §3.2).
 
 ### 5.2 R2 — Evening stop sheet (weekdays ~20:30 PT)
 
@@ -557,9 +569,9 @@ Funnel output → new bench candidates, each with a **C2 memo**:
 
 ---
 
-## Section 6 — PHASE 0: INITIAL DEPLOYMENT 🔵 **DRAFT — awaiting Zak review** (2026-07-29)
+## Section 6 — PHASE 0: INITIAL DEPLOYMENT
 
-One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a conforming v1 book. Steady-state rules assume positions were born inside the system; Phase 0 re-underwrites everything currently held **as if it were being bought today**. Any position may be sold to reach the ideal book. After Step 5 the system is simply in **steady state** — if nothing else is buyable yet, that's fine; the machine waits for its prices.
+One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a conforming book. Steady-state rules assume positions were born inside the system; Phase 0 re-underwrites everything currently held **as if it were being bought today**. Any position may be sold to reach the ideal book. After Step 5 the system is simply in **steady state** — if nothing else is buyable yet, that's fine; the machine waits for its prices.
 
 | Step | What happens |
 |---|---|
@@ -569,7 +581,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | **2b — Re-underwrite incumbents** ✅ RULED | A position survives only if the system would **buy it today** — score ≥ 70, gates passed, §2 caps applied as if every position were a new entry (2-per-group · 35% theme · 4% minimum full size). Everything else → exit ticket. Consequence, accepted: the AI cluster trims to ≤ 2 names; MU / VRT / GOOGL dust either earns full size or exits. *Ruled strict 2026-07-29 — "numbers ship, not a feelings ship."* |
 | **3 — Deploy compounders** | Approved bench names at/below hurdle enter immediately at full §3.1 size. Above-hurdle names wait on the daily check. RRSP idle cash deploys here (§2.6). |
 | **4 — Deploy momentum** | As real setups fire, gate permitting. Never forced. |
-| **5 — Levered layer** | D9 (CNQ scored by the machine) and D10 (levered ETF choice) resolved inside Phase 0. |
+| **5 — Levered layer** | D9 (CNQ scored by the machine) resolved inside Phase 0; D10 resolved 2026-07-31 — the levered ETF is `VXC.TO`. |
 
 **Tax note:** TFSA exits carry no tax consequence. Any non-registered sale (CNQ) realizes gains or losses — flagged at decision time.
 
@@ -578,8 +590,8 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 
 ## TODO
 
-**Open decision**
-- **D10 — levered ETF instrument.** VUN / equal-weight / ex-US — VFV correlates too closely with the book. Resolved inside Phase 0 Step 5.
+**Decision log**
+- **D10 — levered ETF instrument · RESOLVED 2026-07-31: `VXC.TO`** (global ex-Canada, unhedged, CAD-listed). VFV / VUN rejected — correlate too closely with a US-heavy book; pure ex-US rejected — expected-return drag under leverage. Recorded here so `config.levered_etf` conforms to §4.3.
 
 **Deferred by design**
 - **D8 — options & shorting gate.** The vision keeps these behind an unwritten gate. Not blocking; write the criteria only if and when the capability is wanted.
@@ -590,8 +602,8 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 **Remaining work**
 - [x] Subscribe EODHD All-In-One (monthly first) — *done 2026-07-30*
 - [x] Create Supabase project · add the MCP connector · **rotate the database password** (it touched chat) — *pre-flight passed 2026-07-30: all entitlements verified live*
-- [ ] Create private GitHub repo (**`yuna`**, private, README) · add **Actions repository secrets**: `EODHD_API_KEY` + `DATABASE_URL` (Supabase *session-pooler* URI carrying the rotated password — set in the UI, never through chat)
-- [ ] Build phases A–F (§4.8)
+- [x] Create private GitHub repo (**`yuna`**, private, README) · add **Actions repository secrets**: `EODHD_API_KEY` + `DATABASE_URL` (Supabase *session-pooler* URI carrying the rotated password — set in the UI, never through chat) — *done 2026-07-31*
+- [ ] Build phases A–F (§4.8) — *A–B complete, C–E in flight 2026-07-31*
 - [ ] Execute Phase 0 (§6)
 - [ ] Cutover — write the final strategy doc and Yuna's operating guide out of this plan, archive the old docs
 
@@ -611,7 +623,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 - Everything is end-of-day. No intraday. Covered by the reflex layer (§4.6) and live MCP quotes when needed.
 - Broader universe means shallower knowledge per name.
 - Candidate flow can exceed execution bandwidth — throttled to 2 new entries per brief (R1); adds, exits, and protective actions are never throttled.
-- The compounder pipeline and momentum Gate M4 are **dark until the fundamentals feed is live**. EODHD Extended alone runs M1–M3 and the full MCN price stack.
+- The compounder pipeline and momentum Gate M4 are **dark until the fundamentals stack (Phase D) is live**. The price stack alone runs M1–M3 and the full MCN.
 
 ---
 
@@ -619,6 +631,12 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 
 | Date | Entry |
 |---|---|
+| 2026-07-31 | **X4 — "fresh" deleted from the re-entry rule.** Base life is legislated in one place — detection (§3.2). A sub-noise shakeout (high inside the 0.5% band, close back below pivot) exits via the hair-trigger while the base survives by law; "fresh" either contradicted detection or meant nothing. Re-entry = a valid base + all gates. Consequence accepted with eyes open: same-pivot re-entry after a shakeout — the classic pattern. Any poke beyond 0.5% still spends the pivot and forces a new base. |
+| 2026-07-31 | **Simplification round S1–S5 — ruthless pass: four kills and a minor.** near-BUY deleted entirely: detection window back to 120→25 (validity ≥ 25 by construction; X3's two-way break kept), forming state / base age / provisional triggers / the invented 15 all gone; WAIT = no valid base yet, re-scanned nightly; L2 spare seats fill from L1-M by MCN rank; glossary entry removed, Pivot restored to 25-by-construction. Averaging-down ranges → fixed tiers (**50% / 100%**). Goodwill dual-ROIC run deleted — computed a confidence label with no defined consequence; the serial-acquirer flag and data-confidence path already carry the risk. MCN setup 4 → 3 sub-scores — pullback contraction dropped (noisiest signal, both windows invented); tight · quiet · near-highs at equal weight. Euphoria rule loses its second trigger — the 2σ test carries it without per-position running-max state. Net: one state machine, two invented numbers, one dangling computation, one noisy signal leave the law; no behavior of value leaves with them. |
+| 2026-07-31 | **X-rulings — gap mechanics simplified structurally.** X3: a base is broken by any later **close** above the pivot (breakout happened) OR any later **high** beyond pivot × 1.005 without one (pivot tested and rejected — spent); highs within the grace are noise. Closes judge breakouts, highs-beyond-noise judge pivot survival — kills the exit-and-instant-re-arm churn loop and gives "fresh base" teeth; redundant last-close clause trimmed. X2 dissolved rather than ruled: the gap-up market-order rule (and its nobody-at-the-open observer problem) is deleted — both pyramid add tickets carry **limit pivot × 1.05**, the schedule's ceiling; skipped bands complete at the open automatically, gaps beyond +5% fill nothing, all enforced by resting GTC orders unwatched. Pyramid trigger cells sharpened from bands to triggers (+2% / +4%). §5.1 mirrors the unified limit. Deliberate residue named and accepted: a fade-back-to-ceiling fill. |
+| 2026-07-31 | **Small-stones round N1–N10.** D10 resolved: levered ETF = `VXC.TO`; TODO's open-decision block becomes a decision log, config row ratified. 15% compounder sizing unlocks only by R5 ruling after two full calendar quarters post-cutover — flat 12% until ruled. Start-low window = 90 calendar days from the first momentum fill; "validation quarter" wording harmonized. Blackout lifts T+1 uniformly, pre-open and post-close alike. Confirmation volume measured per-session vs its own 50-day. Effective-bets band never blocks — printed on every draft ticket (⚠️ below 4), mirrored in R1 step 6; hard caps remain the only blockers. Cushion pinned: 1.08 × average cost. Cooldown escape = new filing + CCN(now) ≥ CCN(at rejection) + 10; rejection rows record their CCN. Cash includes same-account unsettled proceeds (T+1 reuse), never cross-account. Five scheduled jobs = the cadence; dispatch-only workflows are tooling; schedule changes require a plan edit (§4.0 box harmonized). Glossary: Blackout updated, T+1 added. |
+| 2026-07-31 | **Agent-blocker rulings B1–B7.** Compounder backtest reclassified runnable / indicative-only (filing-date reconstruction; restatement + delisted-coverage caveats; shadow book remains the validator). Base detection unified to one scan — pivot window 120→15 · age 15–24 = forming (near-BUY) · ≥ 25 = valid · broken = any later **close** above the pivot · closes define breakout state, highs get 0.5% grace — near-BUY made reachable, the unreachable tolerance removed. C1 exclusion pinned to vendor strings (`Banks - `/`Insurance - ` prefixes; Brokers / Credit Services / Capital Markets stay in); null industry → gap named on the C2 memo. Market cap = the vendor's USD figure; hurdle cap-at-P uses effective shares (vendor cap ÷ last close) — supersedes the diluted-shares clause, ADR ratio solved. Theme assigned in the ticket-writing session — jobs arm, only sessions write tickets (§4.3 already enforced it). Status banners removed document-wide; freeze rule restated in the header with an Updated stamp that bumps on every edit. |
+| 2026-07-31 | **Audit + QA round — build learnings become law.** Base detection defined (pivot = highest high 120→25 sessions back; aged resistance un-starves the sleeve). **Breakout confirmation replaces the volume-exit**: entry mechanical, volume judged EOD; unconfirmed → pyramid freezes at 50%, three sessions to confirm late, exit only on a close back below the pivot (§3.2; §5.1 mechanic amended). MCN setup sub-scores + group-strength windows pinned. Effective-bets formula pinned (1 ÷ Σwᵢwⱼρᵢⱼ, 126 sessions). Theme = judgment at ticket time; book carries theme. Foreign issuers/ADRs ruled in with one-currency law; FX feed extended to filer currencies. Engine tolerance 5pp; failed cross-check → data-confidence path. Momentum: no re-entry cooldown · hold-through-earnings needs +8% cushion · pyramid step tickets priced · trails from highest close since entry · holdings always scored · near-BUY / proximity / hurdle-proximity pinned. Dual-qualification conversion for holdings via monthly approval only. Plan-over-config supremacy. Per-ticker call exceptions enumerated. Version labels stripped from rules — formulas only. Fossils fixed (Phase 7/8 → §3.2/§4.8, Extended tier, "v1 book"). Proposed levered-caps edit withdrawn — §2.0 already rules the caps see the whole book. Glossary +4. |
 | 2026-07-29 | Plan opened. FMP and EODHD priced. |
 | 2026-07-29 | MCP connector live. Probe run. D1 resolved: EODHD Extended. Phase 1 closed. |
 | 2026-07-30 | All sections marked FINAL by Zak. Freeze protocol in force: changes only by announced edit. |
@@ -651,8 +669,8 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | `as_of` | The timestamp on every stored figure, always UTC — what moment this number describes |
 | ATR | Average true range — a stock's typical daily swing; used to measure whether it's coiling |
 | Bar | One day's price record for one stock — open, high, low, close, volume (OHLCV), plus adjusted close. Three years per name live in the database |
-| Base | A consolidation — a stretch where a stock rests sideways instead of trending |
-| Blackout | The 5 trading days before a scheduled earnings report; no entries, no adds |
+| Base | A consolidation — a stretch where a stock rests sideways instead of trending; found by the base-detection rule (§3.2) |
+| Blackout | The 5 trading days before a scheduled earnings report, the report session included; no entries, no adds; lifts the first session after the report session — pre-open and post-close prints alike |
 | CAGR | Compound annual growth rate — the smoothed yearly rate that gets you from A to B |
 | Cash conversion | Free cash flow ÷ net income — how much reported profit shows up as real cash |
 | CCN | Compounder Conviction Number — the 0–100 score ranking compounder candidates (§3.1) |
@@ -661,8 +679,10 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | DATABASE_URL | The Supabase Postgres connection string (session pooler) — the jobs' all-powerful credential; lives only in GitHub Actions secrets |
 | Derating drag | The annual cost of a rich valuation sliding toward a fair one — always a cost, never a credit |
 | DRY_RUN | A switch that makes a job compute everything and write nothing |
+| Effective bets | 1 ÷ Σ wᵢwⱼρᵢⱼ — how many truly independent positions the book holds once correlation is counted (§2.2) |
 | EOD | End-of-day — one price record per stock per day, after the close |
 | FCF | Free cash flow — cash from operations minus capital spending |
+| Final-contraction low | The lowest low of a base's last 10 sessions — the natural stop shelf under a breakout (§3.2) |
 | GTC | Good-til-cancelled — an order that stands until filled, cancelled, or expired (90 days at Wealthsimple) |
 | HELOC | Home equity line of credit — readvanceable, so it's exempt from the never-increase-into-strength rule |
 | Hurdle | The computed price at which a compounder's expected return clears 15%/yr — the "start now" line (§3.1) |
@@ -677,7 +697,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | NAV | Net asset value — all assets across all accounts minus all debt, in CAD. The scorecard (§2.0) |
 | NOPAT | Net operating profit after tax — EBIT × (1 − tax rate); the numerator of ROIC |
 | PAT | Personal access token — a scoped, revocable key for pushing code to the repo |
-| Pivot | The top of a base — the price whose break defines a breakout (§3.2) |
+| Pivot | The top of a base — the price whose break defines a breakout; at least 25 sessions old by construction (§3.2) |
 | Provisional / confirmed | Penciled in from chat or a ticket flip / trued up against the broker's settled record on Sunday |
 | Quarantine | Holding a suspicious price out of use until two sources agree (§4.1) |
 | Reinvestment rate | The share of profit put back into the business — the other half of the compounding engine |
@@ -689,7 +709,9 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | Stage 2 | Weinstein's advancing phase — price above a rising long-term average |
 | Stop-limit | Two prices: the trigger that activates the order, and the limit — the worst price accepted |
 | Studio | Supabase's built-in web dashboard — a spreadsheet-style browser for the database |
+| T+1 | Trade settlement one business day after execution — same-account sale proceeds are reusable inside the window (§2.0) |
 | Tactical lot | A crash-protocol purchase tagged at buy time as momentum's future funding source (§3.3) |
+| Theme | A shared macro driver that would make positions fall together — assigned by judgment at ticket time, never by a data field (§2.2) |
 | Trend template | Minervini's six price conditions a momentum candidate must pass (§3.2) |
 | Upsert | Insert-or-update in one step; how idempotency is implemented |
 | View | A saved query that reads like a table — `v_book`, `v_queue`, `v_bench` are built for human browsing |

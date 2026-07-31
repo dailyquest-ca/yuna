@@ -11,10 +11,15 @@ kills the neutral-50 industry score in the MCN.
 Sequential per name, 10 vendor calls each. TICKERS=A.US,B.US limits the sweep;
 STALE_ONLY=true refreshes only names whose earnings date has passed since their last pull.
 """
-import os, sys, json, math, datetime as dt
+import datetime as dt
+import json
+import math
+import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
-import psycopg
-from db import connect, config, get, dry, Heartbeat
+
+from yuna.db import Heartbeat, connect, dry, get
+from yuna.rules import implements
 
 WORKERS = int(os.environ.get("WORKERS", "8"))
 BATCH = 100
@@ -64,6 +69,21 @@ def cagr(new, old, years):
 
 
 # ------------------------------------------------------------------ extraction
+@implements("3.1/c1-gate",
+            "the computed quality floor: positive FCF, internally funded growth, net debt / "
+            "EBITDA <= 2.5x, banks and insurers out")
+@implements("3.2/m4-earnings-acceleration",
+            "latest quarter YoY EPS growth >= 25%, or accelerating two quarters with the "
+            "latest >= 15%")
+@implements("3.1/statement-currency",
+            "detects the filing currency off Financials.*.currency_symbol and records it "
+            "beside the quote currency; General.CurrencyCode lies for depositary receipts, "
+            "and score.py is where the mismatch bites")
+@implements("4.1/point-in-time",
+            "keeps every historical statement with its own filing_date, so a backtest can be "
+            "restricted to what had actually been filed")
+@implements("3.3/filing-date",
+            "stamps each row with the statement's filing date, never its fiscal period end")
 def extract(ticker, r, quote_ccy=None):
     G = r.get("General") or {}
     H = r.get("Highlights") or {}
@@ -234,7 +254,7 @@ def extract(ticker, r, quote_ccy=None):
     eps = {k: num((hist[k] or {}).get("epsActual")) for k in desc(hist)}
     reported = [(k, v) for k, v in eps.items() if v is not None]
     yoy = []
-    for i, (k, v) in enumerate(reported[:8]):
+    for i, (_period, v) in enumerate(reported[:8]):
         if i + 4 < len(reported):
             base = reported[i + 4][1]
             yoy.append((v / base - 1) if base and base > 0 else None)

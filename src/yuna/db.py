@@ -3,8 +3,17 @@
 Kept deliberately thin — the jobs stay readable, and the heartbeat contract (one runs row
 per job, green | amber | red, tracebacks embedded on death) lives in exactly one place.
 """
-import os, sys, json, time, traceback, urllib.request, urllib.error
+import json
+import os
+import time
+import traceback
+import urllib.error
+import urllib.request
+
 import psycopg
+
+from yuna.policy import account_cash_cad
+from yuna.rules import implements
 
 EODHD = "https://eodhd.com/api"
 
@@ -53,6 +62,10 @@ def get(path, calls, tries=3, timeout=90, **params):
             raise
 
 
+@implements("2.0/nav-from-balances",
+            "assets at market minus drawn debt, in CAD, anchored on the last recorded balances")
+@implements("2.0/facilities-are-debt",
+            "a facility contributes only its drawn balance; undrawn credit is capacity")
 def nav_cad(cur):
     """NAV per §2.0 — balances are truth, prices are the extrapolation.
 
@@ -90,14 +103,8 @@ def nav_cad(cur):
         if b.get("kind") == "facility":
             debt += float(b.get("drawn") or 0)      # facilities are CAD always
             continue
-        # cash per currency is the anchored truth; the USD sleeve reprices with FX daily.
-        # Falling back to the deprecated single `cash` column keeps older rows readable.
-        if b.get("cad") is not None or b.get("usd") is not None:
-            c_cad, c_usd = float(b.get("cad") or 0), float(b.get("usd") or 0)
-            c = c_cad + c_usd * fx
-        else:
-            c_cad, c_usd = float(b.get("cash") or 0), 0.0
-            c = c_cad
+        # cash per currency is the anchored truth; the USD sleeve reprices with FX daily
+        c, c_cad, c_usd = account_cash_cad(b.get("cad"), b.get("usd"), fx, b.get("cash"))
         value = c + per_account.get(acct, 0.0)      # §2.0: balances anchor, prices extrapolate
         stated = b.get("total")
         accounts[acct] = dict(value_cad=round(value, 2), cash_cad=round(c, 2),
@@ -119,9 +126,16 @@ def nav_cad(cur):
                 anchored=anchored, balances_captured=bool(bal))
 
 
+@implements("4.7/heartbeat",
+            "opens exactly one runs row per job and closes it green, amber or red, embedding "
+            "the traceback when the body raises")
 class Heartbeat:
     """with Heartbeat(conn, 'daily') as hb: ...  — opens a running row, closes it green,
-    or red with the traceback if the body raises. hb.detail / hb.calls / hb.rows are yours."""
+    or red with the traceback if the body raises. hb.detail / hb.calls / hb.rows are yours.
+
+    This is the only diagnostic that reliably survives: Actions log downloads 403 on
+    this repo, so a job that dies without writing here dies invisibly. Hence the
+    workflow-level autopsy step in report_fail.py as the backstop."""
 
     def __init__(self, conn, job, dry_run=None):
         self.conn, self.job = conn, job
@@ -130,8 +144,8 @@ class Heartbeat:
 
     def __enter__(self):
         with self.conn.cursor() as cur:
-            cur.execute("insert into runs(job,status,dry_run) values (%s,'running',%s) returning id",
-                        (self.job, self.dry_run))
+            cur.execute("insert into runs(job,status,dry_run) values (%s,'running',%s)"
+                        " returning id", (self.job, self.dry_run))
             self.id = cur.fetchone()[0]
         self.conn.commit()
         return self

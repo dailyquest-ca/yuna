@@ -2,7 +2,14 @@
 Incremental (from last stored date + 1); doubles as backfill when a ticker has no bars.
 Heartbeat: every run writes a runs row — green | amber | red. DRY_RUN fetches but never writes prices.
 """
-import os, sys, json, time, datetime as dt, urllib.request, urllib.error
+import datetime as dt
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
 import psycopg
 
 API = "https://eodhd.com/api/eod/{t}?api_token={k}&fmt=json&from={f}"

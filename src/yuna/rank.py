@@ -2,9 +2,15 @@
 Effective L0 (bar filters) -> M1 latch -> M2 template -> MCN (3x33%, windows end t-10)
 -> L1-M top 150 -> base/pivot scan (M3 constraints) -> candidates + queue (cap 20).
 """
-import os, sys, json, math, traceback, datetime as dt
+import json
+import os
+import sys
+import traceback
+
 import numpy as np
 import psycopg
+
+from yuna.rules import implements
 
 DRY = os.environ.get("DRY_RUN","false").lower() in ("1","true","yes")
 
@@ -32,6 +38,9 @@ def weekly_closes(dates, closes):
         if key not in weeks or d>weeks[key][0]: weeks[key]=(d,c)
     return sorted(weeks.values())
 
+@implements("3.2/m1-latch",
+            "SPX last-close-of-week against its 30-week average and that average 4 weeks ago; "
+            "the state latches and only the opposite condition flips it")
 def compute_m1(cur):
     cur.execute("select d, close from prices where ticker='GSPC.INDX' order by d")
     rows=cur.fetchall()
@@ -68,6 +77,18 @@ def base_scan(h,l,c):
     valid = blen>=25 and depth<=0.25 and price<=pivot*1.005
     return valid, pivot, blen, depth, contraction_low
 
+@implements("3.2/m2-trend-template",
+            "the six template tests at current price — above the 150 & 200-day, 150 above 200, "
+            "200 above its value 21 sessions ago, above the 50-day, >=30% off the 52-week low, "
+            "within 25% of the 52-week high")
+@implements("3.2/mcn-score",
+            "MCN v1.0 — momentum quality, setup proximity and industry group strength at equal "
+            "weight, every window ending 10 sessions back, percentiled across the effective L0; "
+            "DEVIATION as recorded in the ledger: setup proximity still averages four sub-scores, "
+            "including the pullback contraction the 2026-07-31 pass dropped")
+@implements("3.2/l1m-top150",
+            "L1-M = M2 pass and M4 not failed, ranked by MCN, top 150 — a null M4 is a name "
+            "not yet swept, which does not fail the gate")
 def main():
     t10=10
     with psycopg.connect(db_url()) as conn:

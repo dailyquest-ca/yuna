@@ -8,14 +8,28 @@ Then it builds the two opportunity lists — compounders at or below hurdle, mom
 with a live trigger — sized against NAV, and writes the whole verdict to `briefs` with an
 exit or entry ticket per line. Yuna never executes; Zak places every order.
 """
-import os, sys, json, math, datetime as dt
-import psycopg
-from db import connect, config, dry, nav_cad, Heartbeat
+import json
+import sys
+
+from yuna.db import Heartbeat, config, connect, dry, nav_cad
+from yuna.rules import implements
 
 ENTER = 70.0          # §3.3 enterable
 FULL = 85.0           # §3.3 full conviction
 
 
+@implements("6/re-underwrite",
+            "scores every open position through both pipelines and keeps it only if the system "
+            "would enter it today, then re-applies the §2 caps as though it were a new entry")
+@implements("6/conforming-target-book",
+            "hands over the two opportunity pools cut down to the sleeve counts, the sleeve "
+            "weights, the §2.2 caps and the blackout — not a raw list")
+@implements("2.7/non-conformance",
+            "an incumbent that breaches a cap is named with the clause it breaches and leaves "
+            "the re-underwrite as an exit line")
+@implements("3.3/thresholds",
+            "70 is enterable on both CCN and MCN; 85 is full conviction and picks the momentum "
+            "risk budget")
 def main():
     with connect() as conn:
         with Heartbeat(conn, "phase0") as hb:
@@ -138,6 +152,10 @@ def main():
                 mom_pool = []
                 for tk, nm, mcn, trig, lim, stop, prox, note in cur.fetchall():
                     mcn = float(mcn); trig = float(trig); stop = float(stop)
+                    # Stays inline until policy.momentum_size takes a max_stop and hands back the
+                    # capped stop: it caps at its own MAX_STOP where §3.2's 8% is read here from
+                    # the `momentum_max_stop` row (§4.3 — config is the plan's runtime copy), and
+                    # the mutated stop below is what the ticket carries, not just the distance.
                     risk = float(budgets.get("85" if mcn >= FULL else "70", 0.005))
                     dist = max((trig - stop) / trig, 0.0001)
                     if dist > max_stop:                      # §3.2 never wider than 8%
@@ -156,6 +174,9 @@ def main():
                 """§2.2: at most two names per industry group, no theme above 35% on entry."""
                 th, g = sec.get(tk, (None, None))
                 g, th = g or "unknown", th or "unknown"
+                # The "2" stays on the config row rather than policy.MAX_NAMES_PER_GROUP, which
+                # policy.group_has_room hardcodes: wiring it would silently ignore
+                # `max_names_per_group` here while the breach message still quotes it.
                 if groups.get(g, 0) >= per_group:
                     return None, f"§2.2 — already {per_group} names in {g}"
                 if themes.get(th, 0.0) + weight > theme_cap:

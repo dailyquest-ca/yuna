@@ -8,47 +8,23 @@ P/FCF. We hold a 3-year bar window, so the median is taken over the quarters we 
 and `pfcf_obs` records how many that was. Under 8 observations the name falls back to the
 plan's short-history rule (fair = lower of current or 25x).
 """
-import os, sys, json, math, statistics as st, datetime as dt
-import psycopg
-from db import connect, config, dry, Heartbeat
+import json
+import statistics as st
+import sys
+
+from yuna.db import Heartbeat, config, connect, dry
+from yuna.policy import (
+    ccn as ccn_score,
+    engine_growth,
+    hurdle_price,
+    inverted_log_size,
+    pct_rank,
+    size_cohort,
+    within_hurdle,
+)
+from yuna.rules import implements
 
 SIZE_BOUNDARY_DEFAULT = 10_000_000_000
-
-
-def pct_rank(pairs):
-    """[(key, value)] -> {key: percentile 0..100}; None values are skipped entirely."""
-    got = [(k, v) for k, v in pairs if v is not None]
-    if not got:
-        return {}
-    if len(got) == 1:
-        return {got[0][0]: 50.0}
-    got.sort(key=lambda kv: kv[1])
-    n = len(got) - 1
-    return {k: 100.0 * i / n for i, (k, v) in enumerate(got)}
-
-
-def hurdle_price(fcf_ttm, shares, growth, fair, floor=0.15):
-    """Highest price where FCF yield + growth − derating drag ≥ floor (§3.1)."""
-    if not fcf_ttm or fcf_ttm <= 0 or not shares or shares <= 0 or not fair or fair <= 0:
-        return None
-
-    def er(mcap):
-        yield_ = fcf_ttm / mcap
-        drag = max(0.0, 1.0 - (fair * fcf_ttm / mcap) ** 0.2)   # 5-yr annualized slide, never a credit
-        return yield_ + growth - drag
-
-    lo, hi = fcf_ttm * 0.01, fcf_ttm * 5000.0
-    if er(hi) >= floor:
-        return hi / shares
-    if er(lo) < floor:
-        return None
-    for _ in range(80):
-        mid = (lo + hi) / 2
-        if er(mid) >= floor:
-            lo = mid
-        else:
-            hi = mid
-    return lo / shares
 
 
 def month_closes(cur, tickers):
@@ -79,6 +55,13 @@ def pfcf_history(raw, closes):
     return (st.median(obs) if obs else None), len(obs)
 
 
+@implements("3.1/bench-eviction",
+            "gate failure evicts immediately; rank eviction needs two months outside the top "
+            "60 and spares holdings and names within 10% of their hurdle")
+@implements("3.1/statement-currency",
+            "refuses to underwrite a name whose statements are filed in a currency other than "
+            "the one it quotes in — no fair multiple, no hurdle, and C1 fails with the reason "
+            "(the sweep detects the mismatch; this is where it bites)")
 def main():
     with connect() as conn:
         with Heartbeat(conn, "score") as hb:
@@ -113,23 +96,25 @@ def main():
             # ---- percentiles across all of L0 (§3.0) ----
             eng_p = pct_rank([(r[0], r[1]) for r in rows])
             cc_p = pct_rank([(r[0], r[2]) for r in rows])
-            size_p = pct_rank([(r[0], -math.log(r[3])) for r in rows if r[3] and r[3] > 0])  # inverted
+            # smaller scores higher, on a log scale — policy owns the transform. The positive-cap
+            # filter stays: market_cap is a float8, so it can arrive as NaN, and a NaN that
+            # reached the sort would scramble every other name's size percentile, not just its own
+            size_p = pct_rank([(r[0], inverted_log_size(r[3])) for r in rows if r[3] and r[3] > 0])
 
             out, unscored = [], []
             for (tk, engine, cc, mcap, shares, fcf, c1, c1why, roic, reinv,
                  pfcf_cur, conf, gw_jump, agrees, rev_cagr, quote_ok, raw, is_hold) in rows:
-                parts = [("engine", eng_p.get(tk)), ("cash_conv", cc_p.get(tk)),
-                         ("size", size_p.get(tk))]
-                have = [(n, v) for n, v in parts if v is not None]
-                # §3.3 renormalizes around ONE missing component. Size is available to almost
-                # everything, so without this floor a company whose engine and cash conversion
-                # are both unmeasurable scores on smallness alone — and a $4 microcap tops the
-                # bench. Two components, at least one of them a business measure, or unscored.
-                if len(have) < 2 or not any(n in ("engine", "cash_conv") for n, _ in have):
+                # CCN v1.0 (§3.1) and the §3.3 renormalization both live in policy.ccn — including
+                # the floor that keeps a name with no measurable business off the bench, which is
+                # how a $4 microcap once topped it on smallness alone. None = not scorable at all.
+                ccn, conf_calc = ccn_score(eng_p.get(tk), cc_p.get(tk), size_p.get(tk))
+                if ccn is None:
                     unscored.append(tk)
                     continue
-                ccn = sum(v for _, v in have) / len(have)      # equal weight, renormalized (§3.3)
-                confidence = conf if len(have) == 3 else "2of3"
+                # the sweep's own data_confidence wins whenever all three components are present:
+                # it carries flags the percentiles cannot see (short history, engine divergence).
+                # Only the "scored on 2 of 3" fact is policy's to state.
+                confidence = conf if conf_calc == "full" else conf_calc
 
                 # statements in one currency divided by a market cap in another is not a
                 # multiple, it is a category error — so it produces no hurdle at all (§009)
@@ -145,13 +130,17 @@ def main():
                 # it must agree with observed revenue growth. When it doesn't — usually a net-cash
                 # balance sheet shrinking invested capital toward zero and sending ROIC to the moon
                 # — we underwrite on the number we can check, never on the flattering one.
-                # agreement is re-decided here, not read from the sweep: the tolerance is a
-                # scoring policy and belongs with the scorer, where changing it costs no API calls
-                if engine is not None and rev_cagr is not None:
-                    agrees = abs(engine - rev_cagr) <= max(tol, 0.5 * abs(rev_cagr))
-                g = min(growth_cap, engine) if engine is not None else 0.0
-                if engine is not None and agrees is False:
-                    g = max(0.0, min(g, rev_cagr if rev_cagr is not None else 0.0))
+                # agreement is re-decided at scoring time, not read from the sweep: the tolerance
+                # is a scoring policy, and changing it here costs no API calls
+                # the row's stored verdict rides along: when the check cannot be recomputed here
+                # (no revenue CAGR on the row) a stored False still means untrustworthy, and
+                # promoting it back to full engine growth because an input went missing is
+                # exactly the failure this check exists to prevent
+                g, agrees_calc = engine_growth(engine, rev_cagr, growth_cap, tol, prior_agrees=agrees)
+                # a None verdict means the check could not run at all, and an unrunnable check
+                # overwrites nothing — the sweep's own flag stands
+                if agrees_calc is not None:
+                    agrees = agrees_calc
                 hp = hurdle_price(fcf, shares, g, fair, floor)
                 px = last.get(tk)
                 gap = ((px - hp) / hp) if px and hp else None
@@ -165,7 +154,7 @@ def main():
                         ((c1why + " · " if c1why else "") +
                          "reports in a foreign currency or trades as a depositary receipt — "
                          "not priceable in v1"),
-                    cohort=("large" if (mcap or 0) >= boundary else "small"),
+                    cohort=size_cohort(mcap, boundary),
                     hurdle_price=hp, fcf_yield=(fcf / mcap if fcf and mcap else None),
                     engine_growth=g, fair_multiple=fair,
                     derating_drag=(max(0.0, 1 - (fair / pfcf_cur) ** 0.2) if fair and pfcf_cur else None),
@@ -188,6 +177,12 @@ def main():
             for i, o in enumerate(bench):
                 o["rank"] = i + 1
 
+            # §3.1 seatbelt: rank eviction never touches a name within 10% of its hurdle.
+            # Computed here rather than in the delete's SQL so `within_hurdle` stays the one
+            # definition of "within 10%" — the same test the L2 seating rule uses.
+            near_hurdle = sorted({o["ticker"] for o in out
+                                  if within_hurdle(o["last_close"], o["hurdle_price"])})
+
             if not dry():
                 with conn.cursor() as cur:
                     # §3.1: gate failure evicts immediately — no two-month seatbelt. Without
@@ -200,8 +195,9 @@ def main():
                     cur.execute("""update bench set months_outside_top60 = months_outside_top60 + 1
                                    where ticker <> all(%s)""", ([o["ticker"] for o in bench],))
                     cur.execute("""delete from bench where months_outside_top60 >= 2
-                                   and not approved and ticker not in
-                                     (select ticker from universe where is_holding)""")
+                                   and not approved and ticker <> all(%s)
+                                   and ticker not in (select ticker from universe where is_holding)""",
+                                (near_hurdle,))
                     cur.executemany("""insert into bench(ticker,rank,cohort,ccn,engine,cash_conv,size_score,
                             engine_raw,cash_conv_raw,roic,reinvest_rate,c1_pass,c1_fail_reason,
                             hurdle_price,fcf_yield,engine_growth,derating_drag,fair_multiple,

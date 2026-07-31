@@ -1,5 +1,10 @@
 """Apply migrations/*.sql in order, once each. Tracker: _migrations table."""
-import os, sys, pathlib, psycopg
+import os
+import pathlib
+import sys
+
+import psycopg
+
 
 def db_url():
     url = os.environ["DATABASE_URL"]
@@ -8,11 +13,14 @@ def db_url():
     return url
 
 def main():
-    mig_dir = pathlib.Path(__file__).resolve().parent.parent / "migrations"
+    # src/yuna/migrate.py -> src/yuna -> src -> repo root
+    mig_dir = pathlib.Path(__file__).resolve().parents[2] / "migrations"
     files = sorted(p for p in mig_dir.glob("*.sql"))
     with psycopg.connect(db_url()) as conn:
         with conn.cursor() as cur:
-            cur.execute("create table if not exists _migrations(name text primary key, applied_at timestamptz not null default now())")
+            cur.execute("create table if not exists _migrations("
+                        "name text primary key,"
+                        "applied_at timestamptz not null default now())")
             conn.commit()
             cur.execute("select name from _migrations")
             done = {r[0] for r in cur.fetchall()}

@@ -6,9 +6,13 @@ pre-open session reads instead of recomputing anything by hand.
 
 Everything here reads the database. The only vendor call is the earnings calendar.
 """
-import os, sys, json, datetime as dt
-import psycopg
-from db import connect, config, get, dry, nav_cad, Heartbeat
+import datetime as dt
+import json
+import sys
+
+from yuna.db import Heartbeat, config, connect, dry, get, nav_cad
+from yuna.policy import ratchet_stop
+from yuna.rules import implements
 
 CAL_DAYS = 45
 
@@ -62,35 +66,30 @@ def ratchet(conn, hb, buffer_pct):
             if not bars:
                 continue
             closes = [float(c) for _, c in bars]
-            px = closes[-1]
-            new_hc = max(closes) if hc is None else max(float(hc), max(closes))
-
-            # euphoria (§3.2): >2 sd above own 50-day, or the largest single-day gain since entry
-            euphoric = False
-            if len(closes) >= 50:
-                w = closes[-50:]
-                mean = sum(w) / 50.0
-                sd = (sum((x - mean) ** 2 for x in w) / 50.0) ** 0.5
-                euphoric = sd > 0 and px > mean + 2 * sd
-            if len(closes) >= 2:
-                gains = [(closes[i] / closes[i - 1] - 1) for i in range(1, len(closes))]
-                if gains and gains[-1] >= max(gains):
-                    euphoric = True
-
-            up = px / float(cost) - 1 if cost else 0.0
-            if euphoric:
-                cand, new_mode = new_hc * 0.95, "trail5"
-            elif up >= 0.15:
-                cand, new_mode = new_hc * 0.90, "trail10"
-            elif step >= 3:
-                cand, new_mode = float(cost), "breakeven"
-            else:
-                cand, new_mode = (float(stop) if stop is not None else None), (mode or "initial")
-
-            if cand is None:
-                continue
             cur_stop = float(stop) if stop is not None else None
-            new_stop = cand if cur_stop is None else max(cur_stop, cand)   # ratchets up, never down
+            # the whole ratchet — euphoria, the +15%/trail10 rule, breakeven at full size and
+            # the ratchets-up-never-down clamp — is policy.ratchet_stop (§3.2). Everything is
+            # floated on the way in because psycopg hands numerics back as Decimal and the rule
+            # is written in floats; a null avg_cost stays None so the +15% test skips it exactly
+            # as the old `up = ... if cost else 0.0` did.
+            new_stop, new_mode, new_hc = ratchet_stop(closes,
+                                                      float(cost) if cost is not None else None,
+                                                      step, cur_stop,
+                                                      float(hc) if hc is not None else None)
+            if new_mode == "no-cost-basis":
+                # a full-size position with no cost basis cannot move to breakeven. The seed
+                # migrations left rows like this; it is a data defect, so it is surfaced rather
+                # than skipped in silence — the stop on file, if any, still stands.
+                hb.amber(f"{tk}: pyramid step {step} with no average cost — breakeven unavailable")
+                continue
+            if new_stop is None:
+                continue                    # nothing to trail and no stop on file to carry forward
+            if new_mode == "initial":
+                # "initial" comes back only from the fall-through, where this job has always
+                # written the row's existing trail_mode rather than a fresh label: a trail5 name
+                # that stops qualifying tonight keeps its mode while its stop stands still.
+                # policy.ratchet_stop reports the branch, not the row, so restore that here.
+                new_mode = mode or "initial"
             if cur_stop is None or new_stop > cur_stop + 1e-9 or new_hc != (float(hc) if hc else None):
                 if not dry():
                     cur.execute("""update book set stop=%s, stop_limit=%s, highest_close=%s,
@@ -117,7 +116,7 @@ def event_scan(conn, hb, gap_threshold, blackout_days):
                        join lateral (select close from prices where ticker=b.ticker and d < p.d
                                      order by d desc limit 1) prev on true
                        where b.status='open' and b.stop is not null""")
-        for tk, stop, d, op, lo, cl, prev in cur.fetchall():
+        for tk, stop, d, op, lo, _cl, _prev in cur.fetchall():
             if lo is not None and float(lo) <= float(stop):
                 fired.append({"ticker": tk, "stop": float(stop), "low": float(lo), "date": str(d),
                               "gapped_through": float(op) < float(stop)})
@@ -194,6 +193,9 @@ def nav_snapshot(conn, hb):
 
 
 # ---------------------------------------------------------------- freshness + brief
+@implements("4.7/stale-data-no-tickets",
+            "bars older than 4 days, or an amber/red job in the price feed itself, withhold "
+            "tickets; an amber job in any other domain is reported and stales that domain only")
 def freshness(conn):
     with conn.cursor() as cur:
         cur.execute("select max(d) from prices")

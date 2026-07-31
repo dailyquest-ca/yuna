@@ -23,11 +23,45 @@
 ## Layout
 
 ```
-docs/         the plan (law) and build handoffs
-migrations/   numbered SQL, applied by the dispatch-only `migrate` workflow
-src/          ingest + compute jobs (Python); db.py holds the shared heartbeat contract
-.github/      workflows (all times UTC)
+docs/            the plan (law) and build handoffs
+migrations/      numbered SQL, applied by the dispatch-only `migrate` workflow
+src/yuna/        the package
+  rules.py       the plan-to-code ledger: every clause, its status, the @implements decorator
+  policy.py      the plan's rules as pure functions — no db, no network, no clock
+  db.py          shared plumbing: connection, config, vendor fetch, the heartbeat contract
+  <job>.py       one module per job; each is plumbing that calls into policy
+tests/           pytest; test_conformance.py enforces the ledger in both directions
+.github/         workflows (all times UTC)
 ```
+
+Jobs run as `python -m yuna.<job>`. Dependencies are pinned in `pyproject.toml` and
+installed with `pip install -e .` — no workflow installs anything by hand.
+
+## How a rule gets into the code
+
+The plan is law, and the standing risk is drift in either direction: code that
+quietly does something the plan never said, or a clause everyone assumed was built
+and nobody built. Neither shows up in ordinary tests, because code that does the
+wrong thing correctly still passes.
+
+So every rule is written once, in `policy.py`, as a pure function that names its
+clause:
+
+```python
+@implements("3.2/stop-8pct", "initial stop is the higher of the final-contraction low or entry - 8%")
+def initial_stop(entry: float, contraction_low: float | None = None) -> float:
+    ...
+```
+
+and every clause appears in `rules.py` with a status and — separately — whether any
+running job actually calls it. Those are different questions, and conflating them is
+how a build convinces itself it is finished. `tests/test_conformance.py` fails if a
+decorator cites a clause that does not exist, if a clause cites a plan section that
+does not exist, if something claims BUILT with no implementation, or if something
+marked OPEN turns out to have code behind it. Migrations join the same ledger with a
+`-- implements:` marker, so the rules that live in SQL are counted too.
+
+Run `pytest -s tests/test_conformance.py` for the honest build state.
 
 ## Jobs, in the order the day runs them
 

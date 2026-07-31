@@ -3,9 +3,13 @@
 Bars are a vendor-re-pullable cache; the decisions are not. The commit doubles as GitHub's
 60-day schedule keep-alive, so the crons never fall asleep.
 """
-import os, sys, gzip, json, datetime as dt
-import psycopg
-from db import connect, Heartbeat
+import datetime as dt
+import gzip
+import json
+import os
+import sys
+
+from yuna.db import Heartbeat, connect
 
 SKIP = {"prices"}
 OUT = "backups"

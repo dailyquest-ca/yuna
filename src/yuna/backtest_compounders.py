@@ -13,11 +13,16 @@ than using today's filing at a past date, but not zero. Survivorship applies her
 L0 census is today's listings — and the bar window caps the test at roughly two years, which
 is short evidence for a strategy whose holding period is measured in years.
 """
-import os, sys, json, math, statistics as st, datetime as dt
+import json
+import math
+import os
+import statistics as st
+import sys
+
 import numpy as np
 import pandas as pd
-import psycopg
-from db import connect, config, dry, Heartbeat
+
+from yuna.db import Heartbeat, connect, dry
 
 START_NAV = float(os.environ.get("START_NAV", "200754.38"))
 LABEL = os.environ.get("LABEL", "compounders v1")
@@ -140,7 +145,7 @@ def main():
                                  and f.quote_ok and f.raw is not null
                                  and not coalesce(f.is_financial, false)""")
                 names = {}
-                for tk, raw, ok, sec, ind in cur.fetchall():
+                for tk, raw, _ok, sec, ind in cur.fetchall():
                     r = raw if isinstance(raw, dict) else json.loads(raw)
                     if r.get("yearly"):
                         names[tk] = dict(raw=r, sector=sec, industry=ind)

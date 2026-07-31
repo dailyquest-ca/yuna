@@ -24,11 +24,14 @@ Everything else — M1's latch, the trend template, the base scan, MCN with its 
 the pyramid, the 8% cap, the ratchet, the euphoria rule, the sleeve ceiling — is the same
 arithmetic the live jobs run.
 """
-import os, sys, json, math, datetime as dt
+import json
+import os
+import sys
+
 import numpy as np
 import pandas as pd
-import psycopg
-from db import connect, config, dry, Heartbeat
+
+from yuna.db import Heartbeat, connect, dry
 
 START_NAV = float(os.environ.get("START_NAV", "200754.38"))
 LABEL = os.environ.get("LABEL", "momentum v1")

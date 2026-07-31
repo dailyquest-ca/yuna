@@ -1,0 +1,108 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yuna"
+version = "0.1.0"
+description = "Zak's trading research and automation operation"
+requires-python = "==3.12.*"
+dependencies = [
+    "psycopg[binary]==3.2.9",
+    "numpy==2.4.6",
+    "pandas==3.0.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.4.1",
+    "ruff==0.12.7",
+    "mypy==1.17.1",
+    "pandas-stubs==2.3.0.250703",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ---------------------------------------------------------------------------
+# Lint. The house style predates the linter, so the rule set is chosen to match
+# what is already written rather than to force a rewrite: multiple statements on
+# one line (E701/E702) are used deliberately in the jobs for tight guard clauses,
+# and module-level `import os, sys, json` is house convention.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "E701",    # multiple statements on one line (colon) — deliberate house style
+    "E702",    # multiple statements on one line (semicolon) — ditto
+    "E401",    # `import os, sys, json` — house convention across every job module
+    "E741",    # ambiguous variable name — `l` for a list of rows reads fine
+    "SIM108",  # ternary-instead-of-if — often less readable in the numeric code
+    "SIM117",  # nested `with` — `with connect() as conn: with Heartbeat(...)` is the shape
+               # every job has, and flattening it hides that the heartbeat wraps the work
+    "B905",    # zip() without strict= — the sequences are known equal length
+    "UP015",   # redundant open mode
+    "SIM102",  # nested `if` — the outer one is usually a guard, and merging hides that
+    "RUF002",  # ambiguous unicode in docstrings — the plan is written with − and ×, and the
+               # docstrings quote it verbatim on purpose
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+force-single-line = false
+known-first-party = ["yuna"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+# Grandfathered. These predate the linter and are written in a deliberately dense style —
+# long embedded SQL, packed numeric expressions. Reformatting working, verified code to
+# satisfy a line limit buys nothing and risks a transcription error in exactly the modules
+# whose defects have been most expensive. The limit binds on everything new, and each of
+# these comes off the list when its module is next rewritten.
+"src/yuna/rank.py" = ["E501"]
+"src/yuna/funnel.py" = ["E501"]
+"src/yuna/ingest.py" = ["E501"]
+"src/yuna/backtest.py" = ["E501"]
+"src/yuna/backtest_compounders.py" = ["E501"]
+"src/yuna/fundamentals.py" = ["E501"]
+"src/yuna/daily.py" = ["E501"]
+"src/yuna/score.py" = ["E501"]
+"src/yuna/phase0.py" = ["E501"]
+
+# ---------------------------------------------------------------------------
+# Types. Strict on the shared plumbing and the rule registry — those are the
+# pieces every job depends on, so a wrong signature there is a wrong signature
+# everywhere. The job modules run against untyped psycopg rows and vendor JSON;
+# strict mode there would be `Any`-casting theatre, so they are checked at the
+# ordinary level and no more.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+mypy_path = "src"
+namespace_packages = true
+explicit_package_bases = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["yuna.rules", "yuna.db"]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["yuna.backtest", "yuna.backtest_compounders"]
+ignore_errors = true    # numeric research code; correctness is proven by the sims, not the checker
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q --strict-markers"
+markers = ["db: needs a live DATABASE_URL (skipped when absent)"]
