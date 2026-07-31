@@ -1,0 +1,34 @@
+name: backtest
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: 'run label'
+        default: 'momentum v1'
+      start_nav:
+        description: 'starting NAV in CAD'
+        default: '200754.38'
+      dry_run:
+        description: 'simulate, write nothing'
+        default: 'false'
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install "psycopg[binary]==3.2.*" numpy pandas
+      - run: set -o pipefail; python src/backtest.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          LABEL: ${{ inputs.label || 'momentum v1' }}
+          START_NAV: ${{ inputs.start_nav || '200754.38' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py backtest /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
