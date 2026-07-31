@@ -46,8 +46,9 @@ def main():
             for sweep in range(12):
                 added=0
                 for offset in range(0,1000,100):
-                    f=[["market_capitalization",">",300000000],["exchange","=","us"]]
-                    if ceiling is not None: f.append(["market_capitalization","<",ceiling])
+                    f=[["exchange","=","us"]]
+                    f.append(["market_capitalization","<",ceiling] if ceiling is not None
+                             else ["market_capitalization",">",300000000])
                     filt=json.dumps(f)
                     data=get(f"https://eodhd.com/api/screener?api_token={K}&sort=market_capitalization.desc&filters={urllib.request.quote(filt)}&limit=100&offset={offset}", calls)
                     batch=(data or {}).get("data",[])
@@ -55,7 +56,7 @@ def main():
                     for b in batch:
                         code=b.get("code"); cap=float(b.get("market_capitalization") or 0)
                         ceiling = cap+1 if ceiling is None else min(ceiling, cap+1)
-                        if code in common and code not in rows:
+                        if cap>=300000000 and code in common and code not in rows:
                             rows[code]=(b.get("name"), b.get("sector") or "Unknown", b.get("industry") or "Unknown", cap)
                             added+=1
                     if len(batch)<100: break
