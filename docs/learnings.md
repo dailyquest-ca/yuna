@@ -73,9 +73,12 @@ is `roadmap-2026-07-31.md`.
     default-deny for anon/public and leaves the owner free; the write boundary is carried by the
     guard triggers and the `yuna_session` grants, which is what §4.3 actually describes. Caught in
     review, reverted in `021`, before it ever ran a night.
-26. **The Supabase MCP read can lag the database by minutes.** A run that had already finished red
-    kept reading as `running` across several queries. Judge a job by its `runs` row *and* the
-    clock, and never conclude a job is hung from an MCP read alone.
+26. **Status reads lag — from both APIs, by minutes.** A run that had already finished red kept
+    reading as `running` across several Supabase MCP queries, and the GitHub Actions API reported a
+    job `in_progress` for four minutes after it had finished successfully in 43 seconds. Never
+    conclude a job is slow or hung from a status read alone: check the finished timestamp against
+    the clock, and prefer the artefact the job leaves behind (a `runs` row, a committed file) over
+    any API's opinion about whether it is still running.
 
 ## Process
 
