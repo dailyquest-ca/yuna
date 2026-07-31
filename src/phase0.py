@@ -235,17 +235,33 @@ def main():
                                          %s,%s,%s,%s,%s,'proposed',%s,%s)""",
                                     (m["ticker"], m["trigger"], m["limit"], m["shares"], m["stop"],
                                      m["stop_limit"], brief_id, f"MCN {m['mcn']:.1f} · {m['base']}"))
+                    rrsp_cash = float((n["accounts"].get("RRSP") or {}).get("cash_cad") or 0)
                     for c_ in comp_list:
+                        cost = float(c_["size_cad"] or 0)
+                        # §2.6 / §6 Step 3: idle RRSP cash deploys into compounders first —
+                        # multi-year no-touch holds, and US dividend withholding is treaty-exempt
+                        if rrsp_cash >= cost:
+                            acct = "RRSP"; rrsp_cash -= cost
+                        else:
+                            acct = "TFSA"
+                        c_["account"] = acct
                         cur.execute("""insert into tickets(ticker,account,sleeve,action,reason,order_type,
                                          limit_price,qty,state,brief_id,note)
-                                       values (%s,'TFSA','compounders','buy','hurdle','limit',
+                                       values (%s,%s,'compounders','buy','hurdle','limit',
                                          %s,%s,'proposed',%s,%s)""",
-                                    (c_["ticker"], c_["px"], c_["shares"], brief_id,
+                                    (c_["ticker"], acct, c_["px"], c_["shares"], brief_id,
                                      f"CCN {c_['ccn']:.1f} · hurdle {float(c_['hurdle']):.2f} · "
                                      f"{abs(100*float(c_['gap'])):.0f}% below · C2 memo pending"))
                 conn.commit()
 
             hb.rows = len(exits) + len(mom_list) + min(5, len(comp_list)) + 1
+            proceeds = sum(v["value_cad"] for v in exits)
+            outlay = (sum(float(c["size_cad"] or 0) for c in comp_list)
+                      + sum((m["size_pct"] or 0) * nav for m in mom_list))
+            hb.detail["funding"] = {"exit_proceeds_cad": round(proceeds, 2),
+                                    "entry_outlay_cad": round(outlay, 2),
+                                    "cash_before_cad": round(cash, 2),
+                                    "sequence": "sells settle before buys — T+1 at Wealthsimple"}
             hb.detail.update(keeps=[v["ticker"] for v in keeps], exits=[v["ticker"] for v in exits],
                              step5=[v["ticker"] for v in step5], nav_cad=round(nav, 2),
                              balances_captured=anchored, compounders=len(comp_list),
