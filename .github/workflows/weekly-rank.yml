@@ -13,6 +13,11 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install "psycopg[binary]==3.2.*" numpy
-      - run: python src/rank.py
+      - run: set -o pipefail; python src/rank.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py weekly-rank /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
