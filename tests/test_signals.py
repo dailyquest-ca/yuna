@@ -522,3 +522,48 @@ def test_risk_is_the_budget_whatever_the_stop():
         out = s.momentum_size(nav=200_000, mcn_score=75, stop_distance=stop)
         if out["size_pct"] < 0.12:                          # unless the band ceiling clipped it
             assert out["size_pct"] * stop == pytest.approx(0.007, abs=1e-6)
+
+
+# --------------------------------------------------------------------------- §4.1 quarantine
+
+def test_a_forty_percent_move_is_suspicious():
+    assert s.suspicious_move(60.0, 100.0) is True          # −40%, exactly the threshold
+    assert s.suspicious_move(140.0, 100.0) is True         # +40%
+    assert s.suspicious_move(61.0, 100.0) is False         # −39%
+    assert s.suspicious_move(25.0, 100.0) is True          # a 4:1 split reads as −75%
+
+
+def test_a_missing_or_nonsense_price_is_not_a_move():
+    """Absent data is not a signal. A None or a zero must not manufacture a 100% move."""
+    for close, prev in ((None, 100.0), (100.0, None), (0.0, 100.0), (100.0, 0.0),
+                        ("x", 100.0), (-5.0, 100.0)):
+        assert s.suspicious_move(close, prev) is False
+
+
+def test_two_sources_agree_within_two_percent():
+    assert s.sources_agree(100.0, 101.5) is True
+    assert s.sources_agree(100.0, 103.0) is False
+    assert s.sources_agree(100.0, 102.0) is True           # exactly at tolerance
+
+
+def test_a_missing_second_source_is_never_agreement():
+    """§4.1 needs TWO sources. One source and a silence is one source."""
+    assert s.sources_agree(100.0, None) is False
+    assert s.sources_agree(None, 100.0) is False
+    assert s.sources_agree(100.0, 0.0) is False
+
+
+# --------------------------------------------------------------------------- §4.1 splits
+
+def test_a_split_ratio_is_parsed_from_the_vendors_own_string():
+    assert s.split_ratio({"split": "4.000000/1.000000"}) == pytest.approx(4.0)
+    assert s.split_ratio({"split": "1.000000/10.000000"}) == pytest.approx(0.1)   # reverse split
+    assert s.split_ratio({"split": "3.000000/2.000000"}) == pytest.approx(1.5)
+    assert s.split_ratio("2/1") == pytest.approx(2.0)
+    assert s.split_ratio(2.0) == pytest.approx(2.0)
+
+
+def test_a_nonsense_split_is_no_split():
+    """A ratio we cannot read must not silently become 1.0 and quietly leave a stop stranded."""
+    for bad in (None, {}, {"split": ""}, {"split": "x/y"}, {"split": "1/0"}, {"split": "0"}):
+        assert s.split_ratio(bad) is None

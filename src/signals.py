@@ -457,3 +457,70 @@ def holds_through_earnings(last_close, avg_cost, *, cushion=1.08):
     if not avg_cost or avg_cost <= 0 or last_close is None:
         return None
     return float(last_close) >= cushion * float(avg_cost)
+
+
+# ---------------------------------------------------------------------------- data integrity
+
+
+SUSPICIOUS_MOVE = 0.40
+SOURCE_TOLERANCE = 0.02
+
+
+def suspicious_move(close, prev_close, *, threshold=SUSPICIOUS_MOVE):
+    """§4.1 quarantine trigger: a print moving more than 40% with no corporate action behind it.
+
+    A 4:1 split reads as −75% and a bad tick reads as anything at all; either can fire a real stop,
+    so neither is allowed to act until two sources agree.
+    """
+    if close is None or prev_close is None:
+        return False
+    try:
+        close, prev_close = float(close), float(prev_close)
+    except (TypeError, ValueError):
+        return False
+    if prev_close <= 0 or close <= 0:
+        return False
+    # compared as a difference against a scaled threshold, not as a ratio minus one: 140/100 - 1
+    # evaluates to 0.39999999999999991 in binary floating point, so an exact 40% move would slip
+    # through a ratio comparison. |140 - 100| >= 0.40 x 100 is exact.
+    return abs(close - prev_close) >= threshold * prev_close
+
+
+def sources_agree(a, b, *, tolerance=SOURCE_TOLERANCE):
+    """Two independent prices for the same session, within tolerance of each other (§4.1).
+
+    Absent either number the answer is *no* — an unverified print stays quarantined. Silence is
+    never agreement.
+    """
+    if a is None or b is None:
+        return False
+    try:
+        a, b = float(a), float(b)
+    except (TypeError, ValueError):
+        return False
+    if a <= 0 or b <= 0:
+        return False
+    return abs(a - b) <= tolerance * min(a, b)      # a difference, for the same reason as above
+
+
+def split_ratio(payload):
+    """EODHD reports a split as "4.000000/1.000000" — parse it to 4.0 (new shares per old).
+
+    Needed because a split rewrites the bars but not the numbers stored *on a position*. An avg
+    cost, a stop and a highest-close are all in pre-split dollars, and stops ratchet up and never
+    down (§3.2) — so an unadjusted stop is stranded above the market forever, and the position
+    reads as permanently stopped out.
+    """
+    raw = (payload or {}).get("split") if isinstance(payload, dict) else payload
+    if raw is None:
+        return None
+    try:
+        text = str(raw)
+        if "/" in text:
+            new, old = text.split("/", 1)
+            new, old = float(new), float(old)
+            return new / old if old else None
+        value = float(text)
+        return value or None
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None

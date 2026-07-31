@@ -17,8 +17,14 @@ import fixtures as world                                                     # n
 
 @pytest.fixture(autouse=True)
 def no_vendor(monkeypatch):
-    """The earnings sync is the job's only outside call; tests supply earnings directly."""
+    """No test reaches the network. Earnings are supplied directly, and the quarantine's live-quote
+    check gets a stub that raises — the honest default, since a test machine has no vendor key. A
+    test that cares about verification patches `duties.get` itself."""
     monkeypatch.setattr(duties, "sync_earnings", lambda conn, hb: 0)
+
+    def no_quote(path, calls, **kw):
+        raise RuntimeError("no vendor in tests")
+    monkeypatch.setattr(duties, "get", no_quote)
 
 
 def run():
@@ -636,3 +642,127 @@ def test_a_position_that_would_exceed_the_single_name_cap_is_blocked(db, fx):
     db.commit()
     run()
     assert "single-name entry cap" in armed(db, "entry", "BBB.US")[0]["blocked_by"]
+
+
+# --------------------------------------------------------------------------- §4.1 quarantine
+
+def test_a_suspicious_print_blocks_the_exit_it_would_have_fired(db, fx, monkeypatch):
+    """§4.1's whole purpose: a bad tick must not sell a real position. The stop is breached by a
+    −45% print with no corporate action behind it, and the second source disagrees."""
+    monkeypatch.setattr(duties, "get", lambda path, calls, **kw: {"close": 100.0})
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", level=100.0, last_close=55.0, last_low=54.0,
+                             last_open=56.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", cost=100.0, stop=95.0, confirmed=True, step=3)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert [r for r in armed(db, "exit", "AAA.US") if r["reason"] == "stop"] == []
+    check = [r for r in armed(db, "check", "AAA.US") if r["reason"] == "quarantine"]
+    assert len(check) == 1 and check[0]["urgency"] == "protective"
+    assert "broker stop stands" in check[0]["note"]
+    with db.cursor() as cur:
+        cur.execute("select status, second_source from quarantine where ticker='AAA.US'")
+        status, second = cur.fetchone()
+    assert status == "cleared" and second == pytest.approx(100.0)   # sources disagreed
+
+
+def test_a_verified_print_confirms_and_stops_blocking(db, fx, monkeypatch):
+    """When the live quote agrees, the move was real — the print is confirmed and trading resumes
+    on it the next night."""
+    monkeypatch.setattr(duties, "get", lambda path, calls, **kw: {"close": 55.0})
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", level=100.0, last_close=55.0, last_low=54.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", cost=100.0, stop=95.0, confirmed=True, step=3)
+        world.balances(cur)
+    db.commit()
+    run()
+    with db.cursor() as cur:
+        cur.execute("select status from quarantine where ticker='AAA.US'")
+        assert cur.fetchone()[0] == "confirmed"
+
+
+def test_a_corporate_action_explains_the_move_and_raises_nothing(db, fx, monkeypatch):
+    """A 4:1 split reads as −75%. With the split logged, that is arithmetic, not a bad tick — and
+    §4.1 says the quarantine trigger is a big move *with no corporate action*."""
+    monkeypatch.setattr(duties, "get", lambda path, calls, **kw: {"close": 25.0})
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        days = world.flat_then_base(cur, "AAA.US", level=100.0, last_close=25.0, last_low=24.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", cost=100.0, stop=95.0, pivot=110.0, qty=100, target=200,
+                       confirmed=True, step=3)
+        cur.execute("""insert into corporate_actions (ticker,d,kind,detail)
+                       values ('AAA.US',%s,'split','{"split":"4.000000/1.000000"}')""", (days[-1],))
+        world.balances(cur)
+    db.commit()
+    run()
+    with db.cursor() as cur:
+        cur.execute("select count(*) from quarantine where ticker='AAA.US' and reason='move'")
+        assert cur.fetchone()[0] == 0          # the split explains the move; it is not a bad tick
+    # and the position's own numbers were re-based, or its stop would sit 4x above the market
+    row = book_row(db, "AAA.US")
+    assert row["qty"] == pytest.approx(400)
+    assert row["avg_cost"] == pytest.approx(25.0)
+    assert row["pivot"] == pytest.approx(27.5)
+    assert row["target_qty"] == pytest.approx(800)
+
+
+def test_a_split_is_re_based_only_once(db, fx, monkeypatch):
+    """The marker on the action makes it idempotent; without it every night would divide again."""
+    monkeypatch.setattr(duties, "get", lambda path, calls, **kw: {"close": 25.0})
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        days = world.flat_then_base(cur, "AAA.US", level=100.0, last_close=25.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", cost=100.0, stop=95.0, qty=100, confirmed=True, step=3)
+        cur.execute("""insert into corporate_actions (ticker,d,kind,detail)
+                       values ('AAA.US',%s,'split','{"split":"4.000000/1.000000"}')""", (days[-1],))
+        world.balances(cur)
+    db.commit()
+    run()
+    run()
+    assert book_row(db, "AAA.US")["avg_cost"] == pytest.approx(25.0)
+
+
+def test_an_unparseable_split_leaves_the_position_alone_and_shouts(db, fx, monkeypatch):
+    """Guessing a ratio is worse than not adjusting: it would silently corrupt the cost basis."""
+    monkeypatch.setattr(duties, "get", lambda path, calls, **kw: {"close": 25.0})
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        days = world.flat_then_base(cur, "AAA.US", level=100.0, last_close=25.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", cost=100.0, stop=95.0, qty=100, confirmed=True, step=3)
+        cur.execute("""insert into corporate_actions (ticker,d,kind,detail)
+                       values ('AAA.US',%s,'split','{"split":"nonsense"}')""", (days[-1],))
+        world.balances(cur)
+    db.commit()
+    run()
+    assert book_row(db, "AAA.US")["avg_cost"] == pytest.approx(100.0)
+    with db.cursor() as cur:
+        cur.execute("""select detail->'amber' from runs where job='duties' order by id desc limit 1""")
+        assert "NOT re-based" in str(cur.fetchone()[0])
+
+
+def test_an_unverifiable_print_stays_held_rather_than_trading(db, fx, monkeypatch):
+    """If the second source cannot be reached, the print stays quarantined. Silence is not
+    agreement — §4.1 needs two sources, and one source plus an outage is one source."""
+    def boom(path, calls, **kw):
+        raise RuntimeError("vendor unreachable")
+    monkeypatch.setattr(duties, "get", boom)
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", level=100.0, last_close=55.0, last_low=54.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", cost=100.0, stop=95.0, confirmed=True, step=3)
+        world.balances(cur)
+    db.commit()
+    run()
+    with db.cursor() as cur:
+        cur.execute("select status from quarantine where ticker='AAA.US'")
+        assert cur.fetchone()[0] == "held"
+    assert [r for r in armed(db, "exit", "AAA.US") if r["reason"] == "stop"] == []

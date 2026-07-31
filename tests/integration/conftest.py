@@ -53,7 +53,9 @@ def db(migrated):
         with conn.cursor() as cur:
             cur.execute("""truncate armed, candidates, queue, bench, book, tickets, transactions,
                                     observations, briefs, nav_snapshots, earnings, prices,
-                                    gate_state, group_strength, runs restart identity cascade""")
+                                    gate_state, group_strength, quarantine, corporate_actions,
+                                    fundamentals, backtest_runs, backtest_trades,
+                                    backtest_equity, runs restart identity cascade""")
             cur.execute("delete from universe")
             # config is append-only by design (§4.3), so a test that overrides a threshold leaves
             # its row behind and silently governs every later test — and every later *run*, since

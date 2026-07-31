@@ -92,6 +92,46 @@ def apply_fills(conn, hb):
     return applied
 
 
+# --------------------------------------------------------------------------- splits (§4.1)
+def rebase_for_splits(conn, hb):
+    """Re-base a held position's stored prices when its stock splits.
+
+    The bars get re-pulled by `ingest`; these numbers do not, and they are all nominal: avg cost,
+    stop, stop-limit, highest close, pivot. Because stops ratchet up and never down (§3.2), an
+    unadjusted stop after a 4:1 split sits four times above the market and can never come back —
+    the position reads as stopped out every night for the rest of its life.
+    """
+    done = []
+    with conn.cursor() as cur:
+        cur.execute("""select a.ticker, a.d, a.detail, b.id
+                       from corporate_actions a
+                       join book b on b.ticker = a.ticker and b.status = 'open'
+                       where a.kind = 'split' and a.applied_to_book_at is null""")
+        for tk, d, payload, bid in cur.fetchall():
+            ratio = sg.split_ratio(payload)
+            if not ratio or ratio <= 0:
+                hb.amber(f"{tk} split on {d} could not be parsed — position prices NOT re-based")
+                continue
+            if not dry():
+                cur.execute("""update book set qty = qty * %s, avg_cost = avg_cost / %s,
+                                 stop = stop / %s, stop_limit = stop_limit / %s,
+                                 highest_close = highest_close / %s, pivot = pivot / %s,
+                                 target_qty = target_qty * %s, updated_at = now()
+                               where id = %s""",
+                            (ratio, ratio, ratio, ratio, ratio, ratio, ratio, bid))
+                cur.execute("""update corporate_actions set applied_to_book_at = now()
+                               where ticker=%s and d=%s and kind='split'""", (tk, d))
+                observe(cur, "note",
+                        f"{tk} split {ratio:g}:1 on {d} — position re-based: quantity x{ratio:g}, "
+                        f"cost, stop and pivot / {ratio:g}. Without this the stop stays above the "
+                        f"market and the ratchet can never bring it down (§3.2).",
+                        ticker=tk, detail=dict(ratio=ratio, d=str(d)))
+            done.append(dict(ticker=tk, ratio=ratio, d=str(d)))
+    conn.commit()
+    hb.detail["splits_applied"] = done
+    return done
+
+
 # --------------------------------------------------------------------------- earnings (§4.1)
 def sync_earnings(conn, hb):
     today = dt.date.today()
@@ -169,6 +209,86 @@ def rescan_bases(conn, hb, bars, max_stop, limit_over):
     conn.commit()
     hb.detail["bases_restated"] = moved
     return moved
+
+
+# --------------------------------------------------------------------------- quarantine (§4.1)
+def quarantine_pass(conn, hb, bars, threshold, tolerance, watched_exits):
+    """Hold suspicious prints out of use until two sources agree (§4.1).
+
+    Two triggers: a print moving more than 40% with no corporate action logged for that session,
+    and any print that would fire a sell-side action. The second source is a live vendor quote —
+    the job's own re-fetch is the first. Neither source alone may sell a position.
+    """
+    raised, resolved = [], []
+    with conn.cursor() as cur:
+        cur.execute("""select ticker, d from corporate_actions
+                       where d > current_date - interval '10 days'""")
+        actions = {(t_, d_) for t_, d_ in cur.fetchall()}
+
+        for tk, b in bars.items():
+            if len(b) < 2:
+                continue
+            last, prev = b[-1], b[-2]
+            why = None
+            if sg.suspicious_move(last["close"], prev["close"], threshold=threshold) \
+                    and (tk, last["d"]) not in actions:
+                why = "move"
+            elif tk in watched_exits:
+                why = "sell_side"
+            if not why:
+                continue
+            move = ((float(last["close"]) / float(prev["close"]) - 1.0)
+                    if prev["close"] else None)
+            if not dry():
+                cur.execute("""insert into quarantine(ticker,d,close,prev_close,move_pct,reason)
+                               values (%s,%s,%s,%s,%s,%s)
+                               on conflict (ticker,d) where status='held' do nothing""",
+                            (tk, last["d"], last["close"], prev["close"], move, why))
+            raised.append(dict(ticker=tk, d=str(last["d"]), reason=why, move_pct=move))
+
+        # verify everything still held, against a live quote
+        cur.execute("select id, ticker, d, close from quarantine where status='held'")
+        for qid, tk, d, close in cur.fetchall():
+            try:
+                quote = get(f"real-time/{tk}", hb.calls)
+                second = float((quote or {}).get("close") or 0) or None
+            except Exception as e:
+                hb.detail.setdefault("quarantine_quote_failed", []).append(f"{tk}: {e}")
+                continue
+            agrees = sg.sources_agree(close, second, tolerance=tolerance)
+            status = "confirmed" if agrees else "cleared"
+            if not dry():
+                cur.execute("""update quarantine set status=%s, second_source=%s, checked_at=now(),
+                                 resolved_at=now(),
+                                 note = case when %s then 'two sources agree — the move is real'
+                                        else 'sources disagree — the print is not to be trusted' end
+                               where id=%s""", (status, second, agrees, qid))
+            resolved.append(dict(ticker=tk, d=str(d), status=status, ours=close, theirs=second))
+    conn.commit()
+    hb.detail.update(quarantine_raised=raised, quarantine_resolved=resolved)
+    # a name whose print could not be verified stays held, and stays out of sell-side action
+    with conn.cursor() as cur:
+        cur.execute("select ticker from quarantine where status='held'")
+        held = {r[0] for r in cur.fetchall()}
+    # What still blocks a sell, and what does not:
+    #   * a print that LOOKS WRONG (>40% with no corporate action) blocks until verified — acting on
+    #     garbage is the risk §4.1 was written for;
+    #   * a print that merely happens to fire a stop does NOT block when the second source is
+    #     unreachable. Taken literally the rule would let a vendor outage disarm every stop in the
+    #     book, and §4.6 is explicit that protection is the thing that survives everything.
+    #   * either kind blocks when the second source actively DISAGREES.
+    with conn.cursor() as cur:
+        cur.execute("""select ticker from quarantine
+                       where (status='held' and reason='move')
+                          or (status='cleared' and resolved_at::date = current_date)""")
+        blocking = {r[0] for r in cur.fetchall()}
+        cur.execute("""select count(*) from quarantine where status='held' and reason='sell_side'""")
+        unverified_ordinary = cur.fetchone()[0]
+    if blocking:
+        hb.amber(f"{len(blocking)} print(s) quarantined — sell-side action held on {sorted(blocking)}")
+    if unverified_ordinary:
+        hb.detail["quarantine_unverified_ordinary"] = unverified_ordinary
+    return blocking
 
 
 # --------------------------------------------------------------------------- the book, nightly
@@ -277,7 +397,7 @@ class Arm:
         return len(self.rows)
 
 
-def arm_exits(conn, arm, bars, gate, breakouts, cushion, holidays):
+def arm_exits(conn, arm, bars, gate, breakouts, cushion, holidays, held=()):
     """Every exit §3.2 and §3.3 name, in the order they can fire.
 
     Protective conclusions carry urgency='protective' so a stale night cannot suppress them.
@@ -303,6 +423,15 @@ def arm_exits(conn, arm, bars, gate, breakouts, cushion, holidays):
                 continue
             last, prev = b[-1], (b[-2] if len(b) > 1 else b[-1])
             px = float(last["close"])
+            if tk in held:
+                # §4.1: a quarantined print may not fire a sell. The position keeps its broker stop,
+                # and the brief names the name — suspended, not silently traded on.
+                arm.add("check", tk, "quarantine", sleeve=sleeve, account=acct,
+                        urgency="protective", qty=float(qty),
+                        note="print quarantined — two sources do not yet agree, so no exit is "
+                             "armed tonight. The broker stop stands as placed (§4.1).",
+                        detail=dict(close=px))
+                continue
             common = dict(sleeve=sleeve, account=acct, qty=float(qty), score=float(mcn) if mcn else None)
 
             # ---- the stop fired. The broker GTC should have filled; a gap past the limit did not.
@@ -702,6 +831,8 @@ def main():
                     confirm_sessions=int(config(cur, "confirmation_sessions", 3)),
                     cushion=float(config(cur, "holdthrough_cushion", 1.08)),
                     warn_bets=float(config(cur, "effective_bets_warn", 4)),
+                    quarantine_move=float(config(cur, "quarantine_move_threshold", 0.40)),
+                    quarantine_tolerance=float(config(cur, "quarantine_source_tolerance", 0.02)),
                 )
                 cur.execute("select state from gate_state order by id desc limit 1")
                 gate = (cur.fetchone() or ["OFF"])[0]
@@ -711,6 +842,7 @@ def main():
             caps["start_low"] = not first_fill or (dt.date.today() - first_fill).days <= 90
 
             apply_fills(conn, hb)
+            rebase_for_splits(conn, hb)
             sync_earnings(conn, hb)
 
             with conn.cursor() as cur:
@@ -732,6 +864,21 @@ def main():
             nav, fx = n["nav"], n["fx"]
             bets = book_effective_bets(conn, bars, fx)
 
+            # who *would* be sold tonight — those prints need a second source before they act
+            with conn.cursor() as cur:
+                cur.execute("""select b.ticker from book b
+                               where b.status='open' and b.stop is not null""")
+                watched_exits = set()
+                for (tk,) in cur.fetchall():
+                    bb = bars.get(tk)
+                    if bb and bb[-1]["low"] is not None:
+                        cur.execute("select stop from book where ticker=%s and status='open'", (tk,))
+                        stop = cur.fetchone()[0]
+                        if stop is not None and float(bb[-1]["low"]) <= float(stop):
+                            watched_exits.add(tk)
+            held = quarantine_pass(conn, hb, bars, caps["quarantine_move"],
+                                   caps["quarantine_tolerance"], watched_exits)
+
             arm = Arm()
             for m in moves:
                 was = f" (was {m['was']})" if m["was"] else ""
@@ -739,7 +886,7 @@ def main():
                 arm.add("stop_move", m["ticker"], "trail", urgency="protective",
                         stop=m["stop"], stop_limit_price=m["limit"],
                         note=f"{m['mode']}{euphoria}{was}")
-            arm_exits(conn, arm, bars, gate, breakouts, caps["cushion"], ())
+            arm_exits(conn, arm, bars, gate, breakouts, caps["cushion"], (), held=held)
             arm_pyramid(conn, arm, bars, caps["ceiling"])
             arm_entries(conn, arm, bars, nav, fx, gate, caps, ())
             arm_housekeeping(conn, arm, ())
@@ -772,6 +919,7 @@ def main():
                     bits.append(f"{len(k)} {label}{'s' if len(k) > 1 else ''}")
             summary = "; ".join(bits) if bits else "nothing needs you"
             detail = dict(gate=gate, nav_cad=round(nav, 2), effective_bets=bets,
+                          quarantined=sorted(held),
                           effective_bets_warn=bets is not None and bets < caps["warn_bets"],
                           armed=arm.rows, protective=len(protective), offerable=len(offerable),
                           bench_at_hurdle=dict(approved=approved, total=any_hurdle),
