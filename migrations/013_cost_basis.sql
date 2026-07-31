@@ -31,7 +31,7 @@ update book set avg_cost = 342.585, opened_at = date '2026-01-16',
 update book set opened_at = date '2026-07-21',
   thesis = 'Robotic-surgery monopoly at 31x forward after a 43% de-rate; procedures +16%, Ion +36%, dV5 cycle.',
   invalidators = '["Procedure guidance CUT rather than maintained","ACA-subsidy expiry visibly hitting volumes","Share loss to Hugo or Ottava"]'::jsonb,
-  note_cost = 'journal has 11 sh @ 345.00; broker shows 26 on 2026-07-30 — 15 sh acquired after the journal cutoff, fill price unknown'
+  note = 'journal has 11 sh @ 345.00; broker shows 26 on 2026-07-30 — 15 sh acquired after the journal cutoff, fill price unknown'
   where ticker = 'ISRG.US' and status = 'open';
 
 update book set avg_cost = 203.240, opened_at = date '2026-05-04',
