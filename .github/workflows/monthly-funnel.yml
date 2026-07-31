@@ -22,6 +22,10 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
           FORCE: ${{ inputs.force || 'false' }}
+      - name: score (Stage 2 — C1, CCN, hurdle, bench)
+        run: set -o pipefail; python src/score.py 2>&1 | tee -a /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py monthly-funnel /tmp/job.out

@@ -91,6 +91,10 @@ def main():
                     data.setdefault(t,[]).append((d,hi,lo,cl,ac,vol))
                 cur.execute("select ticker, industry, is_holding, in_l0 from universe where kind='stock' and status='active'")
                 meta={r[0]:{"industry":r[1],"hold":r[2],"l0":r[3]} for r in cur.fetchall()}
+                # M4 — earnings acceleration. Null until a name has been swept; a name with no
+                # fundamentals row is dark, not failed, so the gate can't quietly empty L1-M.
+                cur.execute("select ticker, m4_pass from v_fundamentals_latest")
+                m4map={r[0]:r[1] for r in cur.fetchall()}
             names=[]; feats={}
             for t,rows in data.items():
                 d=[r[0] for r in rows]
@@ -153,9 +157,11 @@ def main():
                 state="BUY" if (m2 and valid) else "WAIT"
                 stop=max(c_low,pivot*0.92) if valid else None
                 out.append(dict(t=t,mcn=mcn,mq=mq_p[t],setup=setup,grp=(grp_pct.get(meta[t]["industry"],50.0) if meta[t]["industry"] else 50.0),m2=m2,
+                                m4=m4map.get(t),
                                 state=state,pivot=pivot if valid else None,blen=blen if valid else None,
                                 depth=depth if valid else None,c_low=c_low if valid else None,stop=stop,px=px))
-            l1m=sorted([o for o in out if o["m2"]],key=lambda o:-o["mcn"])[:150]
+            # L1-M = M2 and M4 (a null M4 means "not yet swept", which does not fail the gate)
+            l1m=sorted([o for o in out if o["m2"] and o["m4"] is not False],key=lambda o:-o["mcn"])[:150]
             for i,o in enumerate(l1m): o["rank"]=i+1
             # queue: holdings always + top-10 trigger-bearing L1-M by MCN; seats by proximity then score
             holds=[t for t in names if meta[t]["hold"]]
@@ -176,7 +182,7 @@ def main():
                 with conn.cursor() as cur:
                     cur.execute("truncate candidates"); cur.execute("truncate queue")
                     cur.executemany("""insert into candidates(ticker,rank,mcn,mq,setup,grp,m2,m4,state,pivot,base_len,base_depth,base_low,stop_suggest,last_close)
-                        values (%(t)s,%(rank)s,%(mcn)s,%(mq)s,%(setup)s,%(grp)s,%(m2)s,null,%(state)s,%(pivot)s,%(blen)s,%(depth)s,%(c_low)s,%(stop)s,%(px)s)""",
+                        values (%(t)s,%(rank)s,%(mcn)s,%(mq)s,%(setup)s,%(grp)s,%(m2)s,%(m4)s,%(state)s,%(pivot)s,%(blen)s,%(depth)s,%(c_low)s,%(stop)s,%(px)s)""",
                         [{**o,"rank":o.get("rank")} for o in l1m])
                     cur.executemany("""insert into queue(ticker,rank,source,state,trigger_price,limit_price,stop_suggest,proximity,mcn,note)
                         values (%(ticker)s,%(rank)s,%(source)s,%(state)s,%(trig)s,%(lim)s,%(stop)s,%(prox)s,%(mcn)s,%(note)s)""",

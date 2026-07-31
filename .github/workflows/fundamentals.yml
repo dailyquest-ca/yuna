@@ -1,0 +1,39 @@
+name: fundamentals
+on:
+  schedule:
+    - cron: '0 8 * * 6'    # weekly Sat 08:00 UTC — before the funnel; in-job guard for the sweep mode
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: 'comma-separated tickers (blank = the whole L0 + holdings)'
+        default: ''
+      stale_only:
+        description: 'only names whose earnings date passed since their last pull'
+        default: 'false'
+      workers:
+        description: 'concurrent fetches'
+        default: '8'
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install "psycopg[binary]==3.2.*"
+      - name: sweep
+        run: set -o pipefail; python src/fundamentals.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
+          TICKERS: ${{ inputs.tickers }}
+          # scheduled runs refresh only what has filed since we last looked
+          STALE_ONLY: ${{ inputs.stale_only || (github.event_name == 'schedule' && 'true') || 'false' }}
+          WORKERS: ${{ inputs.workers || '8' }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py fundamentals /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
