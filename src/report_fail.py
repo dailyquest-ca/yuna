@@ -8,7 +8,15 @@ if path and os.path.exists(path):
 u = os.environ["DATABASE_URL"]
 u += "" if "sslmode" in u else ("&" if "?" in u else "?") + "sslmode=require"
 with psycopg.connect(u) as conn, conn.cursor() as cur:
-    cur.execute("insert into runs(job,finished_at,status,dry_run,detail) values (%s,now(),'red',false,%s)",
-                (job, json.dumps({"fatal": "job died pre-heartbeat", "output_tail": tail})))
+    # a job that opened a heartbeat and then died outside the context manager leaves a row
+    # stuck on 'running' forever, which reads as "still working" to every freshness check
+    cur.execute("""update runs set finished_at=now(), status='red',
+                     detail = coalesce(detail,'{}'::jsonb) || %s::jsonb
+                   where job=%s and status='running'""",
+                (json.dumps({"fatal": "died mid-run", "output_tail": tail}), job))
+    orphans = cur.rowcount
+    if not orphans:
+        cur.execute("insert into runs(job,finished_at,status,dry_run,detail) values (%s,now(),'red',false,%s)",
+                    (job, json.dumps({"fatal": "job died pre-heartbeat", "output_tail": tail})))
     conn.commit()
-print("red autopsy row written for", job)
+print(f"red autopsy written for {job} ({'closed a stuck run' if orphans else 'new row'})")
