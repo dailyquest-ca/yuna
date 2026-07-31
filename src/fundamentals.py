@@ -33,6 +33,16 @@ def num(x):
         return None
 
 
+def day(x):
+    """A date the database will accept, or None. Vendors emit '0000-00-00' and ''."""
+    if not x or not isinstance(x, str) or len(x) < 10:
+        return None
+    try:
+        return dt.date.fromisoformat(x[:10]).isoformat()
+    except ValueError:
+        return None
+
+
 def desc(d):
     return sorted((d or {}).keys(), reverse=True)
 
@@ -73,8 +83,11 @@ def extract(ticker, r):
             fd = (tbl[k] or {}).get("filing_date")
             if fd:
                 cands.append(fd)
-    filing_date = max(cands) if cands else ys[0]
+    cands = [c for c in (day(c) for c in cands) if c]
+    filing_date = max(cands) if cands else day(ys[0])
     flagged = not cands
+    if not filing_date:
+        return None
 
     # ---- identity
     sector, industry = G.get("Sector"), G.get("Industry")
@@ -219,10 +232,10 @@ def extract(ticker, r):
     confidence = "flagged" if flagged or have < 2 else ("full" if have == 3 else "2of3")
 
     return dict(
-        ticker=ticker, filing_date=filing_date, period_end=ys[0],
+        ticker=ticker, filing_date=filing_date, period_end=day(ys[0]),
         currency=G.get("CurrencyCode"), sector=sector, industry=industry,
         gic_sector=gic_s, gic_industry=gic_i,
-        ipo_date=G.get("IPODate") or None, is_financial=is_fin,
+        ipo_date=day(G.get("IPODate")), is_financial=is_fin,
         market_cap=mcap, shares_out=shares, fiscal_years=n_years,
         ebit_3y=ebit_3y, tax_rate=tax_rate, nopat_3y=nopat_3y,
         invested_capital=ic_avg, invested_capital_ex_gw=ic_avg_ex,
@@ -260,7 +273,7 @@ COLS = ["ticker", "filing_date", "period_end", "currency", "sector", "industry",
 def flush(conn, rows):
     if not rows or dry():
         return 0
-    ph = ",".join(["%s"] * len(COLS))
+    ph = ",".join("%s::jsonb" if c == "raw" else "%s" for c in COLS)
     setters = ",".join(f"{c}=excluded.{c}" for c in COLS if c not in ("ticker", "filing_date"))
     with conn.cursor() as cur:
         cur.executemany(f"""insert into fundamentals({','.join(COLS)}) values ({ph})
