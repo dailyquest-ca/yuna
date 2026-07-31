@@ -43,8 +43,8 @@ def main():
             # 2) screener sweep: cap >= $300M, descending, harvest industry/sector/cap
             rows={}
             ceiling=None            # screener offset caps at 999 -> descend in market-cap bands
-            for sweep in range(12):
-                added=0
+            for sweep in range(30):
+                added=0; prev_ceiling=ceiling
                 for offset in range(0,1000,100):
                     f=[["exchange","=","us"]]
                     f.append(["market_capitalization","<",ceiling] if ceiling is not None
@@ -55,13 +55,15 @@ def main():
                     if not batch: break
                     for b in batch:
                         code=b.get("code"); cap=float(b.get("market_capitalization") or 0)
-                        ceiling = cap+1 if ceiling is None else min(ceiling, cap+1)
+                        if cap>0:                       # null caps must not poison the descent
+                            ceiling = cap+1 if ceiling is None else min(ceiling, cap+1)
                         if cap>=300000000 and code in common and code not in rows:
                             rows[code]=(b.get("name"), b.get("sector") or "Unknown", b.get("industry") or "Unknown", cap)
                             added+=1
                     if len(batch)<100: break
                 print(f"  sweep {sweep+1}: +{added} names, floor now ${(ceiling or 0)/1e9:.2f}B")
-                if added==0 or (ceiling is not None and ceiling<=300000001): break
+                if ceiling is not None and ceiling<=300000001: break
+                if prev_ceiling is not None and ceiling is not None and ceiling>=prev_ceiling: break  # no progress
             print(f"screener census: {len(rows)} names >= $300M cap")
             # 3) upsert universe: coarse L0 membership
             if not DRY:
