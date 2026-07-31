@@ -93,7 +93,7 @@ def main():
                 cur.execute("""select f.ticker, f.engine, f.cash_conversion, f.market_cap, f.shares_out,
                                       f.fcf_ttm, f.c1_pass, f.c1_fail_reason, f.roic, f.reinvest_rate,
                                       f.pfcf_current, f.data_confidence, f.goodwill_jump,
-                                      f.engine_agrees, f.raw, u.is_holding
+                                      f.engine_agrees, f.revenue_cagr_3y, f.raw, u.is_holding
                                from v_fundamentals_latest f
                                join universe u on u.ticker=f.ticker
                                where u.kind='stock' and u.status='active' and (u.in_l0 or u.is_holding)""")
@@ -114,16 +114,21 @@ def main():
             cc_p = pct_rank([(r[0], r[2]) for r in rows])
             size_p = pct_rank([(r[0], -math.log(r[3])) for r in rows if r[3] and r[3] > 0])  # inverted
 
-            out = []
+            out, unscored = [], []
             for (tk, engine, cc, mcap, shares, fcf, c1, c1why, roic, reinv,
-                 pfcf_cur, conf, gw_jump, agrees, raw, is_hold) in rows:
+                 pfcf_cur, conf, gw_jump, agrees, rev_cagr, raw, is_hold) in rows:
                 parts = [("engine", eng_p.get(tk)), ("cash_conv", cc_p.get(tk)),
                          ("size", size_p.get(tk))]
                 have = [(n, v) for n, v in parts if v is not None]
-                if not have:
+                # §3.3 renormalizes around ONE missing component. Size is available to almost
+                # everything, so without this floor a company whose engine and cash conversion
+                # are both unmeasurable scores on smallness alone — and a $4 microcap tops the
+                # bench. Two components, at least one of them a business measure, or unscored.
+                if len(have) < 2 or not any(n in ("engine", "cash_conv") for n, _ in have):
+                    unscored.append(tk)
                     continue
                 ccn = sum(v for _, v in have) / len(have)      # equal weight, renormalized (§3.3)
-                confidence = conf if len(have) == 3 else ("2of3" if len(have) == 2 else "flagged")
+                confidence = conf if len(have) == 3 else "2of3"
 
                 raw_d = raw if isinstance(raw, dict) else (json.loads(raw) if raw else {})
                 pfcf_med, obs = pfcf_history(raw_d, closes.get(tk, {}))
@@ -133,7 +138,13 @@ def main():
                     fair = min(pfcf_cur, fair_cap_short)
                 else:
                     fair = None
+                # §3.1 engine reliability check: growth = ROIC x reinvestment is an identity, so
+                # it must agree with observed revenue growth. When it doesn't — usually a net-cash
+                # balance sheet shrinking invested capital toward zero and sending ROIC to the moon
+                # — we underwrite on the number we can check, never on the flattering one.
                 g = min(growth_cap, engine) if engine is not None else 0.0
+                if engine is not None and agrees is False:
+                    g = max(0.0, min(g, rev_cagr if rev_cagr is not None else 0.0))
                 hp = hurdle_price(fcf, shares, g, fair, floor)
                 px = last.get(tk)
                 gap = ((px - hp) / hp) if px and hp else None
@@ -148,7 +159,8 @@ def main():
                     engine_growth=g, fair_multiple=fair,
                     derating_drag=(max(0.0, 1 - (fair / pfcf_cur) ** 0.2) if fair and pfcf_cur else None),
                     last_close=px, gap_to_hurdle=gap,
-                    data_confidence=confidence, serial_acquirer=bool(gw_jump),
+                    data_confidence=("flagged" if agrees is False else confidence),
+                    serial_acquirer=bool(gw_jump),
                     pfcf_obs=obs, engine_agrees=agrees, is_holding=is_hold))
 
             # ---- bench: top-N by CCN from each size cohort (§3.1) ----
@@ -167,6 +179,9 @@ def main():
 
             if not dry():
                 with conn.cursor() as cur:
+                    # gate failure evicts immediately (§3.1) — a name we can no longer score
+                    # has failed the data gate, so it does not get the two-month seatbelt
+                    cur.execute("delete from bench where ticker = any(%s)", (unscored,))
                     cur.execute("""update bench set months_outside_top60 = months_outside_top60 + 1
                                    where ticker <> all(%s)""", ([o["ticker"] for o in bench],))
                     cur.execute("""delete from bench where months_outside_top60 >= 2
@@ -195,11 +210,12 @@ def main():
 
             buyable = [o["ticker"] for o in bench if o["gap_to_hurdle"] is not None and o["gap_to_hurdle"] <= 0]
             hb.rows = len(bench)
-            hb.detail.update(scored=len(out), c1_pass=len(eligible), bench=len(bench),
+            hb.detail.update(scored=len(out), unscored=len(unscored),
+                             c1_pass=len(eligible), bench=len(bench),
                              buyable=len(buyable), buyable_names=buyable[:20],
                              flagged=sum(1 for o in out if o["data_confidence"] != "full"))
-            print(f"score: {len(out)} scored | C1 pass {len(eligible)} | bench {len(bench)} | "
-                  f"at-or-below hurdle {len(buyable)}")
+            print(f"score: {len(out)} scored ({len(unscored)} unscorable) | C1 pass {len(eligible)} | "
+                  f"bench {len(bench)} | at-or-below hurdle {len(buyable)}")
     return 0
 
 

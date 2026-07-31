@@ -232,7 +232,7 @@ def extract(ticker, r):
     confidence = "flagged" if flagged or have < 2 else ("full" if have == 3 else "2of3")
 
     return dict(
-        ticker=ticker, filing_date=filing_date, period_end=day(ys[0]),
+        ticker=ticker, name=G.get("Name"), filing_date=filing_date, period_end=day(ys[0]),
         currency=G.get("CurrencyCode"), sector=sector, industry=industry,
         gic_sector=gic_s, gic_industry=gic_i,
         ipo_date=day(G.get("IPODate")), is_financial=is_fin,
@@ -279,11 +279,12 @@ def flush(conn, rows, errors):
     setters = ",".join(f"{c}=excluded.{c}" for c in COLS if c not in ("ticker", "filing_date"))
     sql = (f"insert into fundamentals({','.join(COLS)}) values ({ph}) "
            f"on conflict (ticker,filing_date) do update set {setters}, fetched_at=now()")
-    upd = "update universe set sector=%s, industry=%s, market_cap_usd=coalesce(%s, market_cap_usd) where ticker=%s"
+    upd = ("update universe set name=coalesce(%s, name), sector=%s, industry=%s, "
+           "market_cap_usd=coalesce(%s, market_cap_usd) where ticker=%s")
     try:
         with conn.cursor() as cur:
             cur.executemany(sql, [tuple(r[c] for c in COLS) for r in rows])
-            cur.executemany(upd, [(r["sector"], r["industry"], r["market_cap"], r["ticker"]) for r in rows])
+            cur.executemany(upd, [(r["name"], r["sector"], r["industry"], r["market_cap"], r["ticker"]) for r in rows])
         conn.commit()
         return len(rows)
     except Exception as e:
@@ -294,7 +295,7 @@ def flush(conn, rows, errors):
             try:
                 with conn.cursor() as cur:
                     cur.execute(sql, tuple(r[c] for c in COLS))
-                    cur.execute(upd, (r["sector"], r["industry"], r["market_cap"], r["ticker"]))
+                    cur.execute(upd, (r["name"], r["sector"], r["industry"], r["market_cap"], r["ticker"]))
                 conn.commit(); ok += 1
             except Exception as e2:
                 conn.rollback()

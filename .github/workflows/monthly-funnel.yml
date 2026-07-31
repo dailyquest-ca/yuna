@@ -30,8 +30,8 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
-          TICKERS: ${{ vars.SWEEP_TICKERS }}
-          STALE_ONLY: 'true'
+          # force=true means "rebuild from scratch": census regardless of date, full re-sweep
+          STALE_ONLY: ${{ inputs.force == 'true' && 'false' || 'true' }}
           WORKERS: '10'
       - name: stage 2 — C1, CCN, hurdle, bench
         run: set -o pipefail; python src/score.py 2>&1 | tee -a /tmp/job.out
