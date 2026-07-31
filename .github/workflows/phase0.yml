@@ -1,0 +1,26 @@
+name: phase0
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'compute the verdicts, write no tickets'
+        default: 'false'
+jobs:
+  phase0:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install "psycopg[binary]==3.2.*"
+      - run: set -o pipefail; python src/phase0.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py phase0 /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
