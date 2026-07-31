@@ -270,20 +270,37 @@ COLS = ["ticker", "filing_date", "period_end", "currency", "sector", "industry",
         "eps_yoy_prev", "m4_pass", "data_confidence", "raw"]
 
 
-def flush(conn, rows):
+def flush(conn, rows, errors):
+    """Batch first; on any failure fall back to row-by-row so one poisoned name
+    cannot cost us the other ninety-nine."""
     if not rows or dry():
         return 0
     ph = ",".join("%s::jsonb" if c == "raw" else "%s" for c in COLS)
     setters = ",".join(f"{c}=excluded.{c}" for c in COLS if c not in ("ticker", "filing_date"))
-    with conn.cursor() as cur:
-        cur.executemany(f"""insert into fundamentals({','.join(COLS)}) values ({ph})
-                            on conflict (ticker,filing_date) do update set {setters}, fetched_at=now()""",
-                        [tuple(r[c] for c in COLS) for r in rows])
-        cur.executemany("""update universe set sector=%s, industry=%s, market_cap_usd=coalesce(%s, market_cap_usd)
-                           where ticker=%s""",
-                        [(r["sector"], r["industry"], r["market_cap"], r["ticker"]) for r in rows])
-    conn.commit()
-    return len(rows)
+    sql = (f"insert into fundamentals({','.join(COLS)}) values ({ph}) "
+           f"on conflict (ticker,filing_date) do update set {setters}, fetched_at=now()")
+    upd = "update universe set sector=%s, industry=%s, market_cap_usd=coalesce(%s, market_cap_usd) where ticker=%s"
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(sql, [tuple(r[c] for c in COLS) for r in rows])
+            cur.executemany(upd, [(r["sector"], r["industry"], r["market_cap"], r["ticker"]) for r in rows])
+        conn.commit()
+        return len(rows)
+    except Exception as e:
+        conn.rollback()
+        print(f"  batch insert failed ({type(e).__name__}: {e}) — retrying row by row")
+        ok = 0
+        for r in rows:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql, tuple(r[c] for c in COLS))
+                    cur.execute(upd, (r["sector"], r["industry"], r["market_cap"], r["ticker"]))
+                conn.commit(); ok += 1
+            except Exception as e2:
+                conn.rollback()
+                if len(errors) < 40:
+                    errors[r["ticker"]] = f"insert {type(e2).__name__}: {e2}"
+        return ok
 
 
 def main():
@@ -342,9 +359,9 @@ def main():
                         continue
                     buf.append(row)
                     if len(buf) >= BATCH:
-                        done += flush(conn, buf); buf = []
+                        done += flush(conn, buf, errors); buf = []
                         print(f"  {done} written, {fail} failed, {hb.calls[0]} calls")
-            done += flush(conn, buf)
+            done += flush(conn, buf, errors)
 
             hb.rows = done
             # EODHD bills a fundamentals request at 10 units — calls_used counts requests
