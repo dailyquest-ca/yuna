@@ -250,11 +250,13 @@ CLAUSES: tuple[Clause, ...] = (
            "compounders 60% / 4-5 names / 12-15% entries; momentum up to 40% / 3-4 names / "
            "8-12% entries; the momentum ceiling is not a quota",
            BUILT,
-           note="DUAL IMPLEMENTATION: phase0 enforces the counts and sleeve room with its own inline accumulators; policy.sleeve_has_room is not called"),
+           note=("DUAL IMPLEMENTATION: phase0 enforces the counts and sleeve room with its own "
+                      "inline accumulators; policy.sleeve_has_room is not called")),
     Clause("2.2/max-2-per-group",
            "at most 2 names per vendor industry group",
            BUILT,
-           note="DUAL IMPLEMENTATION: phase0's admit() closure enforces it inline against a config value; policy.group_has_room is not called"),
+           note=("DUAL IMPLEMENTATION: phase0's admit() closure enforces it inline against a "
+                      "config value; policy.group_has_room is not called")),
     Clause("2.2/theme-cap-35",
            "no new capital enters a theme above 35% of NAV; a winner that grows past is not "
            "forced out",
@@ -270,12 +272,15 @@ CLAUSES: tuple[Clause, ...] = (
            OPEN, note="phase0.py writes tickets directly"),
     Clause("2.3/position-floor", "minimum position 4% of NAV on intended full size",
            BUILT,
-           note="DUAL IMPLEMENTATION: phase0 compares against a config floor inline; policy.size_is_admissible is not called, so the 25% ceiling is enforced nowhere"),
+           note=("DUAL IMPLEMENTATION: phase0 compares against a config floor inline; "
+                      "policy.size_is_admissible is not called, so the 25% ceiling is enforced "
+                      "nowhere")),
     Clause("2.3/single-name-cap", "single-name ceiling 25% of NAV, entry only", BUILT),
     Clause("2.3/risk-not-dollars",
            "risk = position size x distance to stop; sizing is compared on risk",
            BUILT,
-           note="DUAL IMPLEMENTATION: phase0 computes budget/stop inline; policy.momentum_size is not called"),
+           note=("DUAL IMPLEMENTATION: phase0 computes budget/stop inline; policy.momentum_size "
+                      "is not called")),
     Clause("2.4/no-averaging-down-momentum",
            "the momentum sleeve never averages down",
            OPEN, note="not enforced anywhere"),
@@ -303,7 +308,10 @@ CLAUSES: tuple[Clause, ...] = (
     Clause("3.1/c1-excludes-financials",
            "banks and insurers are out of the compounder universe",
            BUILT,
-           note="DUAL IMPLEMENTATION, AND THE LIVE ONE IS WRONG: fundamentals.py excludes the whole Financial Services sector plus a word list naming 'capital markets' and 'credit services' — which §3.1 says remain eligible. policy.is_excluded_financial is correct, tested, and never called"),
+           note=("DUAL IMPLEMENTATION, AND THE LIVE ONE IS WRONG: fundamentals.py "
+                 "excludes the whole Financial Services sector plus a word list naming "
+                 "'capital markets' and 'credit services' — which §3.1 says remain "
+                 "eligible. policy.is_excluded_financial is correct, tested, uncalled")),
     Clause("3.1/ccn-score",
            "CCN v1.0: engine, cash conversion, inverted log size — equal weight, L0 percentiles",
            BUILT, wired=True),
@@ -364,7 +372,9 @@ CLAUSES: tuple[Clause, ...] = (
            "CCN 70-84 sizes 12% of NAV and 85+ sizes 15%, flat 12% until Zak unlocks the upper "
            "tier at a monthly approval",
            BUILT,
-           note="DUAL IMPLEMENTATION: phase0 reads a flat size from config; policy.compounder_size is not called, so the 15%-tier unlock exists only in policy"),
+           note=("DUAL IMPLEMENTATION: phase0 reads a flat size from config; "
+                      "policy.compounder_size is not called, so the 15%-tier unlock exists only in "
+                      "policy")),
     Clause("3.1/averaging-down",
            "CCN >= 70 and below hurdle: 5-15% below adds 50% of original size, more than 15% "
            "below adds 100%, at most 2 adds per name per 12 months",
@@ -426,7 +436,9 @@ CLAUSES: tuple[Clause, ...] = (
     Clause("3.2/stop-8pct",
            "initial stop is the higher of the final-contraction low or entry - 8%, never wider",
            BUILT,
-           note="DUAL IMPLEMENTATION: phase0 caps the stop distance inline; policy.initial_stop is not called, and no caller applies the final-contraction-low branch"),
+           note=("DUAL IMPLEMENTATION: phase0 caps the stop distance inline; "
+                      "policy.initial_stop is not called, and no caller applies the final- "
+                      "contraction-low branch")),
     Clause("3.2/euphoria-ratchet",
            "a close more than 2 standard deviations above the own 50-day tightens the trail "
            "to 5% below the highest close",
@@ -442,7 +454,8 @@ CLAUSES: tuple[Clause, ...] = (
            "risk budget 0.7% of NAV at MCN 70-84 and 0.9% at 85+, halved to 0.5%/0.7% for the "
            "first 90 days; size = budget / stop distance, capped by the band",
            BUILT,
-           note="DUAL IMPLEMENTATION: phase0 computes it inline; policy.momentum_size is not called"),
+           note=("DUAL IMPLEMENTATION: phase0 computes it inline; policy.momentum_size is not "
+                      "called")),
     Clause("3.2/momentum-exits",
            "exits are stop fired, trend template failed, or MCN < 55; a stop-out carries no "
            "cooldown and re-entry needs only a valid base and all gates",
@@ -459,7 +472,8 @@ CLAUSES: tuple[Clause, ...] = (
     Clause("3.3/blackout",
            "no new entries and no adds within 5 trading days of a scheduled report, both sleeves",
            BUILT,
-           note="DUAL IMPLEMENTATION: daily.py and phase0.py each count the window themselves, in calendar days; policy.in_blackout is not called"),
+           note=("DUAL IMPLEMENTATION: daily.py and phase0.py each count the window themselves, "
+                      "in calendar days; policy.in_blackout is not called")),
     Clause("3.3/blackout-trading-days",
            "the window is counted in trading days, and lifts the first session after the report",
            BUILT, note="policy.in_blackout counts sessions; the nightly still approximates "
