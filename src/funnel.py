@@ -1,7 +1,8 @@
 """monthly-funnel — Stage 1 (L0 census). Cron runs weekly Sat; in-job guard keeps it to the 1st Sat.
 Census: US exchange symbol list (common stock, NYSE/NASDAQ/AMEX) x screener (cap >= $300M, +industry).
 Bar-dependent filters (price >= $5, ADDV >= $10M, listed >= 6 mo) are re-applied from our own bars
-inside weekly-rank, so L0 stays honest between censuses. Stage 2 (Gate C1 -> CCN funnel) arrives in Phase D.
+inside weekly-rank, so L0 stays honest between censuses. Stages 1.5 and 2 of the same workflow are
+fundamentals.py (the sweep) and score.py (Gate C1 -> CCN -> hurdle -> bench).
 FORCE=true skips the 1st-Saturday guard (manual runs)."""
 import os, sys, json, time, traceback, datetime as dt, urllib.request, urllib.error
 import psycopg
@@ -35,8 +36,6 @@ def main():
         try:
             # 1) listing census: common stocks on NYSE / NASDAQ / AMEX only
             syms = get(f"https://eodhd.com/api/exchange-symbol-list/US?api_token={K}&fmt=json", calls)
-            ok_ex = {"NYSE","NASDAQ","AMEX","NYSE MKT","NYSE ARCA"}  # ARCA excluded below via type
-    
             common = {s["Code"] for s in syms
                       if s.get("Type")=="Common Stock" and s.get("Exchange") in {"NYSE","NASDAQ","AMEX","NYSE MKT"}}
             print(f"listing census: {len(common)} common stocks on NYSE/NASDAQ/AMEX")
@@ -88,7 +87,7 @@ def main():
                 conn.commit()
             with conn.cursor() as cur:
                 cur.execute("update runs set finished_at=now(), status='green', calls_used=%s, rows_written=%s, detail=%s where id=%s",
-                            (calls[0], 0 if DRY else len(rows), json.dumps({"stage":"census","listing":len(common),"cap_pass":len(rows),"funnel":"awaiting Phase D"}), run_id))
+                            (calls[0], 0 if DRY else len(rows), json.dumps({"stage":"census","listing":len(common),"cap_pass":len(rows)}), run_id))
             conn.commit()
             print(f"monthly-funnel: green — {len(rows)} coarse-L0 names, {calls[0]} calls")
             return 0

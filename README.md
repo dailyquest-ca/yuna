@@ -2,12 +2,18 @@
 
 *This repository is the machine. The plan is the law — it rides along verbatim at [`docs/yuna_plan.md`](docs/yuna_plan.md); where this README and the plan disagree, the plan wins.*
 
+**Three documents, and only three.** [`docs/yuna_plan.md`](docs/yuna_plan.md) is the law.
+[`docs/roadmap-2026-07-31.md`](docs/roadmap-2026-07-31.md) is the build order — what is done, what
+drifted from the law, what gets built next and in which order. [`docs/learnings.md`](docs/learnings.md)
+is the scar tissue: facts this build paid for, worth reading before touching anything.
+(`docs/backtest-findings-2026-07-31.md` is dated evidence, not instruction.)
+
 ## Architecture (mirror of plan §4.0)
 
 | Layer | What it is |
 |---|---|
 | **Data** | EODHD All-In-One: bulk prices nightly · FX · fundamentals on filing · earnings calendar. Bars kept 3 years, fundamentals forever |
-| **Compute** | GitHub Actions jobs: `nightly-ingest` (+ `daily` duties) · `nightly-retry` · `weekly-rank` · `monthly-funnel` (census → `fundamentals` → `score`) · `monthly-backup` · one-shot `migrate` and `phase0` |
+| **Compute** | Five **scheduled** jobs: `nightly-ingest` (+ `daily` duties) · `nightly-retry` · `weekly-rank` · `monthly-funnel` (census → `fundamentals` → `score`) · `monthly-backup`. Everything else — `migrate`, `phase0`, `score`, `daily`, `fundamentals`, both backtests — is **dispatch-only tooling**; nothing joins the schedule without a plan edit (§4.2) |
 | **Store** | One Supabase Postgres project — universe → book → briefs, plus `fundamentals` as the point-in-time asset, and human views for browsing |
 | **Judge** | Five Yuna sessions: evening stop sheet · pre-open brief · Sat deep-dive · Sun reconciliation · monthly approval |
 | **Execute** | Zak places every order: entry pairs · stop moves · gap exits · fill confirmations · monthly approvals |
@@ -23,7 +29,7 @@
 ## Layout
 
 ```
-docs/         the plan (law) and build handoffs
+docs/         the plan (law), the roadmap (build order), the learnings (scar tissue)
 migrations/   numbered SQL, applied by the dispatch-only `migrate` workflow
 src/          ingest + compute jobs (Python); db.py holds the shared heartbeat contract
 .github/      workflows (all times UTC)

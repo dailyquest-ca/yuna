@@ -3,10 +3,10 @@
 Reads `fundamentals` and `prices`; calls no API. Percentiles are cross-sectional within L0
 at run time, exactly as §3.0 says, so scores move when the field moves.
 
-Deviation, announced: the hurdle's "fair multiple" wants the stock's own 5-year median
-P/FCF. We hold a 3-year bar window, so the median is taken over the quarters we can price
-and `pfcf_obs` records how many that was. Under 8 observations the name falls back to the
-plan's short-history rule (fair = lower of current or 25x).
+Deviation, announced and awaiting ratification (roadmap Part 4): the hurdle's "fair multiple"
+wants the stock's own 5-year median P/FCF. We hold a 3-year bar window, so the median is taken
+over the quarters we can price; under 8 such quarters the name falls back to the plan's
+short-history rule (fair = lower of current or 25x). The 8 is a builder's threshold.
 """
 import os, sys, json, math, statistics as st, datetime as dt
 import psycopg
@@ -172,7 +172,7 @@ def main():
                     last_close=px, gap_to_hurdle=gap,
                     data_confidence=("flagged" if (agrees is False or quote_ok is False) else confidence),
                     serial_acquirer=bool(gw_jump),
-                    pfcf_obs=obs, engine_agrees=agrees, is_holding=is_hold))
+                    is_holding=is_hold))
 
             # ---- bench: top-N by CCN from each size cohort (§3.1) ----
             eligible = [o for o in out if o["c1_pass"]]

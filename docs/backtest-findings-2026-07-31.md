@@ -1,3 +1,9 @@
+> **Read with the date in mind.** These runs measure the plan as it stood *before* the 2026-07-31
+> amendments. The largest line item below — 171 trades exiting on "volume unconfirmed" — is a rule
+> §3.2 has since replaced with freeze-the-pyramid-at-50%, and the MCN here uses the four setup
+> sub-scores that were cut to three. The numbers are evidence of the *mechanisms*, not of the
+> current law. Re-measurement is a Phase H gate (`roadmap-2026-07-31.md`).
+
 # Backtest v1 — momentum sleeve, 2024-08-28 → 2026-07-30
 
 Run 5, `backtest_runs.id = 5`. 500 trading days, 296 trades, 2,783 US names.
