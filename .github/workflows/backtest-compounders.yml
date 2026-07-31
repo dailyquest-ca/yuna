@@ -1,0 +1,46 @@
+name: backtest-compounders
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: 'run label'
+        default: 'compounders v1'
+      ccn_enter:
+        description: 'CCN required to enter (§3.3 = 70)'
+        default: '70'
+      ccn_exit:
+        description: 'CCN below which the position exits (§3.3 = 55)'
+        default: '55'
+      position_size:
+        description: 'position size as a fraction of NAV (§3.1 flat = 0.12)'
+        default: '0.12'
+      max_names:
+        description: 'compounder names (§2.1 = 4-5)'
+        default: '5'
+      dry_run:
+        description: 'simulate, write nothing'
+        default: 'false'
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install "psycopg[binary]==3.2.*" numpy pandas
+      - run: set -o pipefail; python src/backtest_compounders.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          LABEL: ${{ inputs.label || 'compounders v1' }}
+          CCN_ENTER: ${{ inputs.ccn_enter || '70' }}
+          CCN_EXIT: ${{ inputs.ccn_exit || '55' }}
+          POSITION_SIZE: ${{ inputs.position_size || '0.12' }}
+          MAX_NAMES: ${{ inputs.max_names || '5' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py backtest-compounders /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
