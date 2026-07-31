@@ -53,6 +53,62 @@ def get(path, calls, tries=3, timeout=90, **params):
             raise
 
 
+def nav_cad(cur):
+    """NAV per §2.0 — balances are truth, prices are the extrapolation.
+
+    An account's stated total wins when we have one; otherwise we build it from recorded cash
+    plus what the book says it holds. Facilities contribute their drawn balance as debt only —
+    undrawn credit is capacity, not a liability. The book-derived equity total comes back
+    alongside so the caller can see, and report, any gap between the two."""
+    cur.execute("select close from prices where ticker='USDCAD.FOREX' order by d desc limit 1")
+    row = cur.fetchone()
+    fx = float(row[0]) if row else 1.0
+
+    cur.execute("""select b.account, b.ticker, b.currency, b.qty, p.close
+                   from book b
+                   join lateral (select close from prices where ticker=b.ticker
+                                 order by d desc limit 1) p on true
+                   where b.status='open'""")
+    per_ticker, per_account = {}, {}
+    for acct, tk, ccy, qty, close in cur.fetchall():
+        cad = float(qty) * float(close) * (fx if ccy == "USD" else 1.0)
+        per_ticker[tk] = cad
+        per_account[acct] = per_account.get(acct, 0.0) + cad
+    book_equities = sum(per_account.values())
+
+    cur.execute("""select distinct on (b.account) b.account, a.kind, b.cash, b.drawn,
+                          b.credit_limit, b.total_value, b.as_of
+                   from balances b join accounts a on a.code=b.account
+                   order by b.account, b.as_of desc, b.id desc""")
+    bal = {r[0]: dict(kind=r[1], cash=r[2], drawn=r[3], limit=r[4], total=r[5], as_of=r[6])
+           for r in cur.fetchall()}
+
+    assets = cash = debt = 0.0
+    accounts = {}
+    for acct in set(list(per_account) + list(bal)):
+        b = bal.get(acct, {})
+        if b.get("kind") == "facility":
+            debt += float(b.get("drawn") or 0)
+            continue
+        c = float(b.get("cash") or 0)
+        stated = b.get("total")
+        value = float(stated) if stated is not None else c + per_account.get(acct, 0.0)
+        accounts[acct] = dict(value_cad=round(value, 2), cash_cad=round(c, 2),
+                              book_equities_cad=round(per_account.get(acct, 0.0), 2),
+                              stated=stated is not None)
+        assets += value
+        cash += c
+    for acct, b in bal.items():
+        if b.get("kind") == "facility":
+            accounts[acct] = dict(drawn=float(b.get("drawn") or 0),
+                                  limit=float(b.get("limit") or 0) or None)
+
+    anchored = max((b["as_of"] for b in bal.values() if b.get("as_of")), default=None)
+    return dict(nav=assets - debt, assets=assets, cash=cash, debt=debt, fx=fx,
+                book_equities=book_equities, per_ticker=per_ticker, accounts=accounts,
+                anchored=anchored, balances_captured=bool(bal))
+
+
 class Heartbeat:
     """with Heartbeat(conn, 'daily') as hb: ...  — opens a running row, closes it green,
     or red with the traceback if the body raises. hb.detail / hb.calls / hb.rows are yours."""

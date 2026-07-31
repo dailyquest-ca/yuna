@@ -8,7 +8,7 @@ Everything here reads the database. The only vendor call is the earnings calenda
 """
 import os, sys, json, datetime as dt
 import psycopg
-from db import connect, config, get, dry, Heartbeat
+from db import connect, config, get, dry, nav_cad, Heartbeat
 
 CAL_DAYS = 45
 
@@ -177,45 +177,20 @@ def refresh_marks(conn, hb):
 # ---------------------------------------------------------------- NAV (§2.0)
 def nav_snapshot(conn, hb):
     with conn.cursor() as cur:
-        cur.execute("""select close from prices where ticker='USDCAD.FOREX' order by d desc limit 1""")
-        row = cur.fetchone()
-        fx = float(row[0]) if row else None
-        cur.execute("""select b.ticker, b.currency, b.qty, p.close
-                       from book b
-                       join lateral (select close from prices where ticker=b.ticker
-                                     order by d desc limit 1) p on true
-                       where b.status='open'""")
-        equities = 0.0
-        holdings = []
-        for tk, ccy, qty, close in cur.fetchall():
-            v = float(qty) * float(close)
-            cad = v * (fx or 1.0) if ccy == "USD" else v
-            equities += cad
-            holdings.append({"ticker": tk, "value_cad": round(cad, 2)})
-
-        # latest balance row per account
-        cur.execute("""select distinct on (account) account, cash, drawn, as_of
-                       from balances order by account, as_of desc, id desc""")
-        cash = debt = 0.0
-        anchored = None
-        for acct, c, d_, as_of in cur.fetchall():
-            cash += float(c or 0)
-            debt += float(d_ or 0)
-            anchored = as_of if anchored is None or as_of > anchored else anchored
-
-        nav = equities + cash - debt
-        provisional = True
-        detail = {"holdings": holdings, "balances_as_of": str(anchored) if anchored else None,
-                  "balances_captured": anchored is not None}
+        n = nav_cad(cur)
+        detail = {"accounts": n["accounts"], "per_ticker": n["per_ticker"],
+                  "balances_as_of": str(n["anchored"]) if n["anchored"] else None,
+                  "book_equities_cad": round(n["book_equities"], 2)}
         if not dry():
             cur.execute("""insert into nav_snapshots(d,nav_cad,equities_cad,cash_cad,debt_cad,
                              usdcad,provisional,detail)
-                           values (current_date,%s,%s,%s,%s,%s,%s,%s)""",
-                        (nav, equities, cash, debt, fx, provisional, json.dumps(detail)))
+                           values (current_date,%s,%s,%s,%s,%s,true,%s)""",
+                        (n["nav"], n["book_equities"], n["cash"], n["debt"], n["fx"],
+                         json.dumps(detail, default=str)))
     conn.commit()
-    hb.detail["nav_cad"] = round(nav, 2)
-    hb.detail["nav_balances_captured"] = anchored is not None
-    return nav, anchored
+    hb.detail["nav_cad"] = round(n["nav"], 2)
+    hb.detail["nav_balances_captured"] = n["balances_captured"]
+    return n["nav"], n["anchored"]
 
 
 # ---------------------------------------------------------------- freshness + brief

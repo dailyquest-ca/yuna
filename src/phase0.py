@@ -10,36 +10,10 @@ exit or entry ticket per line. Yuna never executes; Zak places every order.
 """
 import os, sys, json, math, datetime as dt
 import psycopg
-from db import connect, config, dry, Heartbeat
+from db import connect, config, dry, nav_cad, Heartbeat
 
 ENTER = 70.0          # §3.3 enterable
 FULL = 85.0           # §3.3 full conviction
-
-
-def latest_fx(cur):
-    cur.execute("select close from prices where ticker='USDCAD.FOREX' order by d desc limit 1")
-    r = cur.fetchone()
-    return float(r[0]) if r else 1.0
-
-
-def nav_now(cur, fx):
-    cur.execute("""select b.ticker, b.currency, b.qty, p.close
-                   from book b
-                   join lateral (select close from prices where ticker=b.ticker
-                                 order by d desc limit 1) p on true
-                   where b.status='open'""")
-    equities, per = 0.0, {}
-    for tk, ccy, qty, close in cur.fetchall():
-        cad = float(qty) * float(close) * (fx if ccy == "USD" else 1.0)
-        per[tk] = cad
-        equities += cad
-    cur.execute("""select distinct on (account) account, cash, drawn from balances
-                   order by account, as_of desc, id desc""")
-    cash = debt = 0.0
-    rows = cur.fetchall()
-    for _, c, d_ in rows:
-        cash += float(c or 0); debt += float(d_ or 0)
-    return equities + cash - debt, equities, cash, debt, per, bool(rows)
 
 
 def main():
@@ -53,8 +27,10 @@ def main():
                 budgets = config(cur, "mcn_risk_budget_validation", {"70": 0.005, "85": 0.007})
                 max_stop = float(config(cur, "momentum_max_stop", 0.08))
 
-                fx = latest_fx(cur)
-                nav, equities, cash, debt, per_value, anchored = nav_now(cur, fx)
+                n = nav_cad(cur)
+                fx, nav = n["fx"], n["nav"]
+                equities, cash, debt = n["book_equities"], n["cash"], n["debt"]
+                per_value, anchored = n["per_ticker"], n["balances_captured"]
 
                 cur.execute("""select b.id, b.ticker, b.account, b.sleeve, b.qty, b.currency,
                                       u.name, u.sector, u.industry
@@ -176,7 +152,8 @@ def main():
                        f"NAV {'CAD ' + format(nav, ',.0f') if anchored else 'equities-only CAD ' + format(nav, ',.0f') + ' (provisional)'}")
             detail = dict(nav_cad=round(nav, 2), equities_cad=round(equities, 2),
                           cash_cad=round(cash, 2), debt_cad=round(debt, 2), usdcad=fx,
-                          balances_captured=anchored, verdicts=verdicts,
+                          balances_captured=anchored, accounts=n["accounts"],
+                          book_equities_cad=round(n["book_equities"], 2), verdicts=verdicts,
                           compounder_list=comp_list, momentum_list=mom_list)
 
             if not dry():
