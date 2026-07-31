@@ -52,19 +52,26 @@ def apply_fills(conn, hb):
                     new_cost = (float(bqty) * float(bcost) + qty * price) / new_qty
                     cur.execute("""update book set qty=%s, avg_cost=%s,
                                      pyramid_step=greatest(pyramid_step, coalesce(%s, pyramid_step)),
+                                     pyramid_stalled_since = case
+                                       when greatest(pyramid_step, coalesce(%s, pyramid_step)) >= 3
+                                       then null else pyramid_stalled_since end,
                                      adds_12m = adds_12m + case when %s then 1 else 0 end,
                                      last_add_at = case when %s then %s else last_add_at end,
                                      updated_at=now() where id=%s""",
-                                (new_qty, new_cost, step, sleeve == "compounders",
+                                (new_qty, new_cost, step, step, sleeve == "compounders",
                                  sleeve == "compounders", tdate, bid))
                 else:
                     cur.execute("""insert into book(ticker,account,sleeve,lot,qty,avg_cost,currency,
                                      opened_at,stop,stop_limit,highest_close,trail_mode,
-                                     pyramid_step,theme,pivot,target_qty,status)
+                                     pyramid_step,theme,pivot,target_qty,
+                                     pyramid_stalled_since,status)
                                    values (%s,%s,%s,'core',%s,%s,%s,%s,%s,%s,%s,'initial',%s,%s,
-                                           %s,%s,'open')""",
+                                           %s,%s,%s,'open')""",
+                                # the stall clock starts at entry: §3.2 gives a pyramid four weeks
+                                # to reach full size, and nothing was starting it before
                                 (tk, acct, sleeve or "momentum", qty, price, ccy or "USD", tdate,
-                                 stop, stop_limit, price, step or 1, theme, pivot, target_qty))
+                                 stop, stop_limit, price, step or 1, theme, pivot, target_qty,
+                                 tdate if (sleeve or "momentum") == "momentum" else None))
             else:
                 if held:
                     bid, bqty, _, _ = held
@@ -280,7 +287,8 @@ def arm_exits(conn, arm, bars, gate, breakouts, cushion, holidays):
         cur.execute("""select b.id, b.ticker, b.account, b.sleeve, b.qty, b.avg_cost, b.stop,
                               b.stop_limit, b.pyramid_step, b.opened_at, b.confirmed,
                               b.pyramid_stalled_since, c.mcn, c.m2, b.pivot,
-                              e.report_date
+                              e.report_date, c.state, c.pivot as base_pivot, c.stop_suggest,
+                              b.target_qty, b.pyramid_step
                        from book b
                        left join candidates c on c.ticker = b.ticker
                        left join lateral (select report_date from earnings
@@ -288,7 +296,8 @@ def arm_exits(conn, arm, bars, gate, breakouts, cushion, holidays):
                                           order by report_date limit 1) e on true
                        where b.status='open' and b.sleeve <> 'levered'""")
         for (bid, tk, acct, sleeve, qty, cost, stop, stop_limit, step, opened, confirmed,
-             stalled, mcn, m2, pivot, report) in cur.fetchall():
+             stalled, mcn, m2, pivot, report, base_state, base_pivot, base_stop, target,
+             cur_step) in cur.fetchall():
             b = bars.get(tk)
             if not b:
                 continue
@@ -350,9 +359,20 @@ def arm_exits(conn, arm, bars, gate, breakouts, cushion, holidays):
 
                 # ---- a pyramid stalled below full size for 4 weeks resolves (§3.2)
                 if stalled and (dt.date.today() - stalled).days >= 28 and (step or 0) < 3:
-                    arm.add("exit", tk, "stall", order_type="market",
-                            note="pyramid stalled below full size for 4 weeks and no new base — "
-                                 "no permanent sub-scale positions", **common)
+                    # §3.2: it "either completes on the next base or exits". A fresh valid base is
+                    # the completion path, so offer that first and exit only when there is none.
+                    if base_state == "BUY" and base_pivot:
+                        remaining = (float(target) - float(qty)) if target else None
+                        arm.add("add", tk, "stall", sleeve=sleeve, account=acct,
+                                order_type="stop_limit", trigger_price=float(base_pivot),
+                                limit_price=float(base_pivot) * 1.02, qty=remaining,
+                                score=float(mcn) if mcn else None,
+                                note="pyramid stalled four weeks — a new valid base completes it "
+                                     "to full size rather than exiting (§3.2)")
+                    else:
+                        arm.add("exit", tk, "stall", order_type="market",
+                                note="pyramid stalled below full size for 4 weeks and no new base "
+                                     "— no permanent sub-scale positions", **common)
 
 
 def arm_pyramid(conn, arm, bars, ceiling):
