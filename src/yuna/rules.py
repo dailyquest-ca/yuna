@@ -235,6 +235,13 @@ CLAUSES: tuple[Clause, ...] = (
                 "revenue growth. The plan routes the engine down the data-confidence path — "
                 "which governs the CCN — and is silent on what growth the hurdle should then "
                 "use. Raised as Q7"),
+    Clause("3.1/fair-multiple",
+           "the lower of the stock's own 5-yr median P/FCF or 30x; under 3 years of history, "
+           "the lower of the current multiple or 25x",
+           BUILT, wired=True,
+           note="DEVIATION, announced as D5: the median is taken over the quarters our 3-year "
+                "bar window can price, not over 5 years. Under 8 priced quarters the name falls "
+                "to the plan's own short-history branch"),
     Clause("3.1/hurdle",
            "hurdle v1.0: the highest price at which FCF yield + growth - derating drag "
            "still clears 15%",

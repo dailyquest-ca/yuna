@@ -16,6 +16,7 @@ from yuna.db import Heartbeat, config, connect, dry
 from yuna.policy import (
     ccn as ccn_score,
     engine_growth,
+    fair_multiple,
     hurdle_price,
     inverted_log_size,
     pct_rank,
@@ -120,12 +121,10 @@ def main():
                 # multiple, it is a category error — so it produces no hurdle at all (§009)
                 raw_d = {} if quote_ok is False else (raw if isinstance(raw, dict) else (json.loads(raw) if raw else {}))
                 pfcf_med, obs = pfcf_history(raw_d, closes.get(tk, {}))
-                if obs >= 8 and pfcf_med:
-                    fair = min(pfcf_med, fair_cap)
-                elif pfcf_cur and quote_ok is not False:
-                    fair = min(pfcf_cur, fair_cap_short)
-                else:
-                    fair = None
+                # the current multiple is only usable when the currencies agree — a P/FCF built
+                # from a foreign-currency statement and a USD cap is not a multiple at all
+                fair = fair_multiple(pfcf_med, obs, pfcf_cur if quote_ok is not False else None,
+                                     fair_cap, fair_cap_short)
                 # §3.1 engine reliability check: growth = ROIC x reinvestment is an identity, so
                 # it must agree with observed revenue growth. When it doesn't — usually a net-cash
                 # balance sheet shrinking invested capital toward zero and sending ROIC to the moon

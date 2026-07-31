@@ -75,9 +75,16 @@ begin
   end if;
 end $$;
 
-comment on role yuna_session is
-  'Yuna''s scheduled sessions. Zero privileges on every table; may only execute the verbs in '
-  'schema api. Kill switch: revoke usage on schema api from yuna_session;';
+-- Wrapped: COMMENT ON ROLE wants superuser (or CREATEROLE with admin on the role). It is
+-- documentation, and documentation must never be the reason a migration fails.
+do $$
+begin
+  execute 'comment on role yuna_session is '
+          '''Yuna''''s scheduled sessions. Zero privileges on every table; may only execute the '
+          'verbs in schema api. Kill switch: revoke usage on schema api from yuna_session;''';
+exception when insufficient_privilege then
+  raise notice 'skipped comment on role yuna_session — no privilege, harmless';
+end $$;
 
 -- A leaked token should not be able to hold a connection open forever. Role settings apply on
 -- SET ROLE, which is exactly how PostgREST enters this role, so this binds the session path and
@@ -414,12 +421,17 @@ $$;
 -- document." A session that could widen a stop or raise a size cap by writing a config row would
 -- be able to change what the machine does to money without anyone announcing an edit.
 --
--- Four gates, any one of which refuses. Deliberately over-broad: a wrongly-refused key costs one
+-- Five gates, any one of which refuses. Deliberately over-broad: a wrongly-refused key costs one
 -- migration, a wrongly-allowed key costs real money.
 --   1. the exact list of every key seeded to date (002, 005, 009, 016)
 --   2. a substring deny-list, so a key invented next month is refused by default
 --   3. any existing key Zak himself set — his settings are not a session's to overwrite
 --   4. any existing key whose note cites a plan section — that is §4.3's "runtime copy of law"
+--   5. any key a JOB or a migration has ever written. This is the gate that matters most,
+--      because it does not depend on anyone naming the key well: whatever the machine set, a
+--      session cannot move. Gates 1-4 are the backstop for keys that do not exist yet.
+-- What is left, in practice, is a key a session invented and maintains itself. That is a very
+-- small door, and it is meant to be.
 -- Returns null when the key may be set, or the reason it may not.
 create or replace function yuna_priv.config_protection(p_key text) returns text
 language plpgsql stable security definer set search_path = pg_catalog, public, pg_temp as $$
@@ -466,6 +478,10 @@ begin
                     'refuses those by pattern (§4.3); set it by migration.', v_key, p);
     end if;
   end loop;
+  if exists (select 1 from config c where lower(c.key) = v_key and c.written_by = 'job') then
+    return format('%s is maintained by the machine — a job or a migration set it, so a session '
+                  'does not move it (§4.3).', v_key);
+  end if;
   select c.set_by, c.note into v_by, v_note
     from config c where lower(c.key) = v_key order by c.set_at desc, c.id desc limit 1;
   if v_by = 'zak' then
@@ -657,6 +673,12 @@ returns bigint
 language plpgsql security definer set search_path = pg_catalog, public, pg_temp as $$
 declare p balances; v_id bigint;
 begin
+  if p_value is null then
+    -- Callers must not write a row that blanks a field NAV reads. Belt and braces: the one path
+    -- that can produce a null figure (a movement with no anchor) returns before reaching here.
+    raise exception 'refusing to write a balance row with no figure for % on %', p_field, p_account
+      using errcode = 'PT400';
+  end if;
   p := yuna_priv.prior_balance(p_account);
   insert into balances (account, as_of, cash_cad, cash_usd, drawn, credit_limit, source,
                         provisional, stated_as, movement_amount, movement_currency,
@@ -1149,8 +1171,28 @@ begin
                             'balance_quarantine', v_id);
   end if;
 
-  -- The provisional balance row. v_new is null only when a movement had no anchor to build on —
-  -- the row then carries the movement and no balance, which is the honest state of knowledge.
+  -- A movement with no anchor behind it gets the observation and nothing else. Writing a row
+  -- with a null cash figure would be worse than writing none: db.nav_cad takes the NEWEST row
+  -- per account outright, so a row stating "cash is unknown" would blank the account's cash in
+  -- NAV. The observation preserves what Zak said; the next anchor supersedes it anyway, because
+  -- "movements since" only counts movements recorded after the anchor.
+  if v_new is null then
+    return yuna_priv.finish(v_call,
+                            yuna_priv.envelope('session_record_cash', idempotency_key, false,
+                                               false, 'observed', 'observations', v_obs,
+                                               jsonb_build_object('said', v_said,
+                                                                  'stated_as', v_kind,
+                                                                  'account', account,
+                                                                  'currency', v_ccy,
+                                                                  'balance', null,
+                                                                  'needs_anchor', true,
+                                                                  'why', 'no anchor to build on — '
+                                                                    'record a balance first '
+                                                                    '(session_record_balance)')),
+                            'observations', v_obs);
+  end if;
+
+  -- The provisional balance row (§2.0 — stated mid-week, labeled, trued up Sunday).
   v_id := yuna_priv.write_balance(v_call, account, v_field, v_ccy, v_new, v_day, true, v_kind,
                                   case when v_kind = 'movement' then amount else null end);
 
@@ -1164,7 +1206,7 @@ begin
                                                                 'currency', v_ccy,
                                                                 'balance', v_new,
                                                                 'movements_since', v_moves,
-                                                                'needs_anchor', v_new is null,
+                                                                'needs_anchor', false,
                                                                 'provisional', true,
                                                                 'as_of', v_day)),
                           'balances', v_id);

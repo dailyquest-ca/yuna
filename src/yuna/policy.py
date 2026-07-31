@@ -125,6 +125,40 @@ def engine_growth(engine: float | None, revenue_cagr: float | None,
     return g, agrees
 
 
+FAIR_MULTIPLE_CAP = 30.0
+FAIR_MULTIPLE_CAP_SHORT = 25.0
+MIN_PRICED_QUARTERS = 8
+
+
+@implements("3.1/fair-multiple",
+            "the lower of the stock's own long-run median P/FCF or 30x; on short history, the "
+            "lower of the current multiple or 25x")
+def fair_multiple(pfcf_median: float | None, priced_quarters: int,
+                  pfcf_current: float | None,
+                  cap: float = FAIR_MULTIPLE_CAP,
+                  cap_short: float = FAIR_MULTIPLE_CAP_SHORT) -> float | None:
+    """The multiple the derating drag slides down to. None when neither branch is available.
+
+    §3.1 wants the stock's own **5-year** median P/FCF. We hold a 3-year bar
+    window, so the median is taken over the quarters we can actually price, and
+    `priced_quarters` records how many that was — under 8, the name falls to the
+    plan's own short-history rule. That substitution is an announced deviation
+    (D5 in docs/open-questions.md): it is the plan's shape computed on the data we
+    have, not the plan's number, and it moves every hurdle price. Buying two more
+    years of bars would close it.
+
+    The caps bind downward only. A stock that has historically traded at 45x does
+    not get underwritten at 45x — §3.1 caps the fair multiple at 30x precisely so
+    that a permanently expensive name cannot borrow its own past enthusiasm as a
+    margin of safety.
+    """
+    if priced_quarters >= MIN_PRICED_QUARTERS and pfcf_median and pfcf_median > 0:
+        return min(pfcf_median, cap)
+    if pfcf_current and pfcf_current > 0:
+        return min(pfcf_current, cap_short)
+    return None
+
+
 @implements("3.1/hurdle",
             "solves for the highest price at which FCF yield + growth - derating drag "
             "still clears the 15% floor")
