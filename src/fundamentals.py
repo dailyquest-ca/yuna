@@ -61,7 +61,7 @@ def cagr(new, old, years):
 
 
 # ------------------------------------------------------------------ extraction
-def extract(ticker, r):
+def extract(ticker, r, quote_ccy=None):
     G = r.get("General") or {}
     H = r.get("Highlights") or {}
     SS = r.get("SharesStats") or {}
@@ -248,7 +248,8 @@ def extract(ticker, r):
         currency=G.get("CurrencyCode"), sector=sector, industry=industry,
         gic_sector=gic_s, gic_industry=gic_i,
         ipo_date=day(G.get("IPODate")), is_financial=is_fin,
-        primary_ticker=primary, statement_currency=stmt_ccy, is_adr=is_adr, quote_ok=None,
+        primary_ticker=primary, statement_currency=stmt_ccy, is_adr=is_adr,
+        quote_ok=(not is_adr and stmt_ccy is not None and stmt_ccy == quote_ccy),
         market_cap=mcap, shares_out=shares, fiscal_years=n_years,
         ebit_3y=ebit_3y, tax_rate=tax_rate, nopat_3y=nopat_3y,
         invested_capital=ic_avg, invested_capital_ex_gw=ic_avg_ex,
@@ -299,17 +300,12 @@ def flush(conn, rows, errors):
         with conn.cursor() as cur:
             cur.executemany(sql, [tuple(r[c] for c in COLS) for r in rows])
             cur.executemany(upd, [(r["name"], r["sector"], r["industry"], r["market_cap"], r["ticker"]) for r in rows])
-        cur.executemany("""update fundamentals f set quote_ok =
-                             (%s is false and f.statement_currency is not null
-                              and u.currency is not null and f.statement_currency = u.currency)
-                           from universe u
-                           where u.ticker = f.ticker and f.ticker = %s""",
-                        [(r["is_adr"], r["ticker"]) for r in rows])
         conn.commit()
         return len(rows)
     except Exception as e:
         conn.rollback()
         print(f"  batch insert failed ({type(e).__name__}: {e}) — retrying row by row")
+        errors.setdefault("_batch_fallback", f"{type(e).__name__}: {e}")
         ok = 0
         for r in rows:
             try:
@@ -346,6 +342,8 @@ def main():
                                            and e.report_date <= current_date)""")
                         fresh = {r[0] for r in cur.fetchall()}
                         targets = [t for t in targets if t not in fresh]
+                cur.execute("select ticker, currency from universe where kind='stock'")
+                quote = {r[0]: r[1] for r in cur.fetchall()}
             hb.detail["targets"] = len(targets)
             print(f"fundamentals: sweeping {len(targets)} names, {WORKERS} workers")
 
@@ -367,7 +365,7 @@ def main():
                             errors[t] = err or "unexpected payload"
                         continue
                     try:
-                        row = extract(t, doc)
+                        row = extract(t, doc, quote.get(t))
                     except Exception as e:
                         fail += 1
                         if len(errors) < 40:
@@ -390,6 +388,8 @@ def main():
                              api_units=hb.calls[0] * 10)
             if fail:
                 hb.amber(f"{fail} names without usable fundamentals")
+            if "_batch_fallback" in errors:
+                hb.amber("batch insert fell back to row-by-row — a per-row step may have been skipped")
             print(f"fundamentals: {done} written, {fail} failed, {hb.calls[0]} calls")
     return 0
 
