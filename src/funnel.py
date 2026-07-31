@@ -77,6 +77,21 @@ def main():
             if not DRY:
                 with conn.cursor() as cur:
                     cur.execute("update universe set in_l0=false where kind='stock'")
+                    # §3.0 / §3.3: delisted names are RETAINED, and marked. A name that was in the
+                    # last census and is absent from this exchange listing has stopped trading; its
+                    # bars stay, its status changes, and it keeps counting in every backtest. This
+                    # is the survivorship bias that flatters every number we have — the two classic
+                    # sins §4.8 names are using data before its filing date and forgetting the dead.
+                    cur.execute("""update universe set status='delisted',
+                                     delisted_at = coalesce(delisted_at, current_date),
+                                     note = coalesce(note,'') ||
+                                       case when note is null then '' else ' · ' end ||
+                                       'absent from the ' || current_date || ' exchange listing'
+                                   where kind='stock' and status='active'
+                                     and not is_holding
+                                     and ticker like '%%.US'
+                                     and ticker <> all(%s)""",
+                                ([c + ".US" for c in common],))
                     cur.executemany("""insert into universe(ticker,name,kind,exchange,currency,in_l0,sector,industry,market_cap_usd)
                         values (%s,%s,'stock','US','USD',true,%s,%s,%s)
                         on conflict (ticker) do update set name=coalesce(excluded.name,universe.name),
