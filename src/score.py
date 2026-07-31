@@ -160,7 +160,11 @@ def main():
                     ticker=tk, ccn=ccn,
                     engine=eng_p.get(tk), cash_conv=cc_p.get(tk), size_score=size_p.get(tk),
                     engine_raw=engine, cash_conv_raw=cc, roic=roic, reinvest_rate=reinv,
-                    c1_pass=c1, c1_fail_reason=c1why,
+                    c1_pass=(c1 and quote_ok is True),
+                    c1_fail_reason=(c1why if c1 else None) if quote_ok is True else
+                        ((c1why + " · " if c1why else "") +
+                         "reports in a foreign currency or trades as a depositary receipt — "
+                         "not priceable in v1"),
                     cohort=("large" if (mcap or 0) >= boundary else "small"),
                     hurdle_price=hp, fcf_yield=(fcf / mcap if fcf and mcap else None),
                     engine_growth=g, fair_multiple=fair,

@@ -96,6 +96,15 @@ def extract(ticker, r):
     hay = " ".join(filter(None, [sector, industry, gic_s, gic_i])).lower()
     is_fin = (sector or "").lower() in FIN_SECTORS or (gic_s or "").lower() in FIN_SECTORS \
              or any(w in hay for w in FIN_WORDS)
+    # General.CurrencyCode lies for depositary receipts (TSM says USD, files in TWD).
+    # currency_symbol sits on every statement and does not.
+    stmt_ccy = None
+    for tbl in (is_y, cf_y, bs_y):
+        for k in desc(tbl)[:1]:
+            stmt_ccy = stmt_ccy or (tbl[k] or {}).get("currency_symbol")
+    primary = G.get("PrimaryTicker")
+    code = G.get("Code")
+    is_adr = bool(primary and code and primary.split(".")[0].upper() != str(code).upper())
     mcap = num(H.get("MarketCapitalization"))
     shares = num(SS.get("SharesOutstanding")) or num((bs_y.get(ys[0]) or {}).get("commonStockSharesOutstanding"))
 
@@ -239,7 +248,7 @@ def extract(ticker, r):
         currency=G.get("CurrencyCode"), sector=sector, industry=industry,
         gic_sector=gic_s, gic_industry=gic_i,
         ipo_date=day(G.get("IPODate")), is_financial=is_fin,
-        primary_ticker=G.get("PrimaryTicker"), quote_ok=None,
+        primary_ticker=primary, statement_currency=stmt_ccy, is_adr=is_adr, quote_ok=None,
         market_cap=mcap, shares_out=shares, fiscal_years=n_years,
         ebit_3y=ebit_3y, tax_rate=tax_rate, nopat_3y=nopat_3y,
         invested_capital=ic_avg, invested_capital_ex_gw=ic_avg_ex,
@@ -271,7 +280,8 @@ COLS = ["ticker", "filing_date", "period_end", "currency", "sector", "industry",
         "ni_3y", "cash_conversion", "fcf_ttm", "fcf_positive", "net_issuance_3y", "net_debt",
         "ebitda", "net_debt_ebitda", "debt_grows_faster", "goodwill", "goodwill_jump", "c1_pass",
         "c1_fail_reason", "pfcf_current", "pfcf_median", "pfcf_obs", "eps_yoy_latest",
-        "eps_yoy_prev", "m4_pass", "data_confidence", "primary_ticker", "quote_ok", "raw"]
+        "eps_yoy_prev", "m4_pass", "data_confidence", "primary_ticker", "statement_currency",
+        "quote_ok", "raw"]
 
 
 def flush(conn, rows, errors):
@@ -289,10 +299,12 @@ def flush(conn, rows, errors):
         with conn.cursor() as cur:
             cur.executemany(sql, [tuple(r[c] for c in COLS) for r in rows])
             cur.executemany(upd, [(r["name"], r["sector"], r["industry"], r["market_cap"], r["ticker"]) for r in rows])
-        cur.execute("""update fundamentals f set quote_ok =
-                         (f.currency is not null and u.currency is not null and f.currency = u.currency)
-                       from universe u where u.ticker = f.ticker and f.ticker = any(%s)""",
-                    ([r["ticker"] for r in rows],))
+        cur.executemany("""update fundamentals f set quote_ok =
+                             (%s is false and f.statement_currency is not null
+                              and u.currency is not null and f.statement_currency = u.currency)
+                           from universe u
+                           where u.ticker = f.ticker and f.ticker = %s""",
+                        [(r["is_adr"], r["ticker"]) for r in rows])
         conn.commit()
         return len(rows)
     except Exception as e:
