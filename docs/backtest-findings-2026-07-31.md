@@ -66,3 +66,72 @@ the pivot with no slippage or FX cost charged.
    a NaN volume baseline for US names, and an unknown baseline silently read as "not
    confirmed." The sim found 2% confirmation where the tape has 29%. Cross-checking the
    model's own rate against a SQL query on the raw bars is what caught it.
+
+---
+
+# Round 2 — the variant matrix, and the compounder sleeve
+
+## Momentum: six variants
+
+| | Variant | Trades | Return | CAGR | MaxDD | Win | Avg win | Avg loss | Expectancy | Exposure | Hold |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| A | baseline (plan as written) | 296 | +7.49% | +3.83% | −7.21% | 38.9% | +3.65% | −2.73% | **−0.25%** | 12.7% | 3.1d |
+| **B** | **confirm volume before entry** | **84** | **+7.30%** | **+3.74%** | **−2.95%** | 34.5% | +6.08% | −2.53% | **+0.44%** | 7.2% | 6.1d |
+| C | breakeven stop at step 2 | 328 | −0.94% | −0.49% | −5.60% | 36.0% | +2.91% | −2.39% | −0.48% | 10.9% | 2.6d |
+| D | B + C | 86 | +3.65% | +1.89% | −2.56% | 24.4% | +5.97% | −1.89% | +0.03% | 4.6% | 4.1d |
+| E | B + MCN exit at 60 | 85 | +3.75% | +1.94% | −2.93% | 38.8% | +4.49% | −2.84% | +0.01% | 5.9% | 5.0d |
+| F | B + one-week minimum hold | 81 | +6.66% | +3.42% | −3.40% | 24.7% | +8.69% | −2.56% | +0.22% | 8.3% | 7.2d |
+
+**B wins and every further tweak makes it worse.** Three of the four hypotheses were wrong:
+moving the stop to breakeven earlier (C) turns a positive year negative, tightening the MCN
+exit (E) halves the return, and a forced one-week hold (F) costs a little. The plan's own
+parameters — breakeven at full size, exit at 55, no minimum hold — beat all of them.
+
+The one change that helps is not a formula change at all. It is §5.1's execution mechanic:
+waiting for a confirmed breakout *close* before buying, instead of filling on the touch and
+exiting the next morning. Same return, 72% fewer trades, 41% of the drawdown, and expectancy
+crosses from −0.25% to +0.44% a trade.
+
+## Compounders: it can be backtested after all
+
+`backtest_runs.id = 12` — 731 non-financial names with point-in-time filings, 494 days.
+
+| | Compounders | S&P 500 |
+|---|---|---|
+| Total return | +25.96% | +36.86% |
+| CAGR | **+12.50%** | +17.36% |
+| Max drawdown | **−7.06%** | — |
+| Trades | **6** (≈3/yr) | — |
+| Average hold | **290 days** | — |
+| Win rate | 83.3% | — |
+| Average winner / loser | +47.9% / −23.3% | — |
+| Average exposure | 45.7% of NAV | 100% |
+| Return on deployed capital | **≈ 26.3%/yr** | — |
+
+| Ticker | Entry | CCN | P/L | Days | Exit |
+|---|---|---|---|---|---|
+| COKE Coca-Cola Consolidated | 2025-06-30 @ 111.65 | 70.6 | **+70.0%** | 274 | held |
+| EXEL Exelixis | 2025-07-31 @ 36.22 | 77.4 | +54.5% | 252 | held |
+| SIRI Sirius XM | 2025-04-30 @ 21.42 | 80.8 | +44.6% | 315 | held |
+| GMAB Genmab | 2024-11-29 @ 21.50 | 71.4 | +36.9% | 310 | CCN < 55 |
+| ZM Zoom | 2024-08-30 @ 69.08 | 80.9 | +33.6% | 480 | held |
+| TTD Trade Desk | 2026-02-27 @ 23.82 | 90.5 | **−23.3%** | 107 | held |
+
+**Six trades is an anecdote, not evidence.** Read the shape, not the number: year-long holds,
+capital actually deployed, one loser, and the loser is the highest-CCN name in the set.
+
+## The strategic finding
+
+Both sleeves earn close to the 30% bar *per dollar deployed* — momentum ≈ 41%/yr on its
+average 7.2% exposure, compounders ≈ 26%/yr on 45.7%. Run together they would have made
+roughly 16%/yr on NAV against the index's 17.4%, with about half the capital in cash.
+
+The edge is real. The machine will not deploy it. That is the thing to fix, and it is a
+different problem from the one the plan is currently written to solve.
+
+## One more bug, found in the compounder run
+
+§3.1 excludes banks and insurers from Gate C1 because EBITDA means nothing for them. The
+point-in-time gate rebuilds C1 from filings, and filings carry no sector — so the exclusion
+silently vanished, and a reinsurer plus an asset manager took two of six slots including a
++110% winner. Caught by reading the names in the trade list, not by any check.
