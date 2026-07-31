@@ -16,21 +16,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install "psycopg[binary]==3.2.*"
+          cache: 'pip'
+      - run: pip install -e .
       - name: ingest
-        run: set -o pipefail; python src/ingest.py 2>&1 | tee /tmp/job.out
+        run: set -o pipefail; python -m yuna.ingest 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
       - name: daily duties
-        run: set -o pipefail; python src/daily.py 2>&1 | tee -a /tmp/job.out
+        run: set -o pipefail; python -m yuna.daily 2>&1 | tee -a /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
       - name: autopsy on failure
         if: failure()
-        run: python src/report_fail.py nightly-ingest /tmp/job.out
+        run: python -m yuna.report_fail nightly-ingest /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

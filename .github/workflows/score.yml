@@ -14,13 +14,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install "psycopg[binary]==3.2.*"
-      - run: set -o pipefail; python src/score.py 2>&1 | tee /tmp/job.out
+          cache: 'pip'
+      - run: pip install -e .
+      - run: set -o pipefail; python -m yuna.score 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
       - name: autopsy on failure
         if: failure()
-        run: python src/report_fail.py score /tmp/job.out
+        run: python -m yuna.report_fail score /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

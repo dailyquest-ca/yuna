@@ -1,0 +1,56 @@
+# Gitleaks config for Yuna.
+#
+# WHY THIS FILE EXISTS. The stock gitleaks ruleset (222 rules as of 8.24/8.28) has no rule
+# for a database connection URI, and its catch-all `generic-api-key` rule only fires when a
+# keyword like key/secret/token/password sits next to the value. The string `DATABASE_URL`
+# contains none of those words, so the single worst thing that could ever land in this repo —
+# a god-mode Postgres URI, full owner on the production database — scans CLEAN against the
+# defaults. Verified, not assumed: a planted `DATABASE_URL=postgresql://u:p@host:5432/db`
+# produced zero findings under the stock config. The two rules below close that hole.
+#
+# Both credentials live only in Actions secrets (see the `env:` blocks in the job workflows)
+# and neither has ever been committed, so this config is a tripwire, not a cleanup.
+
+[extend]
+useDefault = true   # additions, not a replacement — every stock rule still applies
+
+# ---------------------------------------------------------------------------
+# DATABASE_URL. Not just Postgres: the same shape leaks the same way for any
+# driver, so the scheme alternation is deliberately wider than what Yuna uses.
+# The password is the capture group, so that is what gets reported and redacted
+# rather than the whole URI (which would put the host in the log too).
+# ---------------------------------------------------------------------------
+[[rules]]
+id = "yuna-db-connection-uri"
+description = "Database connection URI with an inline password (DATABASE_URL is full owner on prod)"
+regex = '''(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s:@/'"]{1,64}:([^\s:@/'"]{3,256})@[^\s/'"]{1,256}'''
+secretGroup = 1
+# keywords are a lowercase prefilter — the rule is skipped entirely unless one appears
+keywords = ["postgres://", "postgresql://", "mysql://", "mariadb://", "mongodb://", "mongodb+srv://", "redis://"]
+
+[[rules.allowlists]]
+description = "docs and examples — placeholder passwords, not real ones"
+regexes = [
+    '''^(?:pass|passwd|password|secret|changeme|examplepass|hunter2|x{3,}|\*{3,}|\.{3,})$''',
+    '''^[<{$%\[].*''',   # <password>, {pw}, ${PGPASSWORD}, %s, [redacted]
+]
+
+# ---------------------------------------------------------------------------
+# EODHD_API_KEY. Metered and paid — a leak bills Zak directly and lets anyone
+# burn the daily quota out from under the nightly ingest. `generic-api-key` does
+# catch the bare `EODHD_API_KEY=<hex>` assignment, but not the api_token query
+# param, which is the shape the key actually takes in db.py and ingest.py.
+# ---------------------------------------------------------------------------
+[[rules]]
+id = "yuna-eodhd-api-token"
+description = "EODHD API token (paid and metered — a leak is billable and quota-exhausting)"
+regex = '''(?i)\b(?:eodhd[_-]?api[_-]?key|api[_-]?token)\s*[=:]\s*['"]?([A-Za-z0-9]{16,64})\b'''
+secretGroup = 1
+keywords = ["eodhd", "api_token", "apitoken", "api-token"]
+
+[[rules.allowlists]]
+description = "the code never inlines the key — it interpolates it, and CI passes it as a secret"
+regexes = [
+    '''^\$\{\{.*''',     # ${{ secrets.EODHD_API_KEY }} in the workflow env blocks
+    '''^[<{$%].*''',     # api_token={k} in ingest.py's URL template, os.environ lookups
+]

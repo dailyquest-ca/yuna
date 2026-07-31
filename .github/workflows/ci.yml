@@ -1,0 +1,78 @@
+name: ci
+# The quality gate. Unlike every other workflow here, this one touches nothing real: no
+# database, no EODHD key, no secrets at all, and it must stay that way. A gate that runs on
+# every push and every PR — including, one day, from a fork — is the last place that should
+# be holding a credential that can drop the production book.
+on:
+  push:
+  pull_request:
+
+# Only the tip of a ref is worth gating; older runs on the same ref are already stale by the
+# time a newer commit lands, so cancel them instead of paying for them.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this job reads the code and reports a status. It writes nothing, anywhere.
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks scans history, not just the working tree — a credential that was committed
+          # and then "removed" in a later commit is still a leaked credential, and it is still
+          # sitting in the pack file. Shallow clones silently reduce that scan to nothing.
+          fetch-depth: 0
+
+      # Secret scan runs FIRST, on purpose. It only needs the checkout, and running it ahead of
+      # the Python steps means a stray lint error can never abort the job before the one check
+      # whose failure actually matters. DATABASE_URL is full owner on the production database
+      # and EODHD_API_KEY is metered and billable; both live only in Actions secrets, and a
+      # finding here fails the build (the action exits 1 on leaks detected).
+      #
+      # Pinned to a full commit SHA, not the moving `v2` tag: tags are mutable, and this action
+      # executes with the repository checked out. The SHA below is what v2/v2.3.9 resolve to.
+      - name: gitleaks — secret scan
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7   # v2.3.9
+        env:
+          # auto-provisioned by Actions; nothing to configure, and it stays read-only per the
+          # top-level `permissions` above. The action uses it to look the repo owner up.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # stock ruleset plus the two Yuna-specific rules — see .gitleaks.toml for why the
+          # defaults alone do NOT catch a committed DATABASE_URL.
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          # setup-python's pip cache globs **/requirements.txt first and falls back to
+          # **/pyproject.toml — which is what this repo has, so the key tracks the pinned set.
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+
+      - name: ruff — lint
+        run: ruff check .
+
+      # NOTE: `ruff format --check .` is deliberately absent. 16 of the 17 tracked Python files
+      # predate the formatter and would be rewritten by it. Reformatting working, verified
+      # numeric code to satisfy a style check is exactly the trade the per-file E501 grandfather
+      # list in pyproject.toml refuses to make, and it would bury a real diff under a cosmetic
+      # one. The step goes in when the tree is already format-clean, not before.
+
+      - name: mypy — types
+        # Non-blocking on purpose, and NOT by loosening the config: `mypy` reports ~250 errors
+        # across a dozen modules today, overwhelmingly no-untyped-def / no-untyped-call in the job
+        # modules that hand untyped psycopg rows and vendor JSON around. pyproject already holds
+        # the beachhead — yuna.rules and yuna.db are strict — and the rest is being tightened
+        # module by module. Relaxing the settings to get a green tick would delete the signal
+        # this step exists to produce, so it stays loud and advisory instead.
+        continue-on-error: true
+        run: mypy
+
+      - name: pytest
+        run: pytest
