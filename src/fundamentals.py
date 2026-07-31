@@ -182,8 +182,8 @@ def extract(ticker, r, quote_ccy=None):
         v = s([fcf_of(cf_q[k]) for k in window])
         sh = num((bs_q.get(qs[i]) or {}).get("commonStockSharesOutstanding")) or shares
         if v is not None and sh:
-            qseries.append([qs[i], v, sh])
-    qseries = qseries[:20]                      # 5 years of quarters is plenty
+            qseries.append([qs[i], v, sh, day((cf_q.get(qs[i]) or {}).get("filing_date"))])
+    qseries = qseries[:24]                      # six years of quarters — the hurdle's history
 
     # ---- Gate C1
     fails = []
@@ -264,13 +264,37 @@ def extract(ticker, r, quote_ccy=None):
         pfcf_median=None, pfcf_obs=None,
         eps_yoy_latest=y0, eps_yoy_prev=y1, m4_pass=m4,
         data_confidence=confidence,
-        raw=json.dumps({"quarterly_fcf": qseries,
-                        "years": {k: {"rev": num(is_y[k].get("totalRevenue")),
-                                      "ebit": num(is_y[k].get("ebit")),
-                                      "ni": num(is_y[k].get("netIncome")),
-                                      "fcf": fcf_of(cf_y[k]) if k in cf_y else None,
-                                      "filing": (cf_y.get(k) or is_y.get(k) or {}).get("filing_date")}
-                                  for k in ys[:6]}}),
+        raw=json.dumps({
+            "quarterly_fcf": qseries,
+            # Point-in-time history. Every statement EODHD returns carries its own filing_date,
+            # so a past date's CCN can be rebuilt from only what had been filed by then. This is
+            # the asset §4.8 assumed could not be bought — it was in the document all along.
+            # Caveat that cannot be engineered away: the vendor serves the CURRENT version of a
+            # past statement, so a restatement is visible earlier than it really was.
+            "yearly": [{
+                "period": day(k),
+                "filing": day((is_y.get(k) or {}).get("filing_date")
+                              or (cf_y.get(k) or {}).get("filing_date")
+                              or (bs_y.get(k) or {}).get("filing_date")),
+                "rev": num((is_y.get(k) or {}).get("totalRevenue")),
+                "ebit": num((is_y.get(k) or {}).get("ebit")),
+                "ebitda": num((is_y.get(k) or {}).get("ebitda")),
+                "ni": num((is_y.get(k) or {}).get("netIncome")),
+                "pretax": num((is_y.get(k) or {}).get("incomeBeforeTax")),
+                "tax": num((is_y.get(k) or {}).get("incomeTaxExpense")),
+                "fcf": fcf_of(cf_y[k]) if k in cf_y else None,
+                "capex": num((cf_y.get(k) or {}).get("capitalExpenditures")),
+                "dep": num((cf_y.get(k) or {}).get("depreciation")),
+                "dwc": num((cf_y.get(k) or {}).get("changeInWorkingCapital")),
+                "equity": num((bs_y.get(k) or {}).get("totalStockholderEquity")),
+                "cash": num((bs_y.get(k) or {}).get("cashAndShortTermInvestments"))
+                        or num((bs_y.get(k) or {}).get("cash")),
+                "debt": num((bs_y.get(k) or {}).get("shortLongTermDebtTotal")),
+                "netdebt": num((bs_y.get(k) or {}).get("netDebt")),
+                "goodwill": num((bs_y.get(k) or {}).get("goodWill")),
+                "shares": num((bs_y.get(k) or {}).get("commonStockSharesOutstanding")),
+            } for k in ys[:8]],
+        }),
     )
 
 
