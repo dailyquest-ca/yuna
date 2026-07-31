@@ -1,0 +1,22 @@
+name: nightly-retry
+on:
+  schedule:
+    - cron: '0 3 * * 2-6'   # one hour after the primary; skips itself if primary went green
+  workflow_dispatch: {}
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install "psycopg[binary]==3.2.*"
+      - name: retry ingest
+        run: python src/ingest.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
+          JOB_NAME: nightly-retry
+          DRY_RUN: 'false'
