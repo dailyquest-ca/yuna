@@ -33,14 +33,14 @@ def apply_fills(conn, hb):
     with conn.cursor() as cur:
         cur.execute("""select t.id, t.ticker, t.account, t.side, t.qty, t.price, t.currency,
                               t.trade_date, t.pyramid_step, t.ticket_id, k.sleeve, k.theme,
-                              k.stop, k.stop_limit_price, k.trigger_price
+                              k.stop, k.stop_limit_price, k.trigger_price, k.target_qty
                        from transactions t
                        left join tickets k on k.id = t.ticket_id
                        where t.applied_at is null
                        order by t.trade_date, t.id""")
         rows = cur.fetchall()
         for (tid, tk, acct, side, qty, price, ccy, tdate, step, ticket_id, sleeve, theme,
-             stop, stop_limit, pivot) in rows:
+             stop, stop_limit, pivot, target_qty) in rows:
             qty, price = float(qty), float(price)
             cur.execute("""select id, qty, avg_cost, pyramid_step from book
                            where ticker=%s and account=%s and status='open'""", (tk, acct))
@@ -60,10 +60,11 @@ def apply_fills(conn, hb):
                 else:
                     cur.execute("""insert into book(ticker,account,sleeve,lot,qty,avg_cost,currency,
                                      opened_at,stop,stop_limit,highest_close,trail_mode,
-                                     pyramid_step,theme,status)
-                                   values (%s,%s,%s,'core',%s,%s,%s,%s,%s,%s,%s,'initial',%s,%s,'open')""",
+                                     pyramid_step,theme,pivot,target_qty,status)
+                                   values (%s,%s,%s,'core',%s,%s,%s,%s,%s,%s,%s,'initial',%s,%s,
+                                           %s,%s,'open')""",
                                 (tk, acct, sleeve or "momentum", qty, price, ccy or "USD", tdate,
-                                 stop, stop_limit, price, step or 1, theme))
+                                 stop, stop_limit, price, step or 1, theme, pivot, target_qty))
             else:
                 if held:
                     bid, bqty, _, _ = held
@@ -180,11 +181,8 @@ def classify_breakouts(conn, hb, bars, sessions, multiple):
     """
     states = []
     with conn.cursor() as cur:
-        cur.execute("""select b.id, b.ticker, b.opened_at, b.confirmed, b.confirm_deadline,
-                              q.trigger_price
-                       from book b
-                       left join queue q on q.ticker = b.ticker and q.source='momentum'
-                       where b.status='open' and b.sleeve='momentum'""")
+        cur.execute("""select id, ticker, opened_at, confirmed, confirm_deadline, pivot
+                       from book where status='open' and sleeve='momentum'""")
         for bid, tk, opened, confirmed, deadline, pivot in cur.fetchall():
             b = bars.get(tk)
             if not b or confirmed is True or not opened:
@@ -281,11 +279,10 @@ def arm_exits(conn, arm, bars, gate, breakouts, cushion, holidays):
     with conn.cursor() as cur:
         cur.execute("""select b.id, b.ticker, b.account, b.sleeve, b.qty, b.avg_cost, b.stop,
                               b.stop_limit, b.pyramid_step, b.opened_at, b.confirmed,
-                              b.pyramid_stalled_since, c.mcn, c.m2, q.trigger_price,
+                              b.pyramid_stalled_since, c.mcn, c.m2, b.pivot,
                               e.report_date
                        from book b
                        left join candidates c on c.ticker = b.ticker
-                       left join queue q on q.ticker = b.ticker and q.source='momentum'
                        left join lateral (select report_date from earnings
                                           where ticker=b.ticker and report_date >= current_date
                                           order by report_date limit 1) e on true
@@ -361,12 +358,13 @@ def arm_exits(conn, arm, bars, gate, breakouts, cushion, holidays):
 def arm_pyramid(conn, arm, bars, ceiling):
     """Steps 2 and 3 as resting add stop-limits, once the breakout confirms (§3.2)."""
     with conn.cursor() as cur:
-        cur.execute("""select b.ticker, b.account, b.qty, b.avg_cost, b.pyramid_step, b.confirmed,
-                              b.target_qty, q.trigger_price
-                       from book b
-                       left join queue q on q.ticker=b.ticker and q.source='momentum'
-                       where b.status='open' and b.sleeve='momentum' and b.confirmed is true
-                         and b.pyramid_step < 3""")
+        # the pivot is the one this position was entered on, stored on the book row. Reading it
+        # from `queue` broke the moment a name left the queue or its base re-scanned to a new pivot.
+        cur.execute("""select ticker, account, qty, avg_cost, pyramid_step, confirmed,
+                              target_qty, pivot
+                       from book
+                       where status='open' and sleeve='momentum' and confirmed is true
+                         and pyramid_step < 3 and pivot is not null""")
         for tk, acct, qty, cost, step, confirmed, target, pivot in cur.fetchall():
             if not pivot:
                 continue
@@ -408,6 +406,14 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                        group by 1""")
         group_count = {r[0]: r[1] for r in cur.fetchall()}
 
+        # incumbents and their current scores, per sleeve — §3.3 displacement is within-sleeve only
+        cur.execute("""select b.ticker, c.mcn from book b left join candidates c on c.ticker=b.ticker
+                       where b.status='open' and b.sleeve='momentum'""")
+        momentum_incumbents = [(r[0], r[1]) for r in cur.fetchall()]
+        cur.execute("""select b.ticker, e.ccn from book b left join bench e on e.ticker=b.ticker
+                       where b.status='open' and b.sleeve='compounders'""")
+        compounder_incumbents = [(r[0], r[1]) for r in cur.fetchall()]
+
         # ---- momentum: a live trigger in BUY state, gate permitting
         if gate == "ON":
             cur.execute("""select q.ticker, q.trigger_price, q.limit_price, q.stop_suggest, q.mcn,
@@ -433,30 +439,62 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                 if not size:
                     continue
                 room = caps["ceilings"]["momentum"] * nav - exposure.get("momentum", 0.0)
-                blocked = None
-                if positions >= caps["max_positions"]:
-                    blocked = f"§2.1 — {positions} positions already open"
-                elif size["cad"] and size["cad"] > room:
-                    blocked = "§2.1 — momentum sleeve has no room"
+                score = float(mcn) if mcn is not None else None
+                full_qty = int(size["cad"] / (trig * fx)) if size["cad"] and fx else None
+                blocked, swap = None, None
+                if size["size_pct"] > caps["single_cap"]:
+                    blocked = f"§2.3 — {size['size_pct']:.0%} exceeds the {caps['single_cap']:.0%} single-name entry cap"
+                elif size["below_floor"]:
+                    blocked = (f"§2.3 — {size['size_pct']:.1%} is below the "
+                               f"{caps['floor_pct']:.0%} minimum; too small to matter")
+                elif positions >= caps["max_positions"] or (size["cad"] and size["cad"] > room):
+                    # §3.3: the sleeve is full, so the challenger needs +10 over the weakest
+                    # incumbent. If it clears, both legs are armed and Zak executes the swap.
+                    swap = sg.displaceable(score, momentum_incumbents,
+                                           margin=caps["displace_margin"])
+                    if swap:
+                        arm.add("exit", swap["ticker"], "swap", sleeve="momentum",
+                                order_type="market", score=swap["score"],
+                                note=f"displaced by {tk} — {score:.1f} vs {swap['score']:.1f}, "
+                                     f"+{swap['margin']:.1f} clears the §3.3 margin")
+                    else:
+                        blocked = ("§2.1 — sleeve full and no incumbent is 10 points weaker"
+                                   if positions >= caps["max_positions"]
+                                   else "§2.1 — momentum sleeve has no room")
                 elif group_count.get(industry or "unknown", 0) >= caps["per_group"]:
                     blocked = f"§2.2 — already {caps['per_group']} names in {industry}"
                 elif sg.in_blackout(dt.date.today(), report, holidays=holidays):
                     blocked = f"§3.3 — earnings blackout ({report})"
+                # §3.2: the first position is 50% of full size and pyramids to full. The ticket
+                # buys half; `target_qty` on the resulting book row is what steps 2 and 3 size off.
+                first = sg.entry_order(trig, stop, limit_over=caps["limit_over"],
+                                       max_stop=caps["max_stop"])
                 arm.add("entry", tk, "trigger", sleeve="momentum", account="TFSA",
                         order_type="stop_limit", trigger_price=trig,
-                        limit_price=float(lim) if lim else trig * 1.02, stop=stop,
+                        limit_price=float(lim) if lim else first["limit"], stop=stop,
                         stop_limit_price=stop * (1 - caps["buffer"]),
-                        size_pct=size["size_pct"], score=float(mcn) if mcn else None,
-                        qty=int(size["cad"] / (trig * fx)) if size["cad"] and fx else None,
+                        size_pct=size["size_pct"] * first["fraction"], score=score,
+                        qty=int(full_qty * first["fraction"]) if full_qty else None,
                         blocked_by=blocked,
-                        note=f"MCN {float(mcn):.1f} · stop {dist:.1%} away · "
-                             f"{size['size_pct']:.1%} of NAV" if mcn else None,
-                        detail=dict(theme_weights=theme_weight, industry=industry))
+                        note=(f"MCN {score:.1f} · stop {dist:.1%} away · "
+                              f"{first['fraction']:.0%} of a {size['size_pct']:.1%} full position"
+                              + (f" · swap out {swap['ticker']}" if swap else ""))
+                        if score is not None else None,
+                        detail=dict(theme_weights=theme_weight, industry=industry,
+                                    full_size_pct=size["size_pct"], target_qty=full_qty,
+                                    pivot=trig, swap_out=swap["ticker"] if swap else None))
 
         # ---- compounders: price at or below an approved bench name's hurdle
+        # adds are counted from the ledger inside a rolling 12 months, never from a stored counter:
+        # a counter that only increments quietly becomes a permanent block after two adds ever.
         cur.execute("""select b.ticker, b.ccn, b.hurdle_price, b.last_close, b.gap_to_hurdle,
                               b.data_confidence, u.industry, e.report_date, k.id, k.qty,
-                              k.avg_cost, k.adds_12m, k.account
+                              k.avg_cost,
+                              (select count(*) from transactions t
+                                 where t.ticker = b.ticker and t.side='buy'
+                                   and t.trade_date > current_date - interval '12 months'
+                                   and t.trade_date > k.opened_at) as adds_12m,
+                              k.account
                        from bench b
                        join universe u on u.ticker=b.ticker
                        left join book k on k.ticker=b.ticker and k.status='open'
@@ -488,11 +526,23 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                 continue
             size_pct = caps["flat"]
             room = caps["ceilings"]["compounders"] * nav - exposure.get("compounders", 0.0)
-            blocked = None
-            if positions >= caps["max_positions"]:
-                blocked = f"§2.1 — {positions} positions already open"
-            elif size_pct * nav > room:
-                blocked = "§2.1 — compounder sleeve has no room"
+            blocked, swap = None, None
+            if size_pct > caps["single_cap"]:
+                blocked = f"§2.3 — exceeds the {caps['single_cap']:.0%} single-name entry cap"
+            elif size_pct < caps["floor_pct"]:
+                blocked = f"§2.3 — below the {caps['floor_pct']:.0%} minimum position"
+            elif positions >= caps["max_positions"] or size_pct * nav > room:
+                swap = sg.displaceable(ccn_score, compounder_incumbents,
+                                       margin=caps["displace_margin"])
+                if swap:
+                    arm.add("exit", swap["ticker"], "swap", sleeve="compounders",
+                            order_type="market", score=swap["score"],
+                            note=f"displaced by {tk} — CCN {ccn_score:.1f} vs "
+                                 f"{swap['score']:.1f}, +{swap['margin']:.1f} clears §3.3")
+                else:
+                    blocked = ("§2.1 — sleeve full and no incumbent is 10 points weaker"
+                               if positions >= caps["max_positions"]
+                               else "§2.1 — compounder sleeve has no room")
             elif group_count.get(industry or "unknown", 0) >= caps["per_group"]:
                 blocked = f"§2.2 — already {caps['per_group']} names in {industry}"
             elif in_bo:
@@ -503,8 +553,11 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                     order_type="limit", limit_price=px, score=ccn_score, size_pct=size_pct,
                     qty=int(size_pct * nav / (px * fx)) if nav and fx else None,
                     blocked_by=blocked,
-                    note=f"CCN {ccn_score:.1f} · hurdle {hurdle:.2f} · {abs(gap or 0):.0%} below"
-                         if ccn_score else None)
+                    note=(f"CCN {ccn_score:.1f} · hurdle {hurdle:.2f} · {abs(gap or 0):.0%} below"
+                          + (f" · swap out {swap['ticker']}" if swap else ""))
+                    if ccn_score else None,
+                    detail=dict(theme_weights=theme_weight, industry=industry,
+                                swap_out=swap["ticker"] if swap else None))
     return blocked_note
 
 
@@ -604,8 +657,14 @@ def main():
                     max_stop=float(config(cur, "momentum_max_stop", 0.08)),
                     flat=float(config(cur, "ccn_flat_size", 0.12)),
                     per_group=int(config(cur, "max_names_per_group", 2)),
-                    theme_cap=float(config(cur, "theme_entry_cap", 0.35)),
                     single_cap=float(config(cur, "single_name_entry_cap", 0.25)),
+                    floor_pct=float(config(cur, "position_floor_nav", 0.04)),
+                    displace_margin=float((config(cur, "score_thresholds", {}) or {})
+                                          .get("displace_margin", 10)),
+                    # §2.2's theme entry cap is deliberately NOT read here. A theme is judgment
+                    # assigned when a ticket is written (§2.2), so the job cannot know a new name's
+                    # theme — it ships the current theme weights on every armed row and R1 enforces
+                    # the 35% cap. Reading the config here would look like enforcement and be none.
                     max_adds=int(config(cur, "max_adds_per_year", 2)),
                     ceilings=config(cur, "sleeve_ceiling", {"compounders": 0.6, "momentum": 0.4}),
                     max_positions=int((config(cur, "max_positions", {"max": 9}) or {}).get("max", 9)),

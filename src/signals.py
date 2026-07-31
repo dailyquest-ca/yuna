@@ -282,10 +282,12 @@ def momentum_size(*, nav, mcn_score, stop_distance, budgets=(0.007, 0.009), band
     budget = hi if mcn_score is not None and mcn_score >= full_conviction else lo
     if not stop_distance or stop_distance <= 0:
         return None
-    pct = budget / stop_distance
-    pct = min(pct, band[1])
-    if not start_low:
-        pct = max(pct, band[0]) if pct >= floor_nav else pct
+    # The band is a CEILING, not a target. Raising a computed size up to the 8% band floor would
+    # put more NAV at risk than the budget allows, and the budget is the law here — "the budget is
+    # how much NAV is lost if the stop fires". It cannot bind in practice either: stops are never
+    # wider than 8% (§3.2), so 0.7% / 0.08 = 8.75% is the smallest a steady-state position can be.
+    # Only the start-low window sizes below the band, which §3.2 explicitly permits.
+    pct = min(budget / stop_distance, band[1])
     return dict(size_pct=pct, budget=budget, cad=pct * nav if nav else None,
                 below_floor=pct < floor_nav)
 
@@ -363,6 +365,23 @@ def hurdle_price(*, fcf_ttm, shares, growth, fair_multiple, floor=0.15, years=5)
         else:
             hi = mid
     return lo
+
+
+def displaceable(challenger_score, incumbents, *, margin=10.0):
+    """§3.3 displacement — within-sleeve only, and the challenger needs `margin` over the WEAKEST
+    incumbent. `incumbents` is [(name, score)]; names with no score cannot be displaced by a
+    number, so they are ignored rather than assumed weak.
+
+    Returns the incumbent to swap out, or None. A momentum 85 never displaces a compounder 72 —
+    that is the caller's job, by only passing same-sleeve incumbents.
+    """
+    scored = [(n, float(s)) for n, s in incumbents if s is not None and not np.isnan(float(s))]
+    if not scored or challenger_score is None or np.isnan(challenger_score):
+        return None
+    name, score = min(scored, key=lambda x: x[1])
+    if challenger_score >= score + margin:
+        return dict(ticker=name, score=score, margin=challenger_score - score)
+    return None
 
 
 def compounder_add(*, ccn_score, price, hurdle, adds_this_year, enter=70.0, max_adds=2):
