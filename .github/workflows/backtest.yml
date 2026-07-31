@@ -32,7 +32,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install "psycopg[binary]==3.2.*" numpy pandas
+      - run: pip install -r requirements.txt
       - run: set -o pipefail; python src/backtest.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

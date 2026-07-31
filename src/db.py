@@ -32,6 +32,24 @@ def key():
     return os.environ["EODHD_API_KEY"]
 
 
+def jsonb(obj):
+    """Anything -> a jsonb-safe string. Dates and Decimals are stringified rather than crashing."""
+    return json.dumps(obj, default=str)
+
+
+def observe(cur, kind, body, *, ticker=None, score=None, price=None, detail=None, once=False):
+    """Append an observation (§4.3). `once=True` makes a re-run idempotent by exact body match —
+    the shadow book and gate flips want a row per event, breaches want a row per condition."""
+    if once:
+        cur.execute("select 1 from observations where kind=%s and body=%s limit 1", (kind, body))
+        if cur.fetchone():
+            return False
+    cur.execute("""insert into observations(kind,ticker,score,price,body,detail)
+                   values (%s,%s,%s,%s,%s,%s)""",
+                (kind, ticker, score, price, body, jsonb(detail or {})))
+    return True
+
+
 def get(path, calls, tries=3, timeout=90, **params):
     """GET an EODHD endpoint. `calls` is a one-element list used as a shared counter."""
     params.setdefault("api_token", key())

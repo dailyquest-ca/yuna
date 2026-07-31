@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install "psycopg[binary]==3.2.*"
+      - run: pip install -r requirements.txt
       - name: stage 1 — L0 census
         run: set -o pipefail; python src/funnel.py 2>&1 | tee /tmp/job.out
         env:

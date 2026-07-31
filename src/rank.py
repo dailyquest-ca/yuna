@@ -1,205 +1,225 @@
-"""weekly-rank — the momentum brain (plan section 3.2, implemented verbatim).
-Effective L0 (bar filters) -> M1 latch -> M2 template -> MCN (3x33%, windows end t-10)
--> L1-M top 150 -> base/pivot scan (M3 constraints) -> candidates + queue (cap 20).
+"""weekly-rank — the Saturday half of the momentum brain (§3.0 cadence, §3.2 formulas).
+
+Group RS -> L1-M rebuild -> MCN -> L2 re-rank. Everything price-shaped and *calm* lives here;
+the daily half — base re-scan, trigger states, stops, arming — is `duties.py`, because §3.2 says
+WAIT names are re-scanned nightly and §3.0 puts the trigger check in the pre-open run.
+
+Every formula is imported from `signals`, never restated. Before that module this file carried
+its own base detector, which drifted from the plan and from the backtest's copy.
 """
-import os, sys, json, math, traceback, datetime as dt
+import sys
 import numpy as np
-import psycopg
 
-DRY = os.environ.get("DRY_RUN","false").lower() in ("1","true","yes")
+from db import connect, config, dry, observe, Heartbeat
+import signals as sg
 
-def db_url():
-    u=os.environ["DATABASE_URL"]
-    return u + ("" if "sslmode" in u else ("&" if "?" in u else "?")+"sslmode=require")
+T10 = 10                    # §3.2: all ranking windows end 10 trading days ago
+L1M_SIZE = 150
+SCOREABLE_BARS = 210        # 200-day average + the t-10 offset needs this much history
 
-def pct_rank(values):
-    """Cross-sectional percentile 0..100 (NaN-safe: NaN stays NaN)."""
-    v=np.asarray(values,dtype=float)
-    out=np.full(v.shape,np.nan)
-    ok=~np.isnan(v)
-    if ok.sum()>1:
-        order=v[ok].argsort().argsort().astype(float)
-        out[ok]=100.0*order/(ok.sum()-1)
-    elif ok.sum()==1:
-        out[ok]=50.0
-    return out
 
-def weekly_closes(dates, closes):
-    """Last trading day per ISO week -> (week_end_date, close)."""
-    weeks={}
-    for d,c in zip(dates,closes):
-        key=d.isocalendar()[:2]
-        if key not in weeks or d>weeks[key][0]: weeks[key]=(d,c)
-    return sorted(weeks.values())
+def load_bars(cur):
+    cur.execute("""select p.ticker, p.d, p.high, p.low, p.close, p.adj_close, p.volume
+                   from prices p join universe u on u.ticker = p.ticker
+                   where u.kind='stock' and u.status='active' and (u.in_l0 or u.is_holding)
+                   order by p.ticker, p.d""")
+    data = {}
+    for t, d, hi, lo, cl, ac, vol in cur.fetchall():
+        data.setdefault(t, []).append((d, hi, lo, cl, ac, vol))
+    return data
 
-def compute_m1(cur):
-    cur.execute("select d, close from prices where ticker='GSPC.INDX' order by d")
-    rows=cur.fetchall()
-    wk=weekly_closes([r[0] for r in rows],[float(r[1]) for r in rows])
-    closes=np.array([c for _,c in wk]); dates=[d for d,_ in wk]
-    if len(closes)<35: raise RuntimeError("not enough weekly history for M1")
-    sma=np.convolve(closes,np.ones(30)/30,mode='valid')      # sma[i] ~ week i+29
-    spx=closes[-1]; sma_now=sma[-1]; sma_4w=sma[-5]
-    cur.execute("select state from gate_state order by id desc limit 1")
-    prev=(cur.fetchone() or [None])[0]
-    if prev is None:
-        state="ON" if (spx>sma_now and sma_now>=sma_4w) else "OFF"
-    elif prev=="ON":
-        state="OFF" if spx<sma_now else "ON"                  # latch: only the opposite trigger flips
-    else:
-        state="ON" if (spx>sma_now and sma_now>=sma_4w) else "OFF"
-    flipped = prev is not None and state!=prev
-    return dict(week_end=dates[-1], state=state, spx=float(spx), sma=float(sma_now),
-                sma4=float(sma_4w), flipped=flipped, prev=prev)
 
-def base_scan(h,l,c):
-    """v1 deterministic base detection under plan constraints:
-    peak = highest high of the trailing 120 sessions; base = peak..today.
-    valid if len>=25, depth<=25%, and price hasn't broken out past the pivot.
-    pivot = highest high of the base (= peak). final-contraction low = min low of last 10."""
-    look=min(len(h),120)
-    hh=h[-look:]; ll=l[-look:]; cc=c[-look:]
-    p=int(np.argmax(hh))
-    pivot=float(hh[p]); seg_l=ll[p:]; seg_c=cc[p:]
-    blen=len(seg_c)
-    depth=(pivot-float(np.min(seg_l)))/pivot if blen else 1.0
-    contraction_low=float(np.min(ll[-10:]))
-    price=float(cc[-1])
-    valid = blen>=25 and depth<=0.25 and price<=pivot*1.005
-    return valid, pivot, blen, depth, contraction_low
+def features(data, meta):
+    """Per-name arrays plus the effective-L0 bar filters (§3.0 L0)."""
+    feats = {}
+    for t, rows in data.items():
+        cl = np.array([r[3] for r in rows], dtype=float)
+        n = len(cl)
+        vol = np.array([r[5] or 0 for r in rows], dtype=float)
+        addv = float(np.median((cl * vol)[-50:])) if n >= 50 else 0.0
+        feats[t] = dict(
+            hi=np.array([r[1] for r in rows], dtype=float),
+            lo=np.array([r[2] for r in rows], dtype=float),
+            cl=cl,
+            ac=np.array([r[4] if r[4] is not None else r[3] for r in rows], dtype=float),
+            vol=vol, n=n, addv=addv,
+            eff=bool(meta[t]["l0"] and n >= 126 and cl[-1] >= 5 and addv >= 10_000_000),
+            scoreable=n >= SCOREABLE_BARS)
+    return feats
+
 
 def main():
-    t10=10
-    with psycopg.connect(db_url()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("insert into runs(job,status,dry_run) values ('weekly-rank','running',%s) returning id",(DRY,))
-            run_id=cur.fetchone()[0]; conn.commit()
-        try:
+    with connect() as conn:
+        with Heartbeat(conn, "weekly-rank") as hb:
             with conn.cursor() as cur:
-                m1=compute_m1(cur)
-                if not DRY:
-                    cur.execute("insert into gate_state(week_end,state,spx_close,sma30,sma30_4w_ago,flipped) values (%s,%s,%s,%s,%s,%s)",
-                                (m1["week_end"],m1["state"],m1["spx"],m1["sma"],m1["sma4"],m1["flipped"]))
-                    conn.commit()
-                # load bars for coarse-L0 + holdings (stocks only)
-                cur.execute("""select p.ticker,p.d,p.high,p.low,p.close,p.adj_close,p.volume
-                               from prices p join universe u on u.ticker=p.ticker
-                               where u.kind='stock' and u.status='active' and (u.in_l0 or u.is_holding)
-                               order by p.ticker,p.d""")
-                data={}
-                for t,d,hi,lo,cl,ac,vol in cur.fetchall():
-                    data.setdefault(t,[]).append((d,hi,lo,cl,ac,vol))
-                cur.execute("select ticker, industry, is_holding, in_l0 from universe where kind='stock' and status='active'")
-                meta={r[0]:{"industry":r[1],"hold":r[2],"l0":r[3]} for r in cur.fetchall()}
-                # M4 — earnings acceleration. Null until a name has been swept; a name with no
-                # fundamentals row is dark, not failed, so the gate can't quietly empty L1-M.
-                cur.execute("select ticker, m4_pass from v_fundamentals_latest")
-                m4map={r[0]:r[1] for r in cur.fetchall()}
-            names=[]; feats={}
-            for t,rows in data.items():
-                d=[r[0] for r in rows]
-                hi=np.array([r[1] for r in rows],float); lo=np.array([r[2] for r in rows],float)
-                cl=np.array([r[3] for r in rows],float); ac=np.array([r[4] if r[4] is not None else r[3] for r in rows],float)
-                vol=np.array([r[5] or 0 for r in rows],float)
-                n=len(cl)
-                # effective-L0 bar filters: listed>=6mo(126), price>=5, ADDV50 median >= $10M
-                dollar=cl*vol
-                addv=float(np.median(dollar[-50:])) if n>=50 else 0.0
-                eff = meta[t]["l0"] and n>=126 and cl[-1]>=5 and addv>=10_000_000
-                scoreable = n>=210
-                feats[t]=dict(d=d,hi=hi,lo=lo,cl=cl,ac=ac,vol=vol,n=n,eff=eff,scoreable=scoreable)
-                if (eff or meta[t]["hold"]): names.append(t)
-            ranked=[t for t in names if feats[t]["eff"] and feats[t]["scoreable"]]
-            # ---- MCN components (windows end t-10, adjusted closes for returns) ----
-            mq_raw={}; sub_atr={}; sub_pull={}; sub_dry={}; sub_prox={}; grp_ret={}
-            for t in ranked:
-                f=feats[t]; ac=f["ac"][:-t10]; hi=f["hi"][:-t10]; lo=f["lo"][:-t10]; cl=f["cl"][:-t10]; vol=f["vol"][:-t10]
-                # momentum quality: 90d exp regression of log price, annualized slope x R2 / 90d vol
-                y=np.log(ac[-90:]); x=np.arange(90,dtype=float)
-                slope,b=np.polyfit(x,y,1); yhat=slope*x+b
-                ss_res=float(np.sum((y-yhat)**2)); ss_tot=float(np.sum((y-np.mean(y))**2)) or 1e-12
-                r2=max(0.0,1-ss_res/ss_tot)
-                rets=np.diff(np.log(ac[-91:])); vol90=float(np.std(rets)) or 1e-9
-                mq_raw[t]=(slope*252.0)*r2/vol90
-                # setup subs
-                tr=np.maximum(hi[1:]-lo[1:],np.maximum(abs(hi[1:]-cl[:-1]),abs(lo[1:]-cl[:-1])))
-                atr=np.convolve(tr,np.ones(14)/14,mode='valid')
-                atr_hist=atr[-252:] if len(atr)>=252 else atr
-                sub_atr[t]=100.0-100.0*float((atr_hist<=atr[-1]).mean())          # inverted own-percentile
-                dd_recent=1-float(np.min(cl[-20:]))/float(np.max(cl[-20:]))
-                dd_prior=1-float(np.min(cl[-40:-20]))/float(np.max(cl[-40:-20])) if len(cl)>=40 else dd_recent
-                sub_pull[t]=dd_prior-dd_recent                                     # contraction (bigger=better)
-                v50=float(np.mean(vol[-50:])) or 1e-9
-                sub_dry[t]=-float(np.mean(vol[-10:]))/v50                          # dry-up (less volume = better)
-                hi52=float(np.max(cl[-252:]))
-                sub_prox[t]=float(cl[-1])/hi52
-                ind=meta[t]["industry"]
-                if ind: grp_ret.setdefault(ind,[]).append(float(ac[-1])/float(ac[-126]) - 1 if len(ac)>=126 else np.nan)
-            grp_mean={g:float(np.nanmean(v)) for g,v in grp_ret.items()}
-            gs=list(grp_mean); gp=pct_rank([grp_mean[g] for g in gs]); grp_pct=dict(zip(gs,gp))
-            mq_p=dict(zip(ranked,pct_rank([mq_raw[t] for t in ranked])))
-            a_p =dict(zip(ranked,[sub_atr[t] for t in ranked]))                    # already own-percentile
-            p_p =dict(zip(ranked,pct_rank([sub_pull[t] for t in ranked])))
-            d_p =dict(zip(ranked,pct_rank([sub_dry[t] for t in ranked])))
-            x_p =dict(zip(ranked,pct_rank([sub_prox[t] for t in ranked])))
-            out=[]
-            for t in ranked:
-                f=feats[t]; hi,lo,cl=f["hi"],f["lo"],f["cl"]
-                # M2 at current price
-                s50=float(np.mean(cl[-50:])); s150=float(np.mean(cl[-150:])); s200=float(np.mean(cl[-200:]))
-                s200_21=float(np.mean(cl[-221:-21])) if f["n"]>=221 else s200
-                lo52=float(np.min(cl[-252:])); hi52=float(np.max(cl[-252:])); px=float(cl[-1])
-                m2 = (px>s150 and px>s200 and s150>s200 and s200>s200_21 and px>s50
-                      and px>=lo52*1.30 and px>=hi52*0.75)
-                setup=float(np.mean([a_p[t],p_p[t],d_p[t],x_p[t]]))
-                mcn=float(np.mean([mq_p[t],setup,(grp_pct.get(meta[t]["industry"],50.0) if meta[t]["industry"] else 50.0)]))
-                valid,pivot,blen,depth,c_low=base_scan(hi,lo,cl)
-                state="BUY" if (m2 and valid) else "WAIT"
-                stop=max(c_low,pivot*0.92) if valid else None
-                out.append(dict(t=t,mcn=mcn,mq=mq_p[t],setup=setup,grp=(grp_pct.get(meta[t]["industry"],50.0) if meta[t]["industry"] else 50.0),m2=m2,
-                                m4=m4map.get(t),
-                                state=state,pivot=pivot if valid else None,blen=blen if valid else None,
-                                depth=depth if valid else None,c_low=c_low if valid else None,stop=stop,px=px))
-            # L1-M = M2 and M4 (a null M4 means "not yet swept", which does not fail the gate)
-            l1m=sorted([o for o in out if o["m2"] and o["m4"] is not False],key=lambda o:-o["mcn"])[:150]
-            for i,o in enumerate(l1m): o["rank"]=i+1
-            # queue: holdings always + top-10 trigger-bearing L1-M by MCN; seats by proximity then score
-            holds=[t for t in names if meta[t]["hold"]]
-            trigged=[o for o in l1m if o["state"]=="BUY" and o["pivot"]]
-            top10=sorted(trigged,key=lambda o:-o["mcn"])[:10]
-            qrows=[]
-            for t in holds:
-                px=float(feats[t]["cl"][-1]) if t in feats and feats[t]["n"] else None
-                qrows.append(dict(ticker=t,source="holding",state="HOLD",trig=None,lim=None,stop=None,prox=0.0,
-                                  mcn=next((o["mcn"] for o in out if o["t"]==t),None),note="book"))
-            for o in top10:
-                lim=o["pivot"]*1.02; prox=abs(o["px"]-o["pivot"])/o["px"]
-                qrows.append(dict(ticker=o["t"],source="momentum",state=o["state"],trig=o["pivot"],lim=lim,
-                                  stop=o["stop"],prox=prox,mcn=o["mcn"],note=f"base {o['blen']}d/{o['depth']:.0%}"))
-            qrows.sort(key=lambda r:(r["source"]!="holding", r["prox"] if r["prox"] is not None else 9, -(r["mcn"] or 0)))
-            qrows=qrows[:20]
-            if not DRY:
-                with conn.cursor() as cur:
-                    cur.execute("truncate candidates"); cur.execute("truncate queue")
-                    cur.executemany("""insert into candidates(ticker,rank,mcn,mq,setup,grp,m2,m4,state,pivot,base_len,base_depth,base_low,stop_suggest,last_close)
-                        values (%(t)s,%(rank)s,%(mcn)s,%(mq)s,%(setup)s,%(grp)s,%(m2)s,%(m4)s,%(state)s,%(pivot)s,%(blen)s,%(depth)s,%(c_low)s,%(stop)s,%(px)s)""",
-                        [{**o,"rank":o.get("rank")} for o in l1m])
-                    cur.executemany("""insert into queue(ticker,rank,source,state,trigger_price,limit_price,stop_suggest,proximity,mcn,note)
-                        values (%(ticker)s,%(rank)s,%(source)s,%(state)s,%(trig)s,%(lim)s,%(stop)s,%(prox)s,%(mcn)s,%(note)s)""",
-                        [{**r,"rank":i+1} for i,r in enumerate(qrows)])
-                conn.commit()
-            detail=dict(gate=m1["state"],gate_flipped=m1["flipped"],eff_l0=len(ranked),l1m=len(l1m),
-                        buy=len(trigged),queue=len(qrows),dry_run=DRY)
-            with conn.cursor() as cur:
-                cur.execute("update runs set finished_at=now(), status='green', calls_used=0, rows_written=%s, detail=%s where id=%s",
-                            (0 if DRY else len(l1m)+len(qrows), json.dumps(detail), run_id))
-            conn.commit()
-            print(f"weekly-rank: green — gate {m1['state']} | effective L0 {len(ranked)} | L1-M {len(l1m)} | BUY {len(trigged)} | queue {len(qrows)}")
-            return 0
-        except Exception as e:
-            with conn.cursor() as cur:
-                cur.execute("update runs set finished_at=now(), status='red', detail=%s where id=%s",
-                            (json.dumps({"fatal":f"{type(e).__name__}: {e}","trace":traceback.format_exc()[-900:]}),run_id))
-            conn.commit(); raise
+                queue_cap = int(config(cur, "queue_cap", 20))
+                limit_over = float(config(cur, "entry_limit_over_pivot", 0.02))
+                max_stop = float(config(cur, "momentum_max_stop", 0.08))
+                hurdle_near = float(config(cur, "l2_hurdle_proximity", 0.10))
 
-if __name__=="__main__": sys.exit(main())
+                cur.execute("select d, close from prices where ticker='GSPC.INDX' order by d")
+                spx = cur.fetchall()
+                cur.execute("select state from gate_state order by id desc limit 1")
+                prev = (cur.fetchone() or [None])[0]
+                gate = sg.market_gate([r[0] for r in spx], [float(r[1]) for r in spx], previous=prev)
+                if not dry():
+                    cur.execute("""insert into gate_state(week_end,state,spx_close,sma30,
+                                     sma30_4w_ago,flipped)
+                                   values (%s,%s,%s,%s,%s,%s)""",
+                                (gate["week_end"], gate["state"], gate["spx"], gate["sma"],
+                                 gate["sma_lookback"], gate["flipped"]))
+                    conn.commit()
+
+                cur.execute("""select ticker, industry, is_holding, in_l0 from universe
+                               where kind='stock' and status='active'""")
+                meta = {r[0]: dict(industry=r[1], hold=r[2], l0=r[3]) for r in cur.fetchall()}
+                cur.execute("select ticker, m4_pass from v_fundamentals_latest")
+                m4 = {r[0]: r[1] for r in cur.fetchall()}
+                data = load_bars(cur)
+
+            feats = features(data, meta)
+            ranked = [t for t, f in feats.items() if f["eff"] and f["scoreable"]]
+
+            # ---- MCN components, all windows ending t-10 (§3.2) ----
+            quality, atr_pct, dryup, near_high, group_returns = {}, {}, {}, {}, {}
+            for t in ranked:
+                f = feats[t]
+                ac, hi, lo, cl, vol = (f[k][:-T10] for k in ("ac", "hi", "lo", "cl", "vol"))
+                quality[t] = sg.momentum_quality(ac)
+                subs = sg.setup_proximity(hi, lo, cl, vol)
+                atr_pct[t], dryup[t], near_high[t] = subs["atr_pct"], subs["dryup"], subs["near_high"]
+                ind = meta[t]["industry"]
+                if ind and len(ac) >= 126:
+                    group_returns.setdefault(ind, []).append(float(ac[-1]) / float(ac[-126]) - 1)
+
+            groups = sorted(group_returns)
+            group_mean = {g: float(np.nanmean(group_returns[g])) for g in groups}
+            group_pct = dict(zip(groups, sg.pct_rank([group_mean[g] for g in groups])))
+
+            q_p = dict(zip(ranked, sg.pct_rank([quality[t] for t in ranked])))
+            d_p = dict(zip(ranked, sg.pct_rank([dryup[t] for t in ranked])))
+            x_p = dict(zip(ranked, sg.pct_rank([near_high[t] for t in ranked])))
+
+            rows, m4_unknown = [], 0
+            for t in ranked:
+                f = feats[t]
+                setup = float(np.nanmean([atr_pct[t], d_p[t], x_p[t]]))    # three sub-scores (S1-S5)
+                grp = group_pct.get(meta[t]["industry"], 50.0) if meta[t]["industry"] else 50.0
+                score = sg.mcn(q_p[t], setup, grp)
+                base = sg.base_scan(f["hi"], f["lo"], f["cl"])
+                m2 = sg.trend_template(f["cl"])
+                if m4.get(t) is None:
+                    m4_unknown += 1
+                stop = (sg.initial_stop(base["pivot"], base["contraction_low"], max_stop=max_stop)
+                        if base["valid"] else None)
+                rows.append(dict(t=t, mcn=score, mq=q_p[t], setup=setup, grp=grp, m2=m2,
+                                 m4=m4.get(t), state=base["state"], pivot=base["pivot"],
+                                 blen=base["base_len"], depth=base["depth"],
+                                 c_low=base["contraction_low"], stop=stop,
+                                 px=float(f["cl"][-1]), broken=base["broken"]))
+
+            # §3.2: L1-M membership = M2 and M4 pass, ranked by MCN, top 150. A name we have never
+            # swept cannot pass M4, so it is not a member — the previous build treated an unknown
+            # M4 as a pass, which is a gate the plan does not grant.
+            l1m = sorted([r for r in rows if r["m2"] and r["m4"] is True],
+                         key=lambda r: -(r["mcn"] or 0))[:L1M_SIZE]
+            for i, r in enumerate(l1m):
+                r["rank"] = i + 1
+
+            # ---- L2 (§3.0): holdings + top-10 BUY + bench within 10% of hurdle + spare seats ----
+            with conn.cursor() as cur:
+                cur.execute("""select ticker, hurdle_price, last_close, ccn from bench
+                               where hurdle_price is not null and last_close is not null
+                                 and last_close <= hurdle_price * %s""", (1 + hurdle_near,))
+                near_hurdle = cur.fetchall()
+
+            by_ticker = {r["t"]: r for r in rows}
+            seats, seen = [], set()
+
+            def seat(ticker, source, state, trigger=None, limit=None, stop=None, score=None,
+                     note=None):
+                if ticker in seen:
+                    return
+                seen.add(ticker)
+                px = float(feats[ticker]["cl"][-1]) if ticker in feats else None
+                prox = abs(px - trigger) / px if (px and trigger) else None
+                seats.append(dict(ticker=ticker, source=source, state=state, trig=trigger,
+                                  lim=limit, stop=stop, prox=prox, mcn=score, note=note))
+
+            for t in [t for t in feats if meta[t]["hold"]]:
+                r = by_ticker.get(t, {})
+                seat(t, "holding", "HOLD", score=r.get("mcn"), note="book")
+
+            for r in sorted([r for r in l1m if r["state"] == "BUY"],
+                            key=lambda r: -(r["mcn"] or 0))[:10]:
+                seat(r["t"], "momentum", "BUY", trigger=r["pivot"],
+                     limit=r["pivot"] * (1 + limit_over), stop=r["stop"], score=r["mcn"],
+                     note=f"base {r['blen']}d/{r['depth']:.0%}")
+
+            for ticker, hurdle, last_close, ccn_score in near_hurdle:
+                gap = (float(last_close) - float(hurdle)) / float(hurdle)
+                seat(ticker, "compounder", "BUY" if gap <= 0 else "WATCH", trigger=float(hurdle),
+                     limit=float(hurdle), score=float(ccn_score) if ccn_score else None,
+                     note=f"hurdle {float(hurdle):.2f} · {gap:+.1%}")
+
+            for r in l1m:                                       # spare seats, for visibility
+                if len(seats) >= queue_cap:
+                    break
+                seat(r["t"], "momentum", r["state"], trigger=r["pivot"],
+                     limit=r["pivot"] * (1 + limit_over) if r["pivot"] else None,
+                     stop=r["stop"], score=r["mcn"], note="L1-M rank %d" % r["rank"])
+
+            seats.sort(key=lambda r: (r["source"] != "holding",
+                                      r["prox"] if r["prox"] is not None else 9,
+                                      -(r["mcn"] or 0)))
+            seats = seats[:queue_cap]
+
+            if not dry():
+                with conn.cursor() as cur:
+                    cur.execute("truncate candidates")
+                    cur.execute("truncate queue")
+                    cur.executemany("""insert into candidates(ticker,rank,mcn,mq,setup,grp,m2,m4,
+                                         state,pivot,base_len,base_depth,base_low,stop_suggest,
+                                         last_close)
+                                       values (%(t)s,%(rank)s,%(mcn)s,%(mq)s,%(setup)s,%(grp)s,
+                                         %(m2)s,%(m4)s,%(state)s,%(pivot)s,%(blen)s,%(depth)s,
+                                         %(c_low)s,%(stop)s,%(px)s)""", l1m)
+                    cur.executemany("""insert into queue(ticker,rank,source,state,trigger_price,
+                                         limit_price,stop_suggest,proximity,mcn,note)
+                                       values (%(ticker)s,%(rank)s,%(source)s,%(state)s,%(trig)s,
+                                         %(lim)s,%(stop)s,%(prox)s,%(mcn)s,%(note)s)""",
+                                    [{**r, "rank": i + 1} for i, r in enumerate(seats)])
+                    cur.executemany("""insert into group_strength(week_end,industry,ret_6m,
+                                         percentile,members)
+                                       values (%s,%s,%s,%s,%s)
+                                       on conflict (week_end,industry) do update set
+                                         ret_6m=excluded.ret_6m, percentile=excluded.percentile,
+                                         members=excluded.members""",
+                                    [(gate["week_end"], g, group_mean[g], group_pct[g],
+                                      len(group_returns[g])) for g in groups])
+                    if gate["flipped"]:
+                        observe(cur, "gate_flip",
+                                f"M1 flipped {gate['previous']} -> {gate['state']} on the "
+                                f"{gate['week_end']} weekly close",
+                                detail=dict(spx=gate["spx"], sma=gate["sma"],
+                                            sma_4w=gate["sma_lookback"]),
+                                once=True)
+                conn.commit()
+
+            hb.rows = 0 if dry() else len(l1m) + len(seats) + len(groups)
+            hb.detail.update(gate=gate["state"], gate_flipped=gate["flipped"],
+                             effective_l0=len(ranked), l1m=len(l1m),
+                             buy=sum(1 for r in l1m if r["state"] == "BUY"),
+                             queue=len(seats), groups=len(groups), m4_unknown=m4_unknown,
+                             spent_pivots=sum(1 for r in rows if r["broken"] == "spent"))
+            if m4_unknown:
+                hb.detail["m4_note"] = (f"{m4_unknown} scoreable names have no fundamentals row, "
+                                        "so they cannot pass M4 and are not L1-M members")
+            print(f"weekly-rank: gate {gate['state']} | effective L0 {len(ranked)} | "
+                  f"L1-M {len(l1m)} | BUY {sum(1 for r in l1m if r['state'] == 'BUY')} | "
+                  f"queue {len(seats)} | groups {len(groups)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -11,6 +11,7 @@ short-history rule (fair = lower of current or 25x). The 8 is a builder's thresh
 import os, sys, json, math, statistics as st, datetime as dt
 import psycopg
 from db import connect, config, dry, Heartbeat
+import signals as sg
 
 SIZE_BOUNDARY_DEFAULT = 10_000_000_000
 
@@ -25,30 +26,6 @@ def pct_rank(pairs):
     got.sort(key=lambda kv: kv[1])
     n = len(got) - 1
     return {k: 100.0 * i / n for i, (k, v) in enumerate(got)}
-
-
-def hurdle_price(fcf_ttm, shares, growth, fair, floor=0.15):
-    """Highest price where FCF yield + growth − derating drag ≥ floor (§3.1)."""
-    if not fcf_ttm or fcf_ttm <= 0 or not shares or shares <= 0 or not fair or fair <= 0:
-        return None
-
-    def er(mcap):
-        yield_ = fcf_ttm / mcap
-        drag = max(0.0, 1.0 - (fair * fcf_ttm / mcap) ** 0.2)   # 5-yr annualized slide, never a credit
-        return yield_ + growth - drag
-
-    lo, hi = fcf_ttm * 0.01, fcf_ttm * 5000.0
-    if er(hi) >= floor:
-        return hi / shares
-    if er(lo) < floor:
-        return None
-    for _ in range(80):
-        mid = (lo + hi) / 2
-        if er(mid) >= floor:
-            lo = mid
-        else:
-            hi = mid
-    return lo / shares
 
 
 def month_closes(cur, tickers):
@@ -118,18 +95,24 @@ def main():
             out, unscored = [], []
             for (tk, engine, cc, mcap, shares, fcf, c1, c1why, roic, reinv,
                  pfcf_cur, conf, gw_jump, agrees, rev_cagr, quote_ok, raw, is_hold) in rows:
-                parts = [("engine", eng_p.get(tk)), ("cash_conv", cc_p.get(tk)),
-                         ("size", size_p.get(tk))]
-                have = [(n, v) for n, v in parts if v is not None]
-                # §3.3 renormalizes around ONE missing component. Size is available to almost
-                # everything, so without this floor a company whose engine and cash conversion
-                # are both unmeasurable scores on smallness alone — and a $4 microcap tops the
-                # bench. Two components, at least one of them a business measure, or unscored.
-                if len(have) < 2 or not any(n in ("engine", "cash_conv") for n, _ in have):
+                px = last.get(tk)
+                # §3.1 engine reliability check: growth = ROIC x reinvestment is an identity, so it
+                # must agree with observed 3-yr revenue growth within 5 percentage points. Beyond
+                # that the engine component routes down the data-confidence path — it is DROPPED,
+                # not quietly capped to the number we like better. Agreement is decided here rather
+                # than read from the sweep: the tolerance is scoring policy, and changing it here
+                # costs no API calls.
+                agrees = sg.engine_agrees(engine, rev_cagr, tolerance=tol)
+                engine_trusted = engine is not None and agrees is not False
+
+                components = dict(engine=eng_p.get(tk) if engine_trusted else None,
+                                  cash_conv=cc_p.get(tk), size=size_p.get(tk))
+                scored = sg.ccn(components)
+                if scored["score"] is None:
                     unscored.append(tk)
                     continue
-                ccn = sum(v for _, v in have) / len(have)      # equal weight, renormalized (§3.3)
-                confidence = conf if len(have) == 3 else "2of3"
+                ccn = scored["score"]
+                confidence = scored["confidence"] if scored["confidence"] != "full" else conf
 
                 # statements in one currency divided by a market cap in another is not a
                 # multiple, it is a category error — so it produces no hurdle at all (§009)
@@ -141,30 +124,28 @@ def main():
                     fair = min(pfcf_cur, fair_cap_short)
                 else:
                     fair = None
-                # §3.1 engine reliability check: growth = ROIC x reinvestment is an identity, so
-                # it must agree with observed revenue growth. When it doesn't — usually a net-cash
-                # balance sheet shrinking invested capital toward zero and sending ROIC to the moon
-                # — we underwrite on the number we can check, never on the flattering one.
-                # agreement is re-decided here, not read from the sweep: the tolerance is a
-                # scoring policy and belongs with the scorer, where changing it costs no API calls
-                if engine is not None and rev_cagr is not None:
-                    agrees = abs(engine - rev_cagr) <= max(tol, 0.5 * abs(rev_cagr))
-                g = min(growth_cap, engine) if engine is not None else 0.0
-                if engine is not None and agrees is False:
-                    g = max(0.0, min(g, rev_cagr if rev_cagr is not None else 0.0))
-                hp = hurdle_price(fcf, shares, g, fair, floor)
-                px = last.get(tk)
+                # An untrusted engine cannot underwrite growth either. §3.3's rule is never to
+                # assume a missing value, so growth drops to zero rather than borrowing revenue
+                # CAGR — conservative by construction, and it can only lower a hurdle.
+                g = min(growth_cap, engine) if engine_trusted else 0.0
+                # §3.1 (B5): cap at price P uses effective shares = vendor cap / last close. The
+                # vendor's own share count reopens the ADR-ratio and share-class holes.
+                eff_shares = sg.effective_shares(mcap, px)
+                hp = sg.hurdle_price(fcf_ttm=fcf, shares=eff_shares, growth=g,
+                                     fair_multiple=fair, floor=floor) if eff_shares else None
                 gap = ((px - hp) / hp) if px and hp else None
 
                 out.append(dict(
                     ticker=tk, ccn=ccn,
-                    engine=eng_p.get(tk), cash_conv=cc_p.get(tk), size_score=size_p.get(tk),
+                    # the engine percentile is stored as *used* — null when the cross-check
+                    # dropped it, so a reader can never mistake a 2-of-3 score for a full one
+                    engine=components["engine"], cash_conv=cc_p.get(tk), size_score=size_p.get(tk),
                     engine_raw=engine, cash_conv_raw=cc, roic=roic, reinvest_rate=reinv,
                     c1_pass=(c1 and quote_ok is True),
                     c1_fail_reason=(c1why if c1 else None) if quote_ok is True else
                         ((c1why + " · " if c1why else "") +
                          "reports in a foreign currency or trades as a depositary receipt — "
-                         "not priceable in v1"),
+                         "excluded pending the §3.0 one-currency conversion (roadmap Part 4)"),
                     cohort=("large" if (mcap or 0) >= boundary else "small"),
                     hurdle_price=hp, fcf_yield=(fcf / mcap if fcf and mcap else None),
                     engine_growth=g, fair_multiple=fair,

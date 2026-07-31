@@ -21,10 +21,23 @@ BATCH = 100
 UNITS_PER_CALL = 10                       # EODHD bills a fundamentals request at ten
 RESERVE = int(os.environ.get("QUOTA_RESERVE", "3000"))   # leave room for the nightly jobs
 SWEEP_LIMIT = int(os.environ.get("SWEEP_LIMIT", "0"))    # 0 = everything; else top N by market cap
-TOLERANCE = 0.05          # |engine - revenue CAGR| floor before the engine is distrusted
-FIN_SECTORS = {"financial services", "financials", "financial"}
-FIN_WORDS = ("bank", "insur", "capital markets", "credit services", "reinsur",
-             "savings", "thrift", "mortgage finance")
+TOLERANCE = 0.05          # |engine - revenue CAGR| gap beyond which the engine is distrusted
+
+# §3.1 (B4): C1 excludes only vendor industries named `Banks - …` or `Insurance - …`. EBITDA is
+# meaningless for deposit-takers and underwriters — not for fee businesses, so Insurance Brokers,
+# Credit Services, Capital Markets and the rest of Financial Services stay eligible. Matching the
+# vendor's own strings is the whole point; the previous keyword sweep excluded a ruled-in cohort.
+EXCLUDED_INDUSTRY_PREFIXES = ("banks - ", "insurance - ")
+EXCLUDED_INDUSTRY_EXACT = {"banks", "insurance"}
+
+
+def excluded_industry(industry):
+    """(is_excluded, industry_missing) — a name with no vendor industry is NOT excludable by this
+    test; §3.1 says the gap is named on its C2 memo instead."""
+    if not industry or not str(industry).strip():
+        return False, True
+    s = str(industry).strip().lower()
+    return (s.startswith(EXCLUDED_INDUSTRY_PREFIXES) or s in EXCLUDED_INDUSTRY_EXACT), False
 
 
 def num(x):
@@ -96,9 +109,7 @@ def extract(ticker, r, quote_ccy=None):
     # ---- identity
     sector, industry = G.get("Sector"), G.get("Industry")
     gic_s, gic_i = G.get("GicSector"), G.get("GicIndustry")
-    hay = " ".join(filter(None, [sector, industry, gic_s, gic_i])).lower()
-    is_fin = (sector or "").lower() in FIN_SECTORS or (gic_s or "").lower() in FIN_SECTORS \
-             or any(w in hay for w in FIN_WORDS)
+    is_fin, industry_missing = excluded_industry(industry or gic_i)
     # General.CurrencyCode lies for depositary receipts (TSM says USD, files in TWD).
     # currency_symbol sits on every statement and does not.
     stmt_ccy = None
@@ -221,7 +232,8 @@ def extract(ticker, r, quote_ccy=None):
             fails.append("net debt growing faster than EBITDA")
 
     if is_fin:
-        fails.append("bank/insurer — excluded in v1")
+        fails.append(f"vendor industry '{industry}' — deposit-taker or underwriter, EBITDA is "
+                     f"meaningless (§3.1 C1)")
     if n_years < 3:
         fails.append(f"only {n_years} fiscal year(s)")
 
@@ -251,6 +263,7 @@ def extract(ticker, r, quote_ccy=None):
         currency=G.get("CurrencyCode"), sector=sector, industry=industry,
         gic_sector=gic_s, gic_industry=gic_i,
         ipo_date=day(G.get("IPODate")), is_financial=is_fin,
+        industry_missing=industry_missing,
         primary_ticker=primary, statement_currency=stmt_ccy, is_adr=is_adr,
         quote_ok=(not is_adr and stmt_ccy is not None and stmt_ccy == quote_ccy),
         market_cap=mcap, shares_out=shares, fiscal_years=n_years,
@@ -302,7 +315,7 @@ def extract(ticker, r, quote_ccy=None):
 
 
 COLS = ["ticker", "filing_date", "period_end", "currency", "sector", "industry", "gic_sector",
-        "gic_industry", "ipo_date", "is_financial", "market_cap", "shares_out", "fiscal_years",
+        "gic_industry", "ipo_date", "is_financial", "industry_missing", "market_cap", "shares_out", "fiscal_years",
         "ebit_3y", "tax_rate", "nopat_3y", "invested_capital", "invested_capital_ex_gw", "roic",
         "roic_ex_gw", "reinvest_rate", "engine", "revenue_cagr_3y", "engine_agrees", "fcf_3y",
         "ni_3y", "cash_conversion", "fcf_ttm", "fcf_positive", "net_issuance_3y", "net_debt",

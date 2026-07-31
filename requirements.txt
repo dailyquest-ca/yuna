@@ -1,0 +1,6 @@
+# One declaration for every job. Pinned on purpose: the worst backtest bug in this repo came
+# from a pandas rolling() default, so a silent minor-version bump is a real risk to real money.
+numpy==2.1.3
+pandas==2.2.3
+psycopg[binary]==3.2.3
+pytest==8.3.4
