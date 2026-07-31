@@ -288,6 +288,143 @@ def is_excluded_financial(industry: str | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# §3.0 — the universe
+# ---------------------------------------------------------------------------
+
+L0_MIN_PRICE = 5.0
+L0_MIN_ADDV = 10_000_000.0
+L0_MIN_MARKET_CAP = 300_000_000.0
+L0_MIN_SESSIONS = 126          # ~6 months of trading days
+
+
+@implements("3.0/l0-filters",
+            "price >= $5, 50-day median dollar volume >= $10M, market cap >= $300M, listed >= 6 "
+            "months — one test, applied by both pipelines")
+def in_l0(last_close: float | None, addv_median: float | None,
+          market_cap: float | None, sessions: int) -> tuple[bool, str | None]:
+    """§3.0's investable universe, and the reason when a name misses.
+
+    One definition, because there was briefly more than one: the census set
+    membership at $4 and a single day's $5M of volume, the momentum job re-applied
+    the real filters, and the compounder job re-applied nothing — so the two
+    sleeves screened different universes off the same column. A name below $5 or
+    under $10M ADDV could reach the compounder bench and never the momentum one.
+
+    ADDV is a **median**, not a mean: one earnings-day volume spike is not
+    liquidity you can actually exit into, and a mean lets that spike carry a
+    quarter of thin trading.
+    """
+    if sessions < L0_MIN_SESSIONS:
+        return False, f"listed under 6 months ({sessions} sessions)"
+    if last_close is None or last_close < L0_MIN_PRICE:
+        return False, f"price under ${L0_MIN_PRICE:.0f}"
+    if addv_median is None or addv_median < L0_MIN_ADDV:
+        return False, f"ADDV under ${L0_MIN_ADDV / 1e6:.0f}M"
+    if market_cap is None or market_cap < L0_MIN_MARKET_CAP:
+        return False, f"market cap under ${L0_MIN_MARKET_CAP / 1e6:.0f}M"
+    return True, None
+
+
+# ---------------------------------------------------------------------------
+# §3.2 — the trend template
+# ---------------------------------------------------------------------------
+
+@implements("3.2/m2-trend-template",
+            "above the 150 & 200-day, 150 above 200, 200 rising against 21 sessions ago, above "
+            "the 50-day, >=30% off the 52-week low, within 25% of the 52-week high")
+def trend_template(price: float, sma50: float, sma150: float, sma200: float,
+                   sma200_21_ago: float, low_52w: float, high_52w: float) -> bool:
+    """Minervini's six conditions, all of which must hold at the current price.
+
+    §3.2 is explicit that gates use current price — "Rank is calm; protection is
+    real-time" — so this takes the live close rather than the t-10 close the MCN
+    windows use.
+    """
+    return (price > sma150 and price > sma200 and sma150 > sma200
+            and sma200 > sma200_21_ago and price > sma50
+            and price >= low_52w * 1.30 and price >= high_52w * 0.75)
+
+
+@implements("3.2/l1m-top150",
+            "L1-M = names passing M2 and M4, ranked by MCN, top 150")
+def l1m_member(m2_pass: bool, m4_pass: bool | None) -> bool:
+    """Both gates must PASS. An unknown M4 is not a pass.
+
+    This read as `m4 is not False` for a while, which let every name the
+    fundamentals sweep had not reached yet into L1-M — the gate silently inverted
+    from "must pass" to "must not have failed". §3.2 says membership *is* M2 + M4,
+    so a name we cannot evaluate is not a member; it becomes one when the sweep
+    reaches it.
+    """
+    return bool(m2_pass) and m4_pass is True
+
+
+# ---------------------------------------------------------------------------
+# §4.1 — data integrity
+# ---------------------------------------------------------------------------
+
+QUARANTINE_MOVE = 0.40
+
+
+@implements("4.1/price-quarantine",
+            "a print moving more than 40% with no corporate action is held out of use until two "
+            "sources agree")
+def price_is_suspect(prev_close: float | None, close: float | None,
+                     corporate_action: bool = False) -> bool:
+    """§4.1's first quarantine test, on the one input that can fire a sell.
+
+    A 40% gap is either news, a corporate action, or bad data — and only the third
+    is silent. Without the corporate-action feed the third and the second look
+    identical, which is exactly why §4.1 pairs this rule with the split refresh:
+    a 4:1 split prints as -75% and would be quarantined here rather than firing a
+    stop.
+
+    The plan's second test — "any print that would fire a sell-side action" — is
+    the caller's, because only the caller knows where the stops are.
+    """
+    if corporate_action or prev_close is None or close is None or prev_close <= 0:
+        return False
+    return abs(close / prev_close - 1.0) >= QUARANTINE_MOVE
+
+
+# ---------------------------------------------------------------------------
+# §4.7 — heartbeat honesty
+# ---------------------------------------------------------------------------
+
+TERMINAL_STATUSES = ("green", "amber", "red")
+
+
+@implements("4.7/stale-detects-silence",
+            "a run still marked running, or a scheduled job with no row at all, is stale — not "
+            "green")
+def domain_is_stale(status: str | None, hours_since: float | None,
+                    max_age_hours: float) -> tuple[bool, str]:
+    """Whether a job's domain should be treated as stale, and why.
+
+    Three ways a job can fail to deliver, and only one of them used to count:
+
+      * it ran and reported red or amber — the case that was handled;
+      * it started and never finished, leaving `running` forever, which matched
+        no check and therefore read as green over a half-written price table;
+      * it never fired at all, writing no row — GitHub sleeps schedules after 60
+        days, and a job that does not run cannot report that it did not run.
+
+    `status=None` means no row was found in the window, which is the third case.
+    §4.7's "a missing message is itself the alarm" applies to jobs, not only to
+    briefs.
+    """
+    if status is None:
+        return True, "never ran in the expected window"
+    if status == "running":
+        return True, "started and never finished — the runner was killed or timed out"
+    if status in ("red", "amber"):
+        return True, f"last run was {status}"
+    if hours_since is not None and hours_since > max_age_hours:
+        return True, f"last green run was {hours_since:.0f}h ago"
+    return False, ""
+
+
+# ---------------------------------------------------------------------------
 # §3.2 — momentum stops and sizing
 # ---------------------------------------------------------------------------
 

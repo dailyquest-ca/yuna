@@ -296,6 +296,11 @@ CLAUSES: tuple[Clause, ...] = (
            BUILT, wired=True, note="phase0 §6 re-underwrite produced the breach list"),
 
     # --- §3.0 layers & cadence ----------------------------------------------
+    Clause("3.0/l0-filters",
+           "price >= $5, 50-day median dollar volume >= $10M, market cap >= $300M, listed >= 6 "
+           "months, delisted names retained",
+           BUILT,
+           note="one definition for both pipelines; delisted retention is separate and OPEN"),
     Clause("3.0/l2-composition",
            "top-10 MCN in BUY state, every bench name within 10% of its hurdle, and all "
            "holdings; cap 20, holdings always seated, remaining seats by trigger proximity "
@@ -388,7 +393,9 @@ CLAUSES: tuple[Clause, ...] = (
     Clause("3.2/m2-trend-template",
            "above the 150 & 200-day, 150 above 200, 200 rising, above the 50-day, >=30% off "
            "the 52-week low, within 25% of the high",
-           BUILT, wired=True),
+           BUILT, wired=True,
+           note="DUAL IMPLEMENTATION: rank.py computes it inline; policy.trend_template is the "
+                "tested copy and is not called"),
     Clause("3.2/m4-earnings-acceleration",
            "latest quarter YoY EPS growth >= 25%, or accelerating two quarters with the "
            "latest >= 15%",
@@ -401,7 +408,9 @@ CLAUSES: tuple[Clause, ...] = (
                 "2026-07-31 pass dropped pullback contraction, leaving three. Every MCN in "
                 "the database is computed on the superseded definition"),
     Clause("3.2/l1m-top150", "L1-M membership = M2 + M4 pass, ranked by MCN, top 150",
-           BUILT, wired=True),
+           BUILT, wired=True,
+           note="DEVIATION: rank.py reads M4 as `m4 is not False`, so a name the sweep has not "
+                "reached yet enters L1-M. The gate is inverted from must-pass to must-not-fail"),
     Clause("3.2/base-detection",
            "pivot = highest high 120 to 25 sessions back; broken by a later close above the "
            "pivot or a later high beyond pivot x 1.005; valid when unbroken and <=25% deep",
@@ -540,6 +549,29 @@ CLAUSES: tuple[Clause, ...] = (
            "every job writes exactly one runs row — green, amber or red — with the traceback "
            "on death",
            BUILT, wired=True),
+    Clause("4.7/stale-detects-silence",
+           "a run still marked running, or a scheduled job with no row at all, is stale",
+           BUILT,
+           note="daily.freshness treats only red and amber as stale, so a killed runner and a "
+                "job that never fired both read green"),
+    Clause("4.1/price-quarantine",
+           "a print moving more than 40% with no corporate action, or one that would fire a "
+           "sell-side action, needs two sources to agree before anything acts on it",
+           BUILT,
+           note="the 40% test exists; nothing calls it, and no store holds a quarantined price"),
+    Clause("4.1/corporate-actions",
+           "a split or dividend triggers a one-call re-pull of that name's whole history",
+           OPEN, note="no splits/dividends feed exists; ingest only ever fetches forward"),
+    Clause("4.1/bulk-prices",
+           "prices come in bulk nightly; per-ticker calls serve cold start, corporate actions, "
+           "gap repair and names entering L0, and nothing else",
+           OPEN, note="DEVIATION: the nightly loops the whole universe per-ticker"),
+    Clause("4.1/quota-meter",
+           "every run meters its calls against the usage endpoint and the brief alarms past ~70%",
+           OPEN, note="the sweep reads usage; nothing alarms and no other job meters"),
+    Clause("4.1/bar-retention",
+           "a 3-year rolling bar window, archived compressed to the repo before pruning",
+           OPEN, note="nothing prunes; prices grows without bound"),
     Clause("4.7/stale-data-no-tickets",
            "stale data means no new tickets; an amber job stales its own domain only",
            BUILT, wired=True),
