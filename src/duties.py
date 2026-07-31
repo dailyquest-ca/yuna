@@ -745,6 +745,60 @@ def arm_housekeeping(conn, arm, holidays):
                         note="daily invalidator read", detail=dict(invalidators=invalidators))
 
 
+# --------------------------------------------------------------------------- shadow book (§3.3)
+def shadow_book(conn, hb, bars):
+    """Every pass and every exit, snapshotted and marked at 30 / 60 / 90 days (§3.3).
+
+    This is the only forward validation the compounder side will ever have — §4.8 says the backtest
+    there is indicative-only, and the shadow book is what converts a formula from "a reasoned prior"
+    into evidence. It costs nothing to record and cannot be reconstructed later, so it records
+    everything the machine declined as well as everything it left.
+
+    A pass is a name the machine armed and a rule held back; an exit is a position it let go. Both
+    carry the score and the price at the moment of the decision.
+    """
+    written, marked = 0, 0
+    with conn.cursor() as cur:
+        cur.execute("""select kind, ticker, reason, score, blocked_by, note from armed
+                       where kind in ('entry', 'exit')""")
+        for kind, tk, reason, score, blocked, note in cur.fetchall():
+            b = bars.get(tk)
+            price = float(b[-1]["close"]) if b and b[-1]["close"] is not None else None
+            if kind == "entry" and not blocked:
+                continue                      # taken, not passed — the book will carry it
+            shadow_kind = "pass" if kind == "entry" else "exit"
+            body = (f"{shadow_kind}: {tk} at {price} — {blocked or reason}")
+            if dry():
+                continue
+            # one row per name per day per kind: the nightly job re-arms the same conclusion every
+            # night a rule keeps holding, and 60 identical rows would drown the marks
+            cur.execute("""select 1 from observations where kind=%s and ticker=%s
+                           and at::date = current_date limit 1""", (shadow_kind, tk))
+            if cur.fetchone():
+                continue
+            observe(cur, shadow_kind, body, ticker=tk, score=score, price=price,
+                    detail=dict(reason=reason, blocked_by=blocked, note=note))
+            written += 1
+
+        # the marks: 30, 60 and 90 sessions later, what did the decision turn out to be worth?
+        for horizon, column in ((30, "mark_30"), (60, "mark_60"), (90, "mark_90")):
+            cur.execute(f"""select o.id, o.ticker, o.at::date from observations o
+                            where o.kind in ('pass','exit') and o.{column} is null
+                              and o.at < now() - make_interval(days => %s)""", (horizon,))
+            for oid, tk, at in cur.fetchall():
+                cur.execute("""select close from prices where ticker=%s and d >= %s
+                               order by d limit 1""", (tk, at + dt.timedelta(days=horizon)))
+                row = cur.fetchone()
+                if not row or dry():
+                    continue
+                cur.execute(f"update observations set {column}=%s, marked_at=now() where id=%s",
+                            (float(row[0]), oid))
+                marked += 1
+    conn.commit()
+    hb.detail.update(shadow_written=written, shadow_marked=marked)
+    return written, marked
+
+
 # --------------------------------------------------------------------------- marks, NAV, brief
 def refresh_marks(conn, hb):
     with conn.cursor() as cur:
@@ -833,6 +887,7 @@ def main():
                     warn_bets=float(config(cur, "effective_bets_warn", 4)),
                     quarantine_move=float(config(cur, "quarantine_move_threshold", 0.40)),
                     quarantine_tolerance=float(config(cur, "quarantine_source_tolerance", 0.02)),
+                    quota_alarm=float(config(cur, "api_alarm_fraction", 0.70)),
                 )
                 cur.execute("select state from gate_state order by id desc limit 1")
                 gate = (cur.fetchone() or ["OFF"])[0]
@@ -892,6 +947,19 @@ def main():
             arm_housekeeping(conn, arm, ())
             armed_n = arm.flush(conn, hb.id)
 
+            shadow_book(conn, hb, bars)
+
+            # §4.1: "the brief alarms past ~70% of daily quota". The check itself costs one call.
+            quota = None
+            try:
+                usage = get("user", hb.calls)
+                used, limit = float(usage.get("apiRequests") or 0), float(usage.get("dailyRateLimit") or 1)
+                quota = dict(used=used, limit=limit, fraction=round(used / limit, 3) if limit else None)
+                if quota["fraction"] and quota["fraction"] >= caps["quota_alarm"]:
+                    hb.amber(f"API quota at {quota['fraction']:.0%} of the daily budget")
+            except Exception as e:
+                hb.detail["quota_check_failed"] = f"{type(e).__name__}: {e}"
+
             approved, any_hurdle = refresh_marks(conn, hb)
             if not dry():
                 with conn.cursor() as cur:
@@ -919,7 +987,7 @@ def main():
                     bits.append(f"{len(k)} {label}{'s' if len(k) > 1 else ''}")
             summary = "; ".join(bits) if bits else "nothing needs you"
             detail = dict(gate=gate, nav_cad=round(nav, 2), effective_bets=bets,
-                          quarantined=sorted(held),
+                          quarantined=sorted(held), api_quota=quota,
                           effective_bets_warn=bets is not None and bets < caps["warn_bets"],
                           armed=arm.rows, protective=len(protective), offerable=len(offerable),
                           bench_at_hurdle=dict(approved=approved, total=any_hurdle),

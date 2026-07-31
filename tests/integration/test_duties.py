@@ -766,3 +766,117 @@ def test_an_unverifiable_print_stays_held_rather_than_trading(db, fx, monkeypatc
         cur.execute("select status from quarantine where ticker='AAA.US'")
         assert cur.fetchone()[0] == "held"
     assert [r for r in armed(db, "exit", "AAA.US") if r["reason"] == "stop"] == []
+
+
+# --------------------------------------------------------------------------- §3.3 shadow book
+
+def test_a_blocked_entry_is_recorded_as_a_pass(db, fx):
+    """§3.3: every pass snapshots score and price. A name the machine wanted and a rule held back
+    is exactly a pass — and it is the only way we will ever learn whether the rule cost us."""
+    with db.cursor() as cur:
+        world.add_name(cur, "BBB.US")
+        world.flat_then_base(cur, "BBB.US")
+        world.gate(cur)
+        world.candidate(cur, "BBB.US", mcn=82.0)
+        world.queued(cur, "BBB.US", trigger=110.0, stop=101.2, mcn=82.0)
+        world.earnings_on(cur, "BBB.US", dt.date.today() + dt.timedelta(days=1))   # blackout
+        world.balances(cur)
+    db.commit()
+    run()
+    with db.cursor() as cur:
+        cur.execute("""select kind, ticker, score, price, detail->>'blocked_by'
+                       from observations where kind='pass'""")
+        rows = cur.fetchall()
+    assert len(rows) == 1
+    kind, tk, score, price, blocked = rows[0]
+    assert tk == "BBB.US" and score == pytest.approx(82.0) and price is not None
+    assert "blackout" in blocked
+
+
+def test_a_taken_entry_is_not_a_pass(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "BBB.US")
+        world.flat_then_base(cur, "BBB.US")
+        world.gate(cur)
+        world.candidate(cur, "BBB.US", mcn=82.0)
+        world.queued(cur, "BBB.US", trigger=110.0, stop=101.2, mcn=82.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    with db.cursor() as cur:
+        cur.execute("select count(*) from observations where kind='pass'")
+        assert cur.fetchone()[0] == 0
+
+
+def test_an_exit_is_recorded_in_the_shadow_book(db, fx):
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US", last_close=100.0, last_low=99.0)
+        world.gate(cur)
+        world.position(cur, "AAA.US", stop=101.2, confirmed=True, step=3, cost=105.0)
+        world.balances(cur)
+    db.commit()
+    run()
+    with db.cursor() as cur:
+        cur.execute("select ticker, price from observations where kind='exit'")
+        rows = cur.fetchall()
+    assert len(rows) == 1 and rows[0][0] == "AAA.US"
+
+
+def test_the_same_pass_is_recorded_once_a_day_not_once_a_run(db, fx):
+    """The nightly job re-arms the same conclusion every night a rule keeps holding. Sixty identical
+    rows would drown the marks that make the shadow book worth keeping."""
+    with db.cursor() as cur:
+        world.add_name(cur, "BBB.US")
+        world.flat_then_base(cur, "BBB.US")
+        world.gate(cur)
+        world.candidate(cur, "BBB.US", mcn=82.0)
+        world.queued(cur, "BBB.US", trigger=110.0, stop=101.2, mcn=82.0)
+        world.earnings_on(cur, "BBB.US", dt.date.today() + dt.timedelta(days=1))
+        world.balances(cur)
+    db.commit()
+    run()
+    run()
+    with db.cursor() as cur:
+        cur.execute("select count(*) from observations where kind='pass'")
+        assert cur.fetchone()[0] == 1
+
+
+def test_a_pass_gets_its_thirty_day_mark_when_the_anniversary_arrives(db, fx):
+    """The mark is the whole point: a score and a price at decision time are worthless until you
+    know what happened next."""
+    with db.cursor() as cur:
+        world.add_name(cur, "BBB.US")
+        days = world.flat_then_base(cur, "BBB.US", level=100.0)
+        world.gate(cur)
+        world.balances(cur)
+        # a pass recorded 40 days ago, with bars covering the 30-day anniversary
+        cur.execute("""insert into observations (kind, ticker, score, price, body, at)
+                       values ('pass','BBB.US',80,100.0,'test pass', now() - interval '40 days')""")
+    db.commit()
+    run()
+    with db.cursor() as cur:
+        cur.execute("select mark_30, mark_60, marked_at from observations where kind='pass'")
+        mark_30, mark_60, marked_at = cur.fetchone()
+    assert mark_30 is not None and marked_at is not None
+    assert mark_60 is None                    # not yet due
+
+
+def test_the_brief_carries_the_api_quota(db, fx, monkeypatch):
+    """§4.1: the brief alarms past ~70% of the daily budget."""
+    monkeypatch.setattr(duties, "get",
+                        lambda path, calls, **kw: {"apiRequests": 85000, "dailyRateLimit": 100000})
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US")
+        world.gate(cur)
+        world.balances(cur)
+    db.commit()
+    run()
+    with db.cursor() as cur:
+        cur.execute("select detail->'api_quota', detail->'amber' from briefs where kind='nightly' order by id desc limit 1")
+        quota, _ = cur.fetchone()
+        cur.execute("select detail->'amber' from runs where job='duties' order by id desc limit 1")
+        amber = cur.fetchone()[0]
+    assert quota["fraction"] == pytest.approx(0.85)
+    assert "quota at 85%" in str(amber)
