@@ -76,26 +76,36 @@ def nav_cad(cur):
         per_account[acct] = per_account.get(acct, 0.0) + cad
     book_equities = sum(per_account.values())
 
-    cur.execute("""select distinct on (b.account) b.account, a.kind, b.cash, b.drawn,
-                          b.credit_limit, b.total_value, b.as_of
+    cur.execute("""select distinct on (b.account) b.account, a.kind, b.cash, b.cash_cad,
+                          b.cash_usd, b.drawn, b.credit_limit, b.total_value, b.as_of
                    from balances b join accounts a on a.code=b.account
                    order by b.account, b.as_of desc, b.id desc""")
-    bal = {r[0]: dict(kind=r[1], cash=r[2], drawn=r[3], limit=r[4], total=r[5], as_of=r[6])
-           for r in cur.fetchall()}
+    bal = {r[0]: dict(kind=r[1], cash=r[2], cad=r[3], usd=r[4], drawn=r[5], limit=r[6],
+                      total=r[7], as_of=r[8]) for r in cur.fetchall()}
 
     assets = cash = debt = 0.0
     accounts = {}
     for acct in set(list(per_account) + list(bal)):
         b = bal.get(acct, {})
         if b.get("kind") == "facility":
-            debt += float(b.get("drawn") or 0)
+            debt += float(b.get("drawn") or 0)      # facilities are CAD always
             continue
-        c = float(b.get("cash") or 0)
+        # cash per currency is the anchored truth; the USD sleeve reprices with FX daily.
+        # Falling back to the deprecated single `cash` column keeps older rows readable.
+        if b.get("cad") is not None or b.get("usd") is not None:
+            c_cad, c_usd = float(b.get("cad") or 0), float(b.get("usd") or 0)
+            c = c_cad + c_usd * fx
+        else:
+            c_cad, c_usd = float(b.get("cash") or 0), 0.0
+            c = c_cad
+        value = c + per_account.get(acct, 0.0)      # §2.0: balances anchor, prices extrapolate
         stated = b.get("total")
-        value = float(stated) if stated is not None else c + per_account.get(acct, 0.0)
         accounts[acct] = dict(value_cad=round(value, 2), cash_cad=round(c, 2),
+                              cash_native={"CAD": round(c_cad, 2), "USD": round(c_usd, 2)},
                               book_equities_cad=round(per_account.get(acct, 0.0), 2),
-                              stated=stated is not None)
+                              stated_total=float(stated) if stated is not None else None,
+                              variance_cad=(round(value - float(stated), 2)
+                                            if stated is not None else None))
         assets += value
         cash += c
     for acct, b in bal.items():
