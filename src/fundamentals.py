@@ -18,6 +18,9 @@ from db import connect, config, get, dry, Heartbeat
 
 WORKERS = int(os.environ.get("WORKERS", "8"))
 BATCH = 100
+UNITS_PER_CALL = 10                       # EODHD bills a fundamentals request at ten
+RESERVE = int(os.environ.get("QUOTA_RESERVE", "3000"))   # leave room for the nightly jobs
+SWEEP_LIMIT = int(os.environ.get("SWEEP_LIMIT", "0"))    # 0 = everything; else top N by market cap
 TOLERANCE = 0.05          # |engine - revenue CAGR| floor before the engine is distrusted
 FIN_SECTORS = {"financial services", "financials", "financial"}
 FIN_WORDS = ("bank", "insur", "capital markets", "credit services", "reinsur",
@@ -366,8 +369,27 @@ def main():
                                            and e.report_date <= current_date)""")
                         fresh = {r[0] for r in cur.fetchall()}
                         targets = [t for t in targets if t not in fresh]
+                if SWEEP_LIMIT and len(targets) > SWEEP_LIMIT:
+                    # the largest names first — a partial sweep should be a defensible universe,
+                    # not an alphabetical accident
+                    cur.execute("""select ticker from universe where ticker = any(%s)
+                                   order by market_cap_usd desc nulls last limit %s""",
+                                (targets, SWEEP_LIMIT))
+                    targets = [r[0] for r in cur.fetchall()]
                 cur.execute("select ticker, currency from universe where kind='stock'")
                 quote = {r[0]: r[1] for r in cur.fetchall()}
+            # We have run out of daily quota twice. Ask before spending, and truncate the
+            # sweep rather than dying two-thirds through it.
+            try:
+                used = get("user", hb.calls).get("apiRequests", 0)
+                limit = get("user", hb.calls).get("dailyRateLimit", 100000)
+                afford = max(0, int((limit - RESERVE - used) / UNITS_PER_CALL))
+                hb.detail["quota"] = dict(used=used, limit=limit, affordable_names=afford)
+                if len(targets) > afford:
+                    hb.amber(f"quota allows {afford} of {len(targets)} names today")
+                    targets = targets[:afford]
+            except Exception as e:
+                hb.detail["quota_check_failed"] = f"{type(e).__name__}: {e}"
             hb.detail["targets"] = len(targets)
             print(f"fundamentals: sweeping {len(targets)} names, {WORKERS} workers")
 
