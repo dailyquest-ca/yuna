@@ -40,6 +40,14 @@ def main():
             common = {s["Code"] for s in syms
                       if s.get("Type")=="Common Stock" and s.get("Exchange") in {"NYSE","NASDAQ","AMEX","NYSE MKT"}}
             print(f"listing census: {len(common)} common stocks on NYSE/NASDAQ/AMEX")
+            # 1b) liquidity census: bulk last-day bars for the whole US tape (cheap)
+            bulk = get(f"https://eodhd.com/api/eod-bulk-last-day/US?api_token={K}&fmt=json", calls)
+            liquid = {}
+            for b in bulk:
+                code=b.get("code"); px=float(b.get("close") or 0); vol=float(b.get("volume") or 0)
+                if code in common and px>=4 and px*vol>=5_000_000:
+                    liquid[code]=px
+            print(f"liquidity census: {len(liquid)} names with price>=$4 and ~$5M day volume")
             # 2) screener sweep: cap >= $300M, descending, harvest industry/sector/cap
             rows={}
             ceiling=None            # screener offset caps at 999 -> descend in market-cap bands
@@ -57,14 +65,16 @@ def main():
                         code=b.get("code"); cap=float(b.get("market_capitalization") or 0)
                         if cap>0:                       # null caps must not poison the descent
                             ceiling = cap+1 if ceiling is None else min(ceiling, cap+1)
-                        if cap>=300000000 and code in common and code not in rows:
-                            rows[code]=(b.get("name"), b.get("sector") or "Unknown", b.get("industry") or "Unknown", cap)
+                        if cap>=300000000 and code in liquid and code not in rows:
+                            rows[code]=(b.get("name"), b.get("sector"), b.get("industry"), cap)
                             added+=1
                     if len(batch)<100: break
                 print(f"  sweep {sweep+1}: +{added} names, floor now ${(ceiling or 0)/1e9:.2f}B")
                 if ceiling is not None and ceiling<=300000001: break
                 if prev_ceiling is not None and ceiling is not None and ceiling>=prev_ceiling: break  # no progress
-            print(f"screener census: {len(rows)} names >= $300M cap")
+            print(f"screener decorations: {len(rows)} names carry cap/industry")
+            for code in liquid:
+                if code not in rows: rows[code]=(None,None,None,None)   # cap/industry arrive in Phase D
             # 3) upsert universe: coarse L0 membership
             if not DRY:
                 with conn.cursor() as cur:

@@ -90,7 +90,7 @@ def main():
                 for t,d,hi,lo,cl,ac,vol in cur.fetchall():
                     data.setdefault(t,[]).append((d,hi,lo,cl,ac,vol))
                 cur.execute("select ticker, industry, is_holding, in_l0 from universe where kind='stock' and status='active'")
-                meta={r[0]:{"industry":r[1] or "Unknown","hold":r[2],"l0":r[3]} for r in cur.fetchall()}
+                meta={r[0]:{"industry":r[1],"hold":r[2],"l0":r[3]} for r in cur.fetchall()}
             names=[]; feats={}
             for t,rows in data.items():
                 d=[r[0] for r in rows]
@@ -129,7 +129,8 @@ def main():
                 sub_dry[t]=-float(np.mean(vol[-10:]))/v50                          # dry-up (less volume = better)
                 hi52=float(np.max(cl[-252:]))
                 sub_prox[t]=float(cl[-1])/hi52
-                grp_ret.setdefault(meta[t]["industry"],[]).append(float(ac[-1])/float(ac[-126]) - 1 if len(ac)>=126 else np.nan)
+                ind=meta[t]["industry"]
+                if ind: grp_ret.setdefault(ind,[]).append(float(ac[-1])/float(ac[-126]) - 1 if len(ac)>=126 else np.nan)
             grp_mean={g:float(np.nanmean(v)) for g,v in grp_ret.items()}
             gs=list(grp_mean); gp=pct_rank([grp_mean[g] for g in gs]); grp_pct=dict(zip(gs,gp))
             mq_p=dict(zip(ranked,pct_rank([mq_raw[t] for t in ranked])))
@@ -147,11 +148,11 @@ def main():
                 m2 = (px>s150 and px>s200 and s150>s200 and s200>s200_21 and px>s50
                       and px>=lo52*1.30 and px>=hi52*0.75)
                 setup=float(np.mean([a_p[t],p_p[t],d_p[t],x_p[t]]))
-                mcn=float(np.mean([mq_p[t],setup,grp_pct[meta[t]["industry"]]]))
+                mcn=float(np.mean([mq_p[t],setup,(grp_pct.get(meta[t]["industry"],50.0) if meta[t]["industry"] else 50.0)]))
                 valid,pivot,blen,depth,c_low=base_scan(hi,lo,cl)
                 state="BUY" if (m2 and valid) else "WAIT"
                 stop=max(c_low,pivot*0.92) if valid else None
-                out.append(dict(t=t,mcn=mcn,mq=mq_p[t],setup=setup,grp=grp_pct[meta[t]["industry"]],m2=m2,
+                out.append(dict(t=t,mcn=mcn,mq=mq_p[t],setup=setup,grp=(grp_pct.get(meta[t]["industry"],50.0) if meta[t]["industry"] else 50.0),m2=m2,
                                 state=state,pivot=pivot if valid else None,blen=blen if valid else None,
                                 depth=depth if valid else None,c_low=c_low if valid else None,stop=stop,px=px))
             l1m=sorted([o for o in out if o["m2"]],key=lambda o:-o["mcn"])[:150]
