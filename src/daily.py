@@ -198,9 +198,12 @@ def freshness(conn):
     with conn.cursor() as cur:
         cur.execute("select max(d) from prices")
         last_bar = cur.fetchone()[0]
-        cur.execute("""select job, status, finished_at from runs
+        # the LATEST run per job, not every run in the window — a job that failed, got fixed
+        # and went green must not hold the whole machine amber for another 36 hours, because
+        # "stale data ⇒ no new tickets" would then block a perfectly good Monday
+        cur.execute("""select distinct on (job) job, status, finished_at from runs
                        where started_at > now() - interval '36 hours'
-                       order by id desc""")
+                       order by job, id desc""")
         recent = cur.fetchall()
     bad = [f"{j} {s}" for j, s, _ in recent if s in ("red", "amber")]
     stale_days = (dt.date.today() - last_bar).days if last_bar else 999
