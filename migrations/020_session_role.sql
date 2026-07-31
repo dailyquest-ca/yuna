@@ -36,10 +36,10 @@ begin
   -- For a single-user prototype the honest choice is to say so out loud rather than pretend:
   -- yuna_session is trusted with the four tables and nothing else, and the guard triggers still
   -- refuse it everywhere else even if a policy were ever added by accident.
-  alter table briefs        force row level security;
-  alter table tickets       force row level security;
-  alter table observations  force row level security;
-  alter table transactions  force row level security;
+  -- NOTE: an earlier version of this file used `force row level security` here. Never do that:
+  -- FORCE applies RLS to the table owner too, so the nightly job would lose the ability to write
+  -- its own brief. Migration 021 reverts it; the boundary needs the triggers and the grants, not
+  -- FORCE. Left as a comment rather than deleted, because the reasoning is the useful part.
 
   drop policy if exists yuna_session_rw on briefs;
   create policy yuna_session_rw on briefs to yuna_session using (true) with check (true);

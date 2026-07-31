@@ -65,6 +65,18 @@ is `roadmap-2026-07-31.md`.
     would have stopped Monday's orders. Only the price feed gates tickets. Freshness must also read
     the *latest* run per job, not every run in the window.
 
+## Postgres / Supabase, continued
+
+25. **Never `force row level security` on a table a job writes.** FORCE applies RLS to the table
+    owner as well, so the nightly job loses the ability to write its own brief — on the last line
+    of the night, after every conclusion has been computed. Plain `enable row level security` keeps
+    default-deny for anon/public and leaves the owner free; the write boundary is carried by the
+    guard triggers and the `yuna_session` grants, which is what §4.3 actually describes. Caught in
+    review, reverted in `021`, before it ever ran a night.
+26. **The Supabase MCP read can lag the database by minutes.** A run that had already finished red
+    kept reading as `running` across several queries. Judge a job by its `runs` row *and* the
+    clock, and never conclude a job is hung from an MCP read alone.
+
 ## Process
 
 19. **Green is not a result.** Every serious defect shipped green: 9 trades in two years, a $4
