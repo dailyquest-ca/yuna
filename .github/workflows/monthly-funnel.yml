@@ -1,25 +1,24 @@
-name: nightly-ingest
+name: monthly-funnel
 on:
   schedule:
-    - cron: '0 2 * * 2-6'   # 02:00 UTC Tue-Sat = Mon-Fri evenings PT
+    - cron: '0 10 * * 6'   # weekly Sat 10:00 UTC; in-job guard keeps real runs to the 1st Saturday
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: 'fetch but write nothing to prices'
+      force:
+        description: 'run census regardless of date'
         default: 'false'
 jobs:
-  ingest:
+  funnel:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install "psycopg[binary]==3.2.*"
-      - name: ingest
-        run: python src/ingest.py
+      - run: python src/funnel.py
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
-          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          FORCE: ${{ inputs.force || 'false' }}
