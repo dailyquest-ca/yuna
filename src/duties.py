@@ -251,6 +251,9 @@ class Arm:
         self.rows = []
 
     def add(self, kind, ticker, reason, **kw):
+        # urgency is NOT NULL in the schema and most callers do not pass it: protective is the
+        # exception, normal is the rule, and the default belongs here rather than at every call.
+        kw.setdefault("urgency", "normal")
         self.rows.append(dict(kind=kind, ticker=ticker, reason=reason, **kw))
         return self.rows[-1]
 
