@@ -43,7 +43,7 @@ def weekly_closes(dates, closes):
 
 
 def market_gate(dates, closes, previous=None, window=30, lookback_weeks=4):
-    """M1 v1.0 — Weinstein stage on weekly closes, latched (§3.2).
+    """M1 — Weinstein stage on weekly closes, latched (§3.2).
 
     ON when the Friday close is above the 30-week average *and* the average is no lower than it
     was 4 weeks ago. OFF when the close is below the average. Anything else holds the previous
@@ -177,7 +177,7 @@ def setup_proximity(high, low, close, volume, *, own_window=252):
 
 
 def mcn(quality_pct, setup_pct, group_pct):
-    """MCN v1.0 — three equal-weighted percentiles (§3.2)."""
+    """MCN — three equal-weighted percentiles (§3.2)."""
     parts = [p for p in (quality_pct, setup_pct, group_pct) if p is not None and not np.isnan(p)]
     return float(np.mean(parts)) if parts else np.nan
 
@@ -441,7 +441,7 @@ def effective_shares(market_cap, cap_date_close):
 
 
 def expected_return(price, *, fcf_ttm, shares, growth, fair_multiple, years=5):
-    """FCF yield + engine growth - derating drag, at price P (§3.1 Hurdle v1.0)."""
+    """FCF yield + engine growth - derating drag, at price P (§3.1 Hurdle)."""
     cap = price * shares
     if cap <= 0 or not fcf_ttm or fcf_ttm <= 0 or not fair_multiple or fair_multiple <= 0:
         return None

@@ -15,13 +15,16 @@ review, same care as a formula. A session that did not write its `briefs` row di
 
 Each session is started by a scheduled Routine whose prompt points at `docs/yuna_plan.md` and the
 runbook beside it. The prompt is deliberately a **pointer, not a copy**: the runbook is the code, and
-a prompt that restates it drifts from it. That drift is not hypothetical — until 2026-08-01 both
-scheduled Routines still ran the superseded Airtable system, read `claude/strategy.md` as law, and
-spoke a vocabulary (campaigns, ladder marks, the regime dial) that appears nowhere in this plan. They
-were rewritten and the old ones deleted.
+a prompt that restates it drifts from it — silently, and in the direction of whatever the prompt was
+written against rather than what the plan now says.
 
 **So: any change to a runbook, to §4.4, or to §5 is not finished until the Routine prompt agrees
 with it.** Review it the way you review a migration.
+
+The prompts also carry one exclusivity rule, because a session that reaches outside this system
+cannot be audited: the plan, the runbooks and the Supabase project are the whole world. Anything
+else a session is pointed at — another store, another document, another connector — is not part of
+this system, and the session says so in its output instead of using it.
 
 Cron is UTC and does not shift with daylight saving, so each pick is stated against both regimes and
 chosen to sit after the jobs it depends on. R2 fires at 04:00 UTC — after `nightly-retry` at 03:00 —

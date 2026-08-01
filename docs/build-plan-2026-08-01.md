@@ -47,16 +47,16 @@ minutes of drift.
 
 ### Set 2 — data truth and retention
 
-The scoring work is worthless on top of wrong inputs, and three of plan4's edits land here.
+The scoring work is worthless on top of wrong inputs, and three of the day's rulings land here.
 
 | Work | Why | Source |
 |---|---|---|
 | Stop the L0 rebuild wiping `universe.industry` / `market_cap_usd` | 2,108 of 2,762 names have a null industry; MCN's group strength scores a flat 50 for ~76% of the field and §2.2's 2-per-group cap files them all under `unknown` | N2 |
 | `earnings.last_reported_date`; populate `report_when` | forward-only calendar can't tell "already reported" from "gap" | item 9 |
 | Unknown statement currency → data-confidence | 24 names scored as if the currency were known | §3.0 |
-| `fundamentals` gains `dividend_ttm`, `cap_as_of`, `cap_close`, `effective_shares`; `raw` holds the **full** filing document | §3.1 frozen shares, §2.6 RRSP preference, §4.1 raw JSON in the database | plan4 |
-| `armed` becomes an append ledger with run ids + a latest-run view | §4.3 new law; also makes N3 diagnosable instead of lucky | plan4, N3 |
-| **Backfill job** — 10-year bars · dividend history · full fundamentals raw | §4.1's window moves 3 → 10 years; TTM yield needs 12 months of dividends and we hold one day | plan4 |
+| `fundamentals` gains `dividend_ttm`, `cap_as_of`, `cap_close`, `effective_shares`; `raw` holds the **full** filing document | §3.1 frozen shares, §2.6 RRSP preference, §4.1 raw JSON in the database | §4.1 |
+| `armed` becomes an append ledger with run ids + a latest-run view | §4.3 new law; also makes N3 diagnosable instead of lucky | §4.3, N3 |
+| **Backfill job** — 10-year bars · dividend history · full fundamentals raw | §4.1's window moves 3 → 10 years; TTM yield needs 12 months of dividends and we hold one day | §4.1 |
 
 **Backfill budget, measured:** ~2,762 L0 names × (1 bar-history call + 1 dividend call + 1
 fundamentals call at 10 units) ≈ **33,100 units of the 100,000/day**, leaving the §4.1 reserve
@@ -124,7 +124,7 @@ seven) → production re-score → `verify` until clean → trial run → audit.
 
 1. **§4.0 says "11 tables"; §4.3 now lists 12** — `armed` was added to the table without bumping the
    count in the map above it.
-2. **`score.py`'s module docstring declares a deviation that plan4 just repealed** — the 5-yr median
+2. **`score.py`'s module docstring declares a deviation the 10-year window repeals** — the 5-yr median
    P/FCF fallback existed because we held three years of bars. With ten, it computes from source. The
    docstring goes when Set 2's backfill lands.
 
