@@ -494,18 +494,53 @@ def displaceable(challenger_score, incumbents, *, margin=10.0):
     return None
 
 
-def compounder_add(*, ccn_score, price, hurdle, adds_this_year, enter=70.0, max_adds=2):
-    """Averaging down (§3.1): 5-15% below the hurdle adds 50% of original size, more than 15%
-    below adds 100%. Two adds per name per 12 months; crash-protocol tactical adds are exempt
-    and are not counted by this function."""
+def compounder_add(*, ccn_score, price, hurdle, entry_fill, adds_this_year, enter=70.0,
+                   max_adds=2):
+    """Averaging down (§3.1, as amended 2026-08-01).
+
+    Three conditions, not two: CCN >= 70, price below the hurdle, **and price below the entry fill**.
+    The bands measure from the FILL — 5-15% below it adds 50% of original size, beyond 15% adds
+    100% — which is what makes entry day arm nothing however deep the gap to hurdle already is. A
+    position bought at a 30% discount to its hurdle used to arm a 100% add the same evening, before
+    the thesis had been tested by a single session.
+
+    Two adds per name per 12 months; crash-protocol tactical adds are exempt and uncounted here.
+    """
     if ccn_score is None or ccn_score < enter or not hurdle or hurdle <= 0:
         return None
-    below = (hurdle - price) / hurdle
+    if not entry_fill or entry_fill <= 0:
+        return None                       # no fill recorded — the bands have no origin to measure from
+    if price >= hurdle:
+        return None
+    below = (entry_fill - price) / entry_fill
     if below < 0.05:
         return None
     if adds_this_year >= max_adds:
         return dict(fraction=None, blocked="§3.1 — two adds already this year", below=below)
     return dict(fraction=0.5 if below <= 0.15 else 1.0, blocked=None, below=below)
+
+
+def whole_shares(*, target_pct, nav, price_cad, band=(0.12, 0.15)):
+    """Compounder share count — **ceil into the band** (§3.1 sizing, dev-fix 16).
+
+    The target weight is the §3.1 size. Flooring a fractional share count lands the position *below*
+    target — a 12% target that floors to 11.7% is outside the 12-15 band the plan sets — so the count
+    rounds up whenever up still fits inside the band, and only falls back to down when it does not.
+
+    Momentum does the opposite and floors, deliberately: there the risk budget is a ceiling on how
+    much NAV a stop-out may cost, and rounding up would spend more than the budget allows.
+
+    Worked, at NAV 200,954.12 and FX 1.402: MEDP at 577.11 wants 29.80 shares -> 30 (12.08%);
+    VEEV at 203.78 wants 84.41 -> 85 (12.09%). Both land inside the band, above target.
+    """
+    if not nav or not price_cad or price_cad <= 0 or not target_pct:
+        return None
+    exact = target_pct * nav / price_cad
+    up, down = math.ceil(exact), math.floor(exact)
+    for qty in (up, down):
+        if qty >= 1 and band[0] <= qty * price_cad / nav <= band[1]:
+            return qty
+    return down if down >= 1 else None
 
 
 # ---------------------------------------------------------------------------- independence

@@ -104,7 +104,10 @@ def nav_cad(cur):
     per_ticker, per_account = {}, {}
     for acct, tk, ccy, qty, close in cur.fetchall():
         cad = float(qty) * float(close) * (fx if ccy == "USD" else 1.0)
-        per_ticker[tk] = cad
+        # accumulate, never assign. §2.6's one-position-one-account rule should make a ticker in two
+        # accounts impossible, but NAV must report what the book actually holds rather than what the
+        # rules say it should — an assignment silently dropped every lot but the last.
+        per_ticker[tk] = per_ticker.get(tk, 0.0) + cad
         per_account[acct] = per_account.get(acct, 0.0) + cad
     book_equities = sum(per_account.values())
 
@@ -149,6 +152,67 @@ def nav_cad(cur):
     return dict(nav=assets - debt, assets=assets, cash=cash, debt=debt, fx=fx,
                 book_equities=book_equities, per_ticker=per_ticker, accounts=accounts,
                 anchored=anchored, balances_captured=bool(bal))
+
+
+VALUATION_TOLERANCE = 0.005          # half a cent
+
+
+def valuation_canary(cur, *, tolerance=VALUATION_TOLERANCE):
+    """§4.2, new law: every holding's valuation price must equal its latest `prices` bar.
+
+    Returns the mismatches. The caller fails the run on any — **red, not amber**: a NAV built on a
+    stale price is not a degraded number, it is a wrong one, and every weight, cap check and share
+    count downstream inherits it.
+
+    Deliberately re-derived rather than trusted. `nav_cad` already joins the latest bar, so this can
+    only fire if the join changes, a cache appears, or a snapshot date creeps in — which is exactly
+    the class of change nobody notices until a brief prints the wrong number.
+    """
+    cur.execute("""select b.ticker, b.qty, p.close, p.d
+                     from book b
+                     join lateral (select close, d from prices where ticker = b.ticker
+                                    order by d desc limit 1) p on true
+                    where b.status = 'open'""")
+    latest = {r[0]: (float(r[2]), r[3]) for r in cur.fetchall()}
+
+    cur.execute("""select b.ticker, p.close
+                     from book b
+                     join lateral (select close from prices where ticker = b.ticker
+                                    order by d desc limit 1) p on true
+                    where b.status = 'open'""")
+    bad = []
+    for ticker, used in cur.fetchall():
+        want, bar_date = latest.get(ticker, (None, None))
+        if want is None or used is None or abs(float(used) - want) > tolerance:
+            bad.append(dict(ticker=ticker, valued_at=float(used) if used is not None else None,
+                            latest_bar=want, bar_date=str(bar_date) if bar_date else None))
+    return bad
+
+
+def quantity_canary(cur, *, stale_days=9):
+    """The canary §4.2's price check cannot provide — a share count nobody has confirmed.
+
+    The AVGO alarm that started this work was reported as a stale price. It was not: the price was
+    correct to the penny and the *quantity* in the report was wrong. A price check would have passed
+    it, and would pass it again. §4.5 step 5 has Zak confirm settled positions every Sunday, so a
+    book quantity whose last confirmation is older than that is the thing to name.
+
+    Returns positions with no confirming transaction inside the window. Amber, not red: an
+    unconfirmed quantity is a reason to distrust NAV, not a reason to stop protecting the book.
+    """
+    cur.execute("""select b.ticker, b.account, b.qty, b.updated_at::date,
+                          (select max(t.trade_date) from transactions t
+                            where t.ticker = b.ticker and t.account = b.account) as last_confirmed
+                     from book b
+                    where b.status = 'open'""")
+    stale = []
+    for ticker, account, qty, updated, confirmed in cur.fetchall():
+        age = (dt.date.today() - confirmed).days if confirmed else None
+        if age is None or age > stale_days:
+            stale.append(dict(ticker=ticker, account=account, qty=float(qty),
+                              last_confirmed=str(confirmed) if confirmed else None,
+                              days_since=age))
+    return stale
 
 
 class Heartbeat:

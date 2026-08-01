@@ -15,7 +15,12 @@ import sys
 
 import numpy as np
 
-from db import connect, config, dry, get, jsonb, nav_cad, observe, Heartbeat
+from db import (connect, config, dry, get, jsonb, nav_cad, observe, Heartbeat,
+                valuation_canary, quantity_canary)
+
+
+class ValuationMismatch(RuntimeError):
+    """§4.2: a holding priced off anything but its latest bar fails the run, red."""
 import signals as sg
 
 CAL_DAYS = 45
@@ -393,7 +398,8 @@ class Arm:
         if dry():
             return len(self.rows)
         cols = ("run_id kind ticker sleeve account reason urgency order_type trigger_price "
-                "limit_price stop stop_limit_price qty size_pct score blocked_by note detail").split()
+                "limit_price stop stop_limit_price qty size_pct score blocked_by note detail "
+                "currency fx_estimate risk_cad risk_pct_nav").split()
         with conn.cursor() as cur:
             # §4.3 legislates `armed` as an append ledger stamped with run ids. It used to be
             # truncated here, so the machine's own record of what it proposed lasted exactly one
@@ -590,6 +596,11 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
             for tk, trig, lim, stop, mcn, industry, report, held in cur.fetchall():
                 if held:
                     continue
+                # §3.2: "MCN < 70 never tickets — BUY-state names below 70 stay queued." Not a
+                # blocked_by, which still prints a ticket the session must reason about: the row is
+                # never armed at all. Production armed RS at 63.9 and four more below 70.
+                if mcn is None or float(mcn) < caps["min_mcn"]:
+                    continue
                 trig = float(trig)
                 stop = float(stop) if stop is not None else trig * (1 - caps["max_stop"])
                 dist = max((trig - stop) / trig, 1e-4)
@@ -631,12 +642,19 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                 # buys half; `target_qty` on the resulting book row is what steps 2 and 3 size off.
                 first = sg.entry_order(trig, stop, limit_over=caps["limit_over"],
                                        max_stop=caps["max_stop"])
+                # §5.1: risk in C$ AND % of NAV, converted to CAD *before* the percentage. Dividing
+                # a USD risk by a CAD NAV understates it by the whole FX rate — the trial printed
+                # 0.16% where the truth was 0.24%.
+                entry_qty = int(full_qty * first["fraction"]) if full_qty else None
+                risk_cad = (entry_qty * (trig - stop) * fx) if entry_qty and fx else None
                 arm.add("entry", tk, "trigger", sleeve="momentum", account="TFSA",
                         order_type="stop_limit", trigger_price=trig,
                         limit_price=float(lim) if lim else first["limit"], stop=stop,
                         stop_limit_price=stop * (1 - caps["buffer"]),
                         size_pct=size["size_pct"] * first["fraction"], score=score,
-                        qty=int(full_qty * first["fraction"]) if full_qty else None,
+                        qty=entry_qty,
+                        currency="USD", fx_estimate=fx, risk_cad=risk_cad,
+                        risk_pct_nav=(risk_cad / nav) if risk_cad and nav else None,
                         blocked_by=blocked,
                         note=(f"MCN {score:.1f} · stop {dist:.1%} away · "
                               f"{first['fraction']:.0%} of a {size['size_pct']:.1%} full position"
@@ -649,9 +667,17 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
         # ---- compounders: price at or below an approved bench name's hurdle
         # adds are counted from the ledger inside a rolling 12 months, never from a stored counter:
         # a counter that only increments quietly becomes a permanent block after two adds ever.
+        # per-account investable cash — §2.6's "one position, one account, one order" needs to know
+        # which account can fund a whole position before it names one
+        cur.execute("""select distinct on (b.account) b.account, a.kind,
+                              coalesce(b.cash_cad,0) + coalesce(b.cash_usd,0) * %s
+                         from balances b join accounts a on a.code=b.account
+                        order by b.account, b.as_of desc, b.id desc""", (fx,))
+        account_cash = {r[0]: float(r[2]) for r in cur.fetchall() if r[1] != "facility"}
+
         cur.execute("""select b.ticker, b.ccn, b.hurdle_price, b.last_close, b.gap_to_hurdle,
                               b.data_confidence, u.industry, e.report_date, k.id, k.qty,
-                              k.avg_cost,
+                              k.avg_cost, b.engine_provenance, d.dps_ttm, k.entry_fill,
                               (select count(*) from transactions t
                                  where t.ticker = b.ticker and t.side='buy'
                                    and t.trade_date > current_date - interval '12 months'
@@ -660,6 +686,7 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                        from bench b
                        join universe u on u.ticker=b.ticker
                        left join book k on k.ticker=b.ticker and k.status='open'
+                       left join v_dividend_ttm d on d.ticker=b.ticker
                        left join lateral (select report_date from earnings
                                           where ticker=b.ticker and report_date >= current_date
                                           order by report_date limit 1) e on true
@@ -667,24 +694,34 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                          and b.last_close is not null and b.last_close <= b.hurdle_price
                        order by b.ccn desc""")
         for (tk, ccn_score, hurdle, px, gap, confidence, industry, report, held, hqty, hcost,
-             adds, hacct) in cur.fetchall():
+             provenance, dps_ttm, entry_fill, adds, hacct) in cur.fetchall():
             ccn_score = float(ccn_score) if ccn_score is not None else None
             px, hurdle = float(px), float(hurdle)
             in_bo = sg.in_blackout(dt.date.today(), report, holidays=holidays)
+            price_cad = px * fx if fx else px
+            # §3.1 marks growth-derived engines on every memo and ticket that cites them; the flag
+            # rides on the armed row so no session has to remember, or free-text it wrong.
+            engine_note = ("engine growth-derived (observed 3-yr revenue growth, capped) — measured "
+                           "engine failed the ±5pp cross-check; §3.3 guardrails apply"
+                           if provenance == "growth-derived" else None)
             if held:
                 add = sg.compounder_add(ccn_score=ccn_score, price=px, hurdle=hurdle,
+                                        entry_fill=float(entry_fill) if entry_fill else None,
                                         adds_this_year=adds or 0, max_adds=caps["max_adds"])
                 if not add:
                     continue
                 blocked = add["blocked"] or ("§3.3 — earnings blackout" if in_bo else None)
+                add_pct = caps["flat"] * (add["fraction"] or 0)
                 arm.add("add", tk, "hurdle", sleeve="compounders", account=hacct,
                         order_type="limit", limit_price=px, score=ccn_score,
-                        size_pct=(caps["flat"] * (add["fraction"] or 0)),
-                        qty=int(caps["flat"] * (add["fraction"] or 0) * nav / (px * fx))
-                        if nav and fx else None,
+                        size_pct=add_pct,
+                        qty=int(add_pct * nav / price_cad) if nav and price_cad else None,
                         blocked_by=blocked,
-                        note=f"{add['below']:.0%} below hurdle — §3.1 adds "
-                             f"{(add['fraction'] or 0):.0%} of original size")
+                        note=f"{add['below']:.0%} below the entry fill — §3.1 adds "
+                             f"{(add['fraction'] or 0):.0%} of original size"
+                             + (f" · {engine_note}" if engine_note else ""),
+                        detail=dict(entry_fill=float(entry_fill) if entry_fill else None,
+                                    engine_provenance=provenance))
                 continue
             size_pct = caps["flat"]
             room = caps["ceilings"]["compounders"] * nav - exposure.get("compounders", 0.0)
@@ -713,15 +750,49 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                 blocked = f"§3.3 — earnings blackout ({report})"
             elif confidence not in ("full", None):
                 blocked = f"§3.3 — scored {confidence}: manual sign-off before sizing"
-            arm.add("entry", tk, "hurdle", sleeve="compounders", account="RRSP",
-                    order_type="limit", limit_price=px, score=ccn_score, size_pct=size_pct,
-                    qty=int(size_pct * nav / (px * fx)) if nav and fx else None,
-                    blocked_by=blocked,
-                    note=(f"CCN {ccn_score:.1f} · hurdle {hurdle:.2f} · {abs(gap or 0):.0%} below"
-                          + (f" · swap out {swap['ticker']}" if swap else ""))
+
+            # §3.1 sizing: whole shares that CEIL into the band — flooring lands the position below
+            # its own target weight, which is outside the 12-15 band the plan sets.
+            qty = sg.whole_shares(target_pct=size_pct, nav=nav, price_cad=price_cad,
+                                  band=caps["band"]) if nav and price_cad else None
+            cost_cad = qty * price_cad if qty else None
+
+            # §2.6 placement. Momentum owns the TFSA outright and compounders take everything else,
+            # so the TFSA is the default home; a US name yielding >= 1% trailing prefers the RRSP,
+            # where US dividend withholding is treaty-exempt instead of leaking 15%. Then
+            # "one position, one account, one order": the first account in preference order whose
+            # cash funds the WHOLE position gets it. Never split, never assume a top-up — the trial
+            # routed C$24,698 at RRSP holding C$22,747 and simply asserted the difference.
+            yield_ttm = (float(dps_ttm) / px) if dps_ttm and px else None
+            prefers_rrsp = yield_ttm is not None and yield_ttm >= caps["rrsp_yield"]
+            order = ["RRSP", "TFSA"] if prefers_rrsp else ["TFSA", "RRSP"]
+            account = next((a for a in order if cost_cad and account_cash.get(a, 0) >= cost_cad),
+                           None)
+            if account is None and not blocked:
+                short = ", ".join(f"{a} C${account_cash.get(a, 0):,.0f}" for a in order)
+                blocked = (f"§2.6 — no account can fund the whole C${cost_cad or 0:,.0f} position "
+                           f"({short}); one position, one account, one order")
+
+            arm.add("entry", tk, "hurdle", sleeve="compounders", account=account or order[0],
+                    # §3.1: a GTC buy LIMIT at the hurdle. It fills anywhere at or below, waits
+                    # above, and is cancelled and replaced only when a filing moves the hurdle —
+                    # never on a quote move. A day limit could miss while the name sat below.
+                    order_type="gtc_limit", limit_price=hurdle, score=ccn_score, size_pct=size_pct,
+                    qty=qty, blocked_by=blocked,
+                    # compounders carry no stop (§3.1), so there is no stop-distance risk to print;
+                    # the currency and the FX the share count was struck at still belong on the row
+                    currency=("CAD" if tk.endswith(".TO") else "USD"), fx_estimate=fx,
+                    note=(f"CCN {ccn_score:.1f} · GTC limit at the hurdle {hurdle:.2f} · "
+                          f"{abs(gap or 0):.0%} below"
+                          + (f" · swap out {swap['ticker']}" if swap else "")
+                          + (f" · {engine_note}" if engine_note else ""))
                     if ccn_score else None,
                     detail=dict(theme_weights=theme_weight, industry=industry,
-                                swap_out=swap["ticker"] if swap else None))
+                                swap_out=swap["ticker"] if swap else None,
+                                engine_provenance=provenance,
+                                dividend_yield_ttm=yield_ttm, prefers_rrsp=prefers_rrsp,
+                                account_cash={a: account_cash.get(a) for a in order},
+                                cost_cad=cost_cad, fx=fx))
     return blocked_note
 
 
@@ -890,6 +961,13 @@ def main():
                     # theme — it ships the current theme weights on every armed row and R1 enforces
                     # the 35% cap. Reading the config here would look like enforcement and be none.
                     max_adds=int(config(cur, "max_adds_per_year", 2)),
+                    # §3.2: BUY-state names under 70 stay queued and never ticket.
+                    min_mcn=float((config(cur, "score_thresholds", {}) or {}).get("enterable", 70)),
+                    # §2.6: a US compounder with a trailing-12-month yield at or above this prefers
+                    # the RRSP — US dividend withholding is treaty-exempt there and leaks 15% in the
+                    # TFSA. Below it, placement follows the TFSA-first default.
+                    rrsp_yield=float(config(cur, "rrsp_yield_preference", 0.01)),
+                    band=tuple(config(cur, "compounder_band", [0.12, 0.15])),
                     ceilings=config(cur, "sleeve_ceiling", {"compounders": 0.6, "momentum": 0.4}),
                     max_positions=int((config(cur, "max_positions", {"max": 9}) or {}).get("max", 9)),
                     limit_over=float(config(cur, "entry_limit_over_pivot", 0.02)),
@@ -929,6 +1007,21 @@ def main():
 
             with conn.cursor() as cur:
                 n = nav_cad(cur)
+                # §4.2: the book is revalued from the night's bars, and "every holding's valuation
+                # price must equal its latest bar; any mismatch fails the run". Red, not amber —
+                # a wrong NAV is not a degraded number, and everything downstream inherits it.
+                mispriced = valuation_canary(cur)
+                unconfirmed = quantity_canary(cur)
+            if mispriced:
+                raise ValuationMismatch(
+                    "book valuation disagrees with the latest bars (§4.2): "
+                    + "; ".join(f"{m['ticker']} valued {m['valued_at']} vs bar "
+                                f"{m['latest_bar']} on {m['bar_date']}" for m in mispriced))
+            if unconfirmed:
+                hb.amber("unconfirmed book quantities (§4.5 step 5): "
+                         + ", ".join(f"{u['ticker']}/{u['account']} {u['qty']:g} — last confirmed "
+                                     f"{u['last_confirmed'] or 'never'}" for u in unconfirmed))
+                hb.detail["unconfirmed_quantities"] = unconfirmed
             nav, fx = n["nav"], n["fx"]
             bets = book_effective_bets(conn, bars, fx)
 

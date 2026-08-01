@@ -371,14 +371,15 @@ def test_a_name_that_cannot_clear_the_floor_has_no_hurdle():
 
 
 def test_averaging_down_uses_fixed_tiers():
-    """S1-S5 replaced the 25-50% range with fixed 50% / 100% tiers."""
-    assert s.compounder_add(ccn_score=75, price=90.0, hurdle=100.0, adds_this_year=0)["fraction"] \
+    """S1-S5 replaced the 25-50% range with fixed 50% / 100% tiers. Measured from the entry fill
+    since 2026-08-01, so every case here carries one."""
+    assert s.compounder_add(ccn_score=75, price=90.0, hurdle=100.0, entry_fill=100.0, adds_this_year=0)["fraction"] \
         == pytest.approx(0.5)
-    assert s.compounder_add(ccn_score=75, price=80.0, hurdle=100.0, adds_this_year=0)["fraction"] \
+    assert s.compounder_add(ccn_score=75, price=80.0, hurdle=100.0, entry_fill=100.0, adds_this_year=0)["fraction"] \
         == pytest.approx(1.0)
-    assert s.compounder_add(ccn_score=75, price=98.0, hurdle=100.0, adds_this_year=0) is None
-    assert s.compounder_add(ccn_score=60, price=80.0, hurdle=100.0, adds_this_year=0) is None
-    assert s.compounder_add(ccn_score=75, price=80.0, hurdle=100.0, adds_this_year=2)["fraction"] \
+    assert s.compounder_add(ccn_score=75, price=98.0, hurdle=100.0, entry_fill=100.0, adds_this_year=0) is None
+    assert s.compounder_add(ccn_score=60, price=80.0, hurdle=100.0, entry_fill=100.0, adds_this_year=0) is None
+    assert s.compounder_add(ccn_score=75, price=80.0, hurdle=100.0, entry_fill=100.0, adds_this_year=2)["fraction"] \
         is None
 
 
@@ -649,3 +650,52 @@ def test_a_nonsense_split_is_no_split():
     """A ratio we cannot read must not silently become 1.0 and quietly leave a stop stranded."""
     for bad in (None, {}, {"split": ""}, {"split": "x/y"}, {"split": "1/0"}, {"split": "0"}):
         assert s.split_ratio(bad) is None
+
+
+# --------------------------------------------------------------------------- §3.1 adds from the fill
+
+def test_entry_day_arms_nothing_however_deep_the_hurdle_gap():
+    """§3.1 as amended: the bands measure from the entry fill. A position bought 30% below its
+    hurdle used to arm a 100% add the same evening, before one session had tested the thesis."""
+    assert s.compounder_add(ccn_score=80.0, price=100.0, hurdle=143.0, entry_fill=100.0,
+                            adds_this_year=0) is None
+
+
+def test_add_bands_measure_from_the_fill_not_the_hurdle():
+    half = s.compounder_add(ccn_score=80.0, price=90.0, hurdle=143.0, entry_fill=100.0,
+                            adds_this_year=0)
+    assert half["fraction"] == 0.5 and half["below"] == pytest.approx(0.10)
+    full = s.compounder_add(ccn_score=80.0, price=80.0, hurdle=143.0, entry_fill=100.0,
+                            adds_this_year=0)
+    assert full["fraction"] == 1.0
+
+
+def test_an_add_still_needs_the_price_below_the_hurdle():
+    """Below the fill but back above the hurdle is not a discount to fair value."""
+    assert s.compounder_add(ccn_score=80.0, price=90.0, hurdle=85.0, entry_fill=100.0,
+                            adds_this_year=0) is None
+
+
+def test_no_recorded_fill_means_no_add():
+    """Never assume a missing value (§3.3) — without a fill the bands have no origin."""
+    assert s.compounder_add(ccn_score=80.0, price=80.0, hurdle=143.0, entry_fill=None,
+                            adds_this_year=0) is None
+
+
+# --------------------------------------------------------------------------- dev-fix 16 · sizing
+
+def test_compounder_shares_ceil_into_the_band():
+    """The plan's own worked example, at the NAV that reconciles: 200,954.12 and FX 1.402."""
+    nav = 200954.12
+    assert s.whole_shares(target_pct=0.12, nav=nav, price_cad=577.11 * 1.402) == 30
+    assert s.whole_shares(target_pct=0.12, nav=nav, price_cad=203.78 * 1.402) == 85
+
+
+def test_a_share_too_expensive_to_land_in_the_band_never_overshoots():
+    """At 9,000 a share against a 100,000 NAV, one share is 9% and two are 18% — nothing lands in
+    the 12-15 band. The count floors rather than rounding up: overshooting would spend more NAV than
+    the band permits, and the caller's floor and cap checks are what block the ticket."""
+    nav = 100000.0
+    qty = s.whole_shares(target_pct=0.12, nav=nav, price_cad=9000.0)
+    assert qty == 1                       # the floor, not the ceiling
+    assert qty * 9000.0 / nav < 0.12      # and the caller sees it is under the band
