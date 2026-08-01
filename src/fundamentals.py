@@ -362,17 +362,26 @@ def freeze_effective_shares(conn, tickers):
     if dry():
         return 0
     with conn.cursor() as cur:
-        cur.execute("""update fundamentals f
-                          set cap_close = p.close,
-                              effective_shares = f.market_cap / p.close
-                        from lateral (select close from prices
-                                       where ticker = f.ticker and d <= f.cap_as_of
-                                       order by d desc limit 1) p
-                       where f.ticker = any(%s)
-                         and f.market_cap is not null and f.market_cap > 0
-                         and f.cap_as_of is not null
-                         and p.close > 0
-                         and f.effective_shares is null""", (list(tickers),))
+        # The close is per-row ("the last bar at or before this filing's cap date"), which wants a
+        # correlated lookup — but an UPDATE's own target cannot be referenced from a LATERAL in its
+        # FROM clause, so the correlation happens inside a CTE and the UPDATE joins that. Production
+        # rejected the lateral form outright; this is the shape Postgres actually allows.
+        cur.execute("""with px as (
+                         select f.ticker, f.filing_date, f.market_cap,
+                                (select p.close from prices p
+                                  where p.ticker = f.ticker and p.d <= f.cap_as_of
+                                  order by p.d desc limit 1) as close
+                           from fundamentals f
+                          where f.ticker = any(%s)
+                            and f.market_cap is not null and f.market_cap > 0
+                            and f.cap_as_of is not null
+                            and f.effective_shares is null)
+                       update fundamentals f
+                          set cap_close = px.close,
+                              effective_shares = px.market_cap / px.close
+                         from px
+                        where px.ticker = f.ticker and px.filing_date = f.filing_date
+                          and px.close is not null and px.close > 0""", (list(tickers),))
         n = cur.rowcount
     conn.commit()
     return n

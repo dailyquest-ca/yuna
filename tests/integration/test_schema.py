@@ -35,3 +35,26 @@ def test_the_session_writable_tables_are_not_guarded(db):
                        where p.proname = 'yuna_jobs_only' and not t.tgisinternal""")
         guarded = {r[0] for r in cur.fetchall()}
     assert not guarded & {"briefs", "tickets", "observations", "transactions", "config"}
+
+
+def test_latest_view_exposes_every_fundamentals_column(db):
+    """A view's projection is frozen at creation, so adding a column to `fundamentals` does not add
+    it to `v_fundamentals_latest` — and every reader in the system goes through the view. That gap
+    is silent: the column exists, the writes succeed, and the readers see nothing.
+
+    It happened for real. Migration 026 added cap_as_of, cap_close, effective_shares and raw_doc;
+    the view still carried its original hand-written list, so the hurdle's frozen share count was
+    unreadable by `score` the moment it was written. This test is the reason it cannot recur.
+    """
+    with db.cursor() as cur:
+        cur.execute("""select column_name from information_schema.columns
+                       where table_schema='public' and table_name=%s""", ("fundamentals",))
+        table = {r[0] for r in cur.fetchall()}
+        cur.execute("""select column_name from information_schema.columns
+                       where table_schema='public' and table_name=%s""", ("v_fundamentals_latest",))
+        view = {r[0] for r in cur.fetchall()}
+    assert table, "fundamentals has no columns — migrations did not run"
+    missing = table - view
+    assert not missing, (
+        f"v_fundamentals_latest cannot see {sorted(missing)} — recreate the view when the table gains "
+        f"columns, or readers get silent nulls")
