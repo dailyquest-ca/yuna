@@ -19,6 +19,8 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+os.environ.setdefault("EODHD_API_KEY", "integration-stub-never-called")
+
 pytest.importorskip("psycopg")
 import psycopg                                                            # noqa: E402
 

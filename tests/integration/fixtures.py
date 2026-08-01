@@ -96,7 +96,7 @@ def queued(cur, ticker, *, source="momentum", state="BUY", trigger=110.0, stop=1
 
 def position(cur, ticker, *, account="TFSA", sleeve="momentum", qty=100, cost=110.0, stop=101.2,
              step=1, pivot=110.0, target=200, opened_days_ago=3, confirmed=None, theme="test theme",
-             stalled_days_ago=None):
+             stalled_days_ago=None, entry_fill=None):
     # counted in TRADING days from the last session, not calendar days from today. A position
     # "opened today" on a Saturday has no bar on or after its opening date, so the breakout
     # classifier finds nothing and the suite fails every weekend — which is how a suite teaches
@@ -105,13 +105,14 @@ def position(cur, ticker, *, account="TFSA", sleeve="momentum", qty=100, cost=11
     opened = sessions[-1 - min(opened_days_ago, len(sessions) - 1)]
     stalled = (dt.date.today() - dt.timedelta(days=stalled_days_ago)
                if stalled_days_ago is not None else None)
-    cur.execute("""insert into book (ticker,account,sleeve,lot,qty,avg_cost,currency,opened_at,
-                                     stop,stop_limit,highest_close,trail_mode,pyramid_step,theme,
-                                     pivot,target_qty,confirmed,pyramid_stalled_since,status)
-                   values (%s,%s,%s,'core',%s,%s,'USD',%s,%s,%s,%s,'initial',%s,%s,%s,%s,%s,%s,
+    cur.execute("""insert into book (ticker,account,sleeve,lot,qty,avg_cost,entry_fill,currency,
+                                     opened_at,stop,stop_limit,highest_close,trail_mode,
+                                     pyramid_step,theme,pivot,target_qty,confirmed,
+                                     pyramid_stalled_since,status)
+                   values (%s,%s,%s,'core',%s,%s,%s,'USD',%s,%s,%s,%s,'initial',%s,%s,%s,%s,%s,%s,
                            'open') returning id""",
-                (ticker, account, sleeve, qty, cost, opened, stop,
-                 stop * 0.97 if stop is not None else None, cost, step, theme,
+                (ticker, account, sleeve, qty, cost, entry_fill if entry_fill is not None else cost,
+                 opened, stop, stop * 0.97 if stop is not None else None, cost, step, theme,
                  pivot, target, confirmed, stalled))
     return cur.fetchone()[0]
 

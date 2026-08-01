@@ -41,3 +41,10 @@ update book b
            order by t.trade_date, t.id limit 1),
          b.avg_cost)
  where b.entry_fill is null and b.status = 'open';
+
+-- `armed` gained four columns, and `v_armed_latest` was created with `select a.*` — which Postgres
+-- froze at creation. Recreate it, for the same reason 027 had to recreate v_fundamentals_latest:
+-- every session reads the view, so a column the view cannot see does not exist to them.
+create or replace view v_armed_latest as
+  select a.* from armed a
+  where a.run_id = (select max(run_id) from armed);

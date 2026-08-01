@@ -32,8 +32,9 @@ def run():
 
 
 def armed(conn, kind=None, ticker=None):
-    q = "select kind,ticker,sleeve,reason,urgency,trigger_price,limit_price,stop,qty,size_pct," \
-        "score,blocked_by,note,detail from armed where true"
+    q = "select kind,ticker,sleeve,account,reason,urgency,order_type,trigger_price,limit_price," \
+        "stop,qty,size_pct,score,blocked_by,note,detail,currency,fx_estimate,risk_cad," \
+        "risk_pct_nav from armed where true"
     args = []
     if kind:
         q += " and kind=%s"; args.append(kind)
@@ -520,7 +521,12 @@ def test_an_unapproved_bench_name_at_its_hurdle_arms_nothing(db, fx):
 
 
 def test_an_approved_name_below_its_hurdle_arms_a_full_size_entry(db, fx):
-    """Compounders enter at full size in a single order (§3.1) — no pyramid, no half position."""
+    """Compounders enter at full size in a single order (§3.1) — no pyramid, no half position.
+
+    The order is a **GTC buy limit at the hurdle**, not a day limit at the last close: it fills
+    anywhere at or below the hurdle, waits above it, and is cancelled and replaced only when a
+    filing moves the hurdle. A day limit could expire while the name sat below it all week.
+    """
     with db.cursor() as cur:
         world.add_name(cur, "CMP.US")
         world.flat_then_base(cur, "CMP.US", level=95.0)
@@ -532,7 +538,10 @@ def test_an_approved_name_below_its_hurdle_arms_a_full_size_entry(db, fx):
     row = armed(db, "entry", "CMP.US")[0]
     assert row["sleeve"] == "compounders" and row["blocked_by"] is None
     assert row["size_pct"] == pytest.approx(0.12)        # §3.1 flat 12% until an R5 ruling
-    assert row["limit_price"] == pytest.approx(95.0)
+    assert row["order_type"] == "gtc_limit"
+    assert row["limit_price"] == pytest.approx(100.0)    # the hurdle, not the quote
+    assert row["account"] in ("TFSA", "RRSP")            # §2.6 chose one that can fund it whole
+    assert row["currency"] == "USD" and row["fx_estimate"] is not None
 
 
 def test_a_partially_scored_compounder_needs_manual_sign_off(db, fx):
@@ -880,3 +889,30 @@ def test_the_brief_carries_the_api_quota(db, fx, monkeypatch):
         amber = cur.fetchone()[0]
     assert quota["fraction"] == pytest.approx(0.85)
     assert "quota at 85%" in str(amber)
+
+
+def test_one_name_one_score_across_candidates_and_queue(db, fx):
+    """Dev-fix 6, pinned: NUE was written at 77.0 in `candidates` and 63.9 in `queue` in the same
+    run. The queue COPIES the candidate score; it never recomputes. Nothing else can be true of a
+    single name in a single run, and only a test keeps it that way."""
+    with db.cursor() as cur:
+        cur.execute("""select c.ticker, c.mcn, q.mcn from candidates c
+                       join queue q on q.ticker = c.ticker
+                       where c.mcn is not null and q.mcn is not null""")
+        disagree = [(t, float(a), float(b)) for t, a, b in cur.fetchall()
+                    if abs(float(a) - float(b)) > 1e-9]
+    assert not disagree, f"one name carrying two scores in one run: {disagree}"
+
+
+def test_a_below_seventy_name_never_arms_an_entry(db, fx):
+    """§3.2: 'MCN < 70 never tickets — BUY-state names below 70 stay queued.' Not blocked_by, which
+    still prints a row the session must reason about. Production armed RS at 63.9."""
+    with db.cursor() as cur:
+        world.add_name(cur, "WEAK.US")
+        world.flat_then_base(cur, "WEAK.US")
+        world.gate(cur)
+        world.queued(cur, "WEAK.US", mcn=63.9)
+        world.balances(cur)
+    db.commit()
+    run()
+    assert armed(db, "entry", "WEAK.US") == []
