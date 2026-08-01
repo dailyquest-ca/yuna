@@ -58,3 +58,38 @@ def test_latest_view_exposes_every_fundamentals_column(db):
     assert not missing, (
         f"v_fundamentals_latest cannot see {sorted(missing)} — recreate the view when the table gains "
         f"columns, or readers get silent nulls")
+
+
+def test_the_extractor_can_write_every_column_it_builds(db):
+    """`fundamentals.COLS` is the insert's column list. Every name in it must exist on the table.
+
+    This is the cheapest test in the suite and it earned its place expensively: three Durability
+    columns were wired into the extractor without a migration, and the failure did not surface until
+    a full 2,762-name production sweep wrote zero rows and burned its quota. A schema mismatch is
+    not a formula question — it is a seam, and seams are what this harness is for.
+    """
+    import fundamentals as fu
+
+    with db.cursor() as cur:
+        cur.execute("""select column_name from information_schema.columns
+                       where table_schema='public' and table_name='fundamentals'""")
+        have = {r[0] for r in cur.fetchall()}
+    missing = [c for c in fu.COLS if c not in have]
+    assert not missing, f"the sweep writes columns `fundamentals` does not have: {missing}"
+
+
+def test_the_bench_writer_can_write_every_column_it_builds(db):
+    """The same seam on the scoring side: `score` inserts a fixed column list into `bench`."""
+    import re
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parents[2] / "src" / "score.py").read_text()
+    block = re.search(r"insert into bench\((.*?)\)", src, re.S)
+    assert block, "could not find the bench insert — has score.py been restructured?"
+    written = {c.strip() for c in block.group(1).replace("\n", " ").split(",") if c.strip()}
+
+    with db.cursor() as cur:
+        cur.execute("""select column_name from information_schema.columns
+                       where table_schema='public' and table_name='bench'""")
+        have = {r[0] for r in cur.fetchall()}
+    missing = sorted(written - have)
+    assert not missing, f"score writes columns `bench` does not have: {missing}"
