@@ -90,10 +90,22 @@ Every offerable row (`blocked_by is null`) becomes a ticket, subject to:
   make positions fall together — "AI infrastructure" spans semis, power and industrials, and no
   data field catches it. Sector and industry are inputs, never the answer. If the new name pushes
   a theme past 35% of NAV, it does not enter; say which theme and what the weight would be.
-- **Print the effective-bets count on every draft ticket.** Below 4 it carries a ⚠️ concentration
-  line. The band never blocks — the hard caps do.
-- Every ticket names an account, and only if that account holds the cash (§2.0). Same-account
-  unsettled proceeds from a sell already ticketed ahead of it count; proceeds never cross accounts.
+- **Print the effective-bets count on every draft ticket.** Each ticket carries its **own**
+  post-fill number, not one shared figure quoted once — two tickets in a brief have two different
+  after-states. Below 4 it carries a ⚠️ concentration line. The band never blocks — the hard caps do.
+- **Every entry ticket names, without exception (§5.1):** the **account** · the **currency, with
+  the FX estimate printed** ("at prevailing FX, est. 1.402" — so a moved rate cannot orphan the
+  share count) · the **theme** · and **risk in C$ and as a % of NAV**. The risk is already computed
+  on the armed row as `risk_cad` and `risk_pct_nav`; print those. Never divide a USD risk by a CAD
+  NAV — that understates by the whole FX rate, and it is how a 0.24% position got printed as 0.16%.
+- **Engine provenance is a column, not a memory.** If an armed compounder row carries
+  `engine_provenance = 'growth-derived'`, the ticket says so in the words §3.1 sets. Never write
+  "cross-check agrees" unless the row says `measured`.
+- Every ticket names an account, and only if that account holds the cash for the **whole** position
+  (§2.0, §2.6). One position, one account, one order — the job has already chosen the account that
+  can fund it and blocks the row when none can. Never split across accounts, never assume a top-up.
+  Same-account unsettled proceeds from a sell already ticketed ahead of it count; proceeds never
+  cross accounts.
 
 Blocked rows are the interesting half of the brief. "Two names at their hurdle, both held back by
 the group cap" tells Zak something real about the book.
@@ -109,9 +121,32 @@ say so, and say when the memo lands. Never an auto-sell.
 
 ## Step 8 — Compose and store
 
-Snapshot first: freshness · NAV and the move · what fired · what needs him, as broker-ready pairs ·
-then **"You: …"** — the shortest complete instruction list. Context below, as much as the day
-deserves and no more. Math lives in tables.
+**The blackout wall, in full, every single brief** (§5.1). Every brief is self-contained: it
+restates the whole wall — **holdings included** — and never leans on yesterday's. The failure this
+fixes is real and recent: a Tuesday brief omitted CNQ.TO reporting 8/6 because Monday's had listed
+it, so a holding inside its own blackout went unmentioned.
+
+```sql
+select b.ticker, e.last_reported_date, e.next_report_date, e.next_report_when,
+       case when e.next_report_date is not null then 'holding' end as why
+  from book b join v_earnings_state e on e.ticker = b.ticker
+ where b.status='open'
+union all
+select q.ticker, e.last_reported_date, e.next_report_date, e.next_report_when, 'queue'
+  from queue q join v_earnings_state e on e.ticker = q.ticker
+ order by 3 nulls last;
+```
+
+A name with no forward row is not automatically a gap — `last_reported_date` tells you which case
+it is. "Reported 7/24, next print beyond the window" is a fact; "no calendar row" is a flag. Say
+whichever is true, and do not alarm on the first.
+
+Snapshot first: freshness · NAV and the move · **the full blackout wall** · what fired · what needs
+him, as broker-ready pairs · then **"You: …"** — the shortest complete instruction list. Context
+below, as much as the day deserves and no more. Math lives in tables.
+
+**Key the gap sign once, in the first table that shows it:** a negative gap to hurdle means the
+price is *below* the hurdle, which is the good direction — it is what makes a name buyable.
 
 ```sql
 insert into briefs (kind, session_date, freshness, summary, body, detail)

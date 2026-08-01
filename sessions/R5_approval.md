@@ -34,6 +34,20 @@ Write one memo per new bench candidate, target ~200 words:
 > | Incremental margin | | |
 > | Revenue per employee trend | | |
 >
+> **Engine provenance:** read it from `bench.engine_provenance`, never from memory. When it says
+> `growth-derived`, the memo carries this sentence verbatim:
+> *"engine growth-derived (observed 3-yr revenue growth, capped) — measured engine failed the ±5pp
+> cross-check; §3.3 guardrails apply."*
+> When it says `measured`, say measured. The trial's memos claimed "engine measured, cross-check
+> agrees" for MEDP and VEEV when `engine_agrees` was false for both — a §3.1 marking-law breach that
+> a glance at the column would have prevented.
+>
+> **Owner-FCF note** — required for float and credit-book businesses (insurance brokers, exchanges,
+> payments, marketplaces holding customer balances, anything with a lending arm). Reported free cash
+> flow can be *customer float in costume*: cash that arrived because the business holds someone
+> else's money, and that leaves the moment volumes fall. Say what share of FCF is owner earnings and
+> what share is float, or say plainly that the statements do not let you tell.
+>
 > Serial-acquirer flag: {yes/no — goodwill jumped >25%} · Industry gap: {named if the vendor has no
 > industry for it} · Data confidence: {full / 2of3 / flagged}
 >

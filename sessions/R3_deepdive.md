@@ -68,6 +68,20 @@ select * from v_queue;
 select ticker, sleeve, theme, round((qty*avg_cost)::numeric,0) cost_basis from book where status='open';
 ```
 
+**Render the queue as a table, never as prose** (§5.3). Tables scan; paragraphs hide. One row per
+name, in queue order:
+
+| # | Ticker | Source | State | MCN | Trigger | Stop | Earnings | What would make it a BUY |
+|---|---|---|---|---|---|---|---|---|
+
+Two character notes the screen cannot make for itself, and both belong in the prose underneath:
+
+- **Same-industry pairs.** If two queue names share an industry group, say so out loud — if both
+  ever enter, §2.2's two-per-group cap binds and they are one bet wearing two tickers.
+- **EM ADRs.** §3.2's M4 passes on reported EPS, and an issuer reporting through triple-digit
+  inflation or a collapsing currency clears it mechanically without the earnings having accelerated
+  in any real sense. Name the currency context; judgment stays human. Flag, never block.
+
 Displacement is **within-sleeve only** and needs **+10 over the weakest incumbent** (§3.3). If a
 challenger clears it, the swap ticket is auto-drafted — both legs, and Zak executes both. A
 momentum 85 never displaces a compounder 72, no matter how good it looks.
