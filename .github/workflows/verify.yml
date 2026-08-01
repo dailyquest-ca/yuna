@@ -1,0 +1,28 @@
+name: verify
+# Dispatch-only tooling (§4.2). Re-derives the machine's published numbers from its own stored
+# inputs, because green proves a job ran and never that it was right.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'check and report, write no observations'
+        default: 'false'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/verify.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py verify /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
