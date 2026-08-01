@@ -1,6 +1,6 @@
 # Yuna — Zak's Trading Agent
 
-*Updated: 2026-08-01 8:57 AM (UTC−6)*
+*Updated: 2026-08-01 10:22 AM (UTC−6)*
 **Opened:** 2026-07-29 · **Owner:** Zak (decisions, execution) · Yuna (research, ranking, tickets)
 **Rule:** This document is law. Changes only by announced edit — exact section, exact old line, exact new line, Zak's approval — and every edit bumps the Updated stamp.
 
@@ -97,7 +97,7 @@ Stop widths and trail mechanics are set in §3.2.
 | Account | Holds | Why |
 |---|---|---|
 | **TFSA** | **All of Momentum** + Compounders' primary home | Tax-free turnover is the momentum edge; a tax-free 100-bagger is the compounder dream. US dividends leak 15% here — minor on low-yield growers |
-| **RRSP** | Compounder satellite — idle cash deploys here; any higher-yield US compounder prefers it | Suits multi-year no-touch holds; US dividend withholding treaty-exempt |
+| **RRSP** | Compounder satellite — idle cash deploys here; US compounders with a **trailing-12-month dividend yield ≥ 1% at ticket time** prefer it | Suits multi-year no-touch holds; US dividend withholding treaty-exempt |
 | **Non-registered** | The levered layer **only** — LOC / HELOC / margin per §2.5 | The only account where leverage exists and interest is deductible |
 
 - Sleeve weights are measured on **total NAV across all accounts** — placement never changes the math.
@@ -219,7 +219,7 @@ Every memo and every decision logged as an observation.
 |---|---|---|
 | Compounding engine | 33% | ROIC × reinvestment rate, 3-yr smoothed — falls back per the engine waterfall below. A name with no computable engine by either method is **not bench-eligible**; the data-confidence path (§3.3) never applies to the engine |
 | Cash conversion | 33% | 3-yr FCF ÷ 3-yr net income |
-| Durability | 33% | Equal-weight of 2 sub-scores over the last 5 fiscal years: **growth consistency** = years with positive YoY revenue growth ÷ 5 (unreported years count against) · **ROIC floor** = the worst single reported year's ROIC, percentile (minimum 3 reported years, else not bench-eligible). A year with invested capital ≤ 0 counts best-percentile when NOPAT > 0 — capital-free compounding — and worst when NOPAT ≤ 0 |
+| Durability | 33% | Equal-weight of 2 sub-scores over the last 5 fiscal years, **each on 0–100, and the blend then expressed as a percentile across L0** — so this component is an L0 percentile like the other two: **growth consistency** = years with positive YoY revenue growth ÷ 5 × 100 (five YoY comparisons — six fiscal years of revenue; unreported years count against) · **ROIC floor** = the worst single reported year's ROIC, as an L0 percentile (minimum 3 reported years, else not bench-eligible). A year with invested capital ≤ 0 counts best-percentile when NOPAT > 0 — capital-free compounding — and worst when NOPAT ≤ 0 |
 
 **Formulas:** NOPAT = EBIT × (1 − effective tax) · Invested capital = debt + equity − cash · Reinvestment rate = (capex − D&A + ΔWC) ÷ NOPAT, floored at 0, capped at 150%.
 
@@ -228,7 +228,7 @@ Every memo and every decision logged as an observation.
 **Entry hurdle** — separate from the CCN, computed daily per bench name:
 
 > **Expected return at price P = FCF yield + engine growth − derating drag**
-> - FCF yield = TTM free cash flow ÷ market cap at P — **market cap is the vendor's USD figure** (it resolves ADR ratios, listing currency, and share class); cap at price P uses **effective shares = vendor cap ÷ the close on the cap's report date, frozen with the filing** — the hurdle moves when a filing changes FCF, growth, or the fair multiple, never because the quote moved; `gap_to_hurdle` carries price · corporate actions that change the count between filings (splits, large buybacks) re-derive shares under the per-ticker call exception · vendor cap missing → data-confidence path (§3.3)
+> - FCF yield = TTM free cash flow ÷ market cap at P — **market cap is the vendor's USD figure** (it resolves ADR ratios, listing currency, and share class); cap at price P uses **effective shares = vendor cap ÷ the close on the cap's `as_of` date — the date the vendor stamps the cap, the fetch date when no statement date is given — frozen with the filing** — the hurdle moves when a filing changes FCF, growth, or the fair multiple, never because the quote moved; `gap_to_hurdle` carries price · corporate actions that change the count between filings (splits, large buybacks) re-derive shares under the per-ticker call exception · vendor cap missing → data-confidence path (§3.3)
 > - Engine growth capped at **25%**
 > - Derating drag = annualized 5-yr slide from current P/FCF down to the **fair multiple** = lower of the stock's own 5-yr median P/FCF or **30×**. Names with < 3 yrs of history: fair = lower of current or 25×
 > - The drag is **never a credit** — cheapness earns no bonus. The margin of safety lives here
@@ -391,11 +391,11 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 - Cold start — full backfill via **per-ticker history calls** (one per name, each returning full history — not 750 bulk-day calls) + fundamentals sweep of L0 ≈ 20k calls, one day, once.
 
 **Residency & retention** — the store is the system of record; the API is a feed:
-- Daily bars raw + adjusted, **3-year rolling window** (every formula needs ≤ 1 year; the buffer serves backtests). Older bars archived (compressed) to the repo before pruning.
+- Daily bars raw + adjusted, **10-year rolling window** — sized so §3.1's 5-yr median P/FCF computes directly from stored bars, with headroom for honest backtests (~1 GB across the US market; the Pro tier holds 8). Older bars archived (compressed) to the repo before pruning.
 - **Corporate-action refresh:** a split rewrites a stock's entire adjusted history — any split/dividend event triggers a one-call re-pull of that name. Without it, a 4:1 split reads as a −75% crash and fires false alarms.
 - Bars stored for L0 members + holdings + retained delisted names only; a name entering L0 is backfilled on arrival (1 call).
-- **Fundamentals kept forever — split by weight:** the ~20 extracted fields the formulas need live in the database (~1 KB per filing); the raw filing JSON is compressed into the repo. Same point-in-time asset, stamped with filing dates, without ballooning the free tier. The compounder side becomes honestly backtestable as a side effect of running.
-- **Derived at cold start:** each name's historical quarterly P/FCF multiples, computed from the full backfill before pruning and stored with the fundamentals fields — the hurdle's 5-yr median never needs daily bars older than the window.
+- **Fundamentals kept forever — split by weight:** the ~20 extracted fields the formulas need live in the database (~1 KB per filing); the raw filing JSON lives beside them as `jsonb` — one queryable point-in-time asset, stamped with filing dates; the repo holds code and migrations, not data. The compounder side becomes honestly backtestable as a side effect of running.
+- **Derived series:** each name's quarterly P/FCF multiples, computed from stored bars and kept with the fundamentals fields — a convenience for the hurdle, not a dependency: with the 10-year window, the 5-yr median is always recomputable from source.
 - **Filing detection:** a name whose earnings date has passed since its last pull is re-fetched on the next nightly; a monthly staleness sweep catches anything the calendar missed.
 
 **Quarantine:** any print moving > 40% with no corporate action, or any print that would fire a sell-side action, needs **two sources to agree** (job re-fetch + live MCP quote) before anything acts on it. Quarantined rows are flagged in the next brief, never silently used.
@@ -424,6 +424,7 @@ One Supabase Postgres project. **Everything lives here, including L0**; the repo
 | bench | 60 names · CCN + components · hurdle · C2 status · approval | overwrite |
 | candidates | 150 momentum · MCN · BUY/WAIT · pivot/stop | overwrite |
 | queue | ~20 pre-written triggers | overwrite |
+| armed | The night's arming decisions — every trigger the job proposed, stamped with its run id | append |
 | book | Positions · lots (core/tactical) · stops · theme · thesis + invalidators · entry snapshots | overwrite |
 | tickets | proposed → approved → filled (provisional/confirmed) → cancelled | append |
 | transactions | Every confirmed fill | append |
@@ -435,7 +436,6 @@ One Supabase Postgres project. **Everything lives here, including L0**; the repo
 - **Human views** (`v_book`, `v_queue`, `v_bench`) shape what Zak browses in Studio — sorted, joined, readable.
 - **Guard triggers** on computed tables (universe, candidates, bench, queue, book): writes are rejected unless made by a job. Sessions may write only briefs, tickets, observations, and config — "Yuna never computes scores by hand," enforced by the schema, not by promise.
 - **The plan is law; config is its runtime copy.** Any config change that moves a plan-stated number requires the announced plan edit first — a config row never quietly overrules this document.
-- Free projects pause after ~1 week idle — nightly writes keep it alive; a week-long pipeline outage would pause the DB too (heartbeat screams days earlier; restore is one click).
 
 ### 4.4 Judge — Yuna's sessions
 
@@ -499,7 +499,6 @@ The pipeline looks at prices once a night; an 8% stop can be breached by lunch. 
 - Stop-limit gap-through — rare; covered by the ±7% interrupt and the market-sell-at-open rule.
 - Up to a week of provisional fill drift — labeled, trued-up Sunday.
 - Actions cron jitter — slack built into the UTC picks; the retry covers the rest.
-- Free-tier pause coupling — nightly writes prevent it; heartbeat catches the only path to it.
 - GitHub's 60-day schedule sleep — the monthly backup commit provides activity; the missing-brief alarm catches it; re-enabling is one click.
 
 
@@ -633,6 +632,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | Date | Entry |
 |---|---|
 | 2026-08-01 | **Version labels retired until release.** Incrementing minors pre-release implied a shipping history that doesn't exist — this is still development. Labels stripped from every header, table, and checklist; the §3.3 Versioning paragraph is now their only home and says one thing: every formula is v1 until cutover, and counting starts when the system is live. The plan text is the spec; the changelog is the lineage. History rows keep their old labels — the record stays the record. |
+| 2026-08-01 | **Implementation-feedback batch (9 edits).** Durability sub-scores unified on 0–100 and the blend percentiled across L0 (the growth term was numerically inert as written) · five YoY comparisons / six fiscal years made explicit · effective shares pinned to the cap's vendor `as_of` date · RRSP preference defined: trailing-12M dividend yield ≥ 1% at ticket time · bar retention 3 → 10 years (5-yr median P/FCF computes from source; sized to Pro tier) · raw filing JSON moves into the database as `jsonb` · derived multiples demoted from dependency to convenience · both free-tier pause clauses removed (no longer true) · `armed` legislated as an append ledger with run ids |
 | 2026-08-01 | **Audit batch — trial-run teardown (8 edits).** Nightly-ingest gains the book-valuation canary (every holding's price = its latest bar, or the run fails) · compounder entry order legislated as a GTC buy limit at the hurdle · averaging-down bands measure from the entry fill — entry day arms nothing · MCN < 70 never tickets · M4 EM-ADR currency note · one-position-one-account funding rule (§2.6) · R1 tickets name account / currency-FX / theme / risk in C$ and % NAV · every R1 snapshot restates the full blackout wall, holdings included |
 | 2026-08-01 | **Vetting rulings V3 + V4b — durability replaces size; the debt tripwire gets a floor; four data-truths become law.** Independent read-only re-scores against production drove all of it. v1.0's crown was a small-cap cyclical screen; v1.1's crown — Durability = growth years ÷ 5 + worst-year ROIC percentile, capital-free years top-coded — reads like a compounder bench, and the size tilt was double-counted (the cohort split already carries the small-cap hunt). CCN v1.0 → v1.1. Aristocrat autopsy: 19 of 26 canonical compounders died at C1 — V/MA/SPGI/MCO by a **code** bug (vendor sector flag instead of B4's industry strings — agent order V4a, the plan's letter was already correct), MSFT/GOOGL/BKNG at 0.2–0.5× leverage by the debt-growth tripwire → **V4b**: the growth test applies only above 1.0× net debt/EBITDA; below, C2 flag, never a kill. Foreign-issuer law hardened: unknown statement currency → data-confidence (exhibits: WSE null currency, PDD storing raw CNY against a USD cap). C2 memo template gains the owner-FCF note for float and credit-book businesses (MELI-class). Second engine limit recorded: the growth-derived fallback is pro-cyclical — ODFL at the freight trough scored near the bottom on a −4.2% engine; R5 shops troughs. **70/85 sizing cutoffs and bench ranks re-observed on the first production v1.1 score — Zak re-rules if the distribution moved.** |
 | 2026-08-01 | **Vetting rulings V1–V2 — the engine waterfall and the frozen share count.** `verify` run 1: the top 15 CCNs were all dropped-engine names — drop-and-renormalize imputes the missing engine at the mean of the survivors, and missingness travels with high cash conversion and smallness: a promotion machine (the E4 routing and B5's ÷-last-close were both this desk's wordings). V1: the engine never routes to data-confidence — within 5pp → score; unmeasurable or divergent → engine = observed 3-yr revenue growth capped at 25%, marked growth-derived, §3.3 guardrails attached; no engine by either method → not bench-eligible. The floor-at-zero defect (learnings #16) resolves through the cross-check automatically. V2: effective shares freeze at the filing (vendor cap ÷ close on the cap's report date) — the hurdle is a function of filings, never the quote; corp actions re-derive via the per-ticker call exception. `verify`'s two-way hurdle mismatches were the moving-shares signature. R5 approvals held until re-score + clean `verify`. |
@@ -686,7 +686,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | DRY_RUN | A switch that makes a job compute everything and write nothing |
 | Durability | CCN component: growth consistency (growth years ÷ 5) and worst-reported-year ROIC percentile, equal weight; capital-free years (invested capital ≤ 0) count best when NOPAT > 0 (§3.1) |
 | Effective bets | 1 ÷ Σ wᵢwⱼρᵢⱼ — how many truly independent positions the book holds once correlation is counted (§2.2) |
-| Effective shares | Vendor USD market cap ÷ the close on the cap's report date, frozen with the filing — the hurdle's share count (§3.1) |
+| Effective shares | Vendor USD market cap ÷ the close on the cap's `as_of` date (the vendor's stamp; fetch date when none given), frozen with the filing — the hurdle's share count (§3.1) |
 | EOD | End-of-day — one price record per stock per day, after the close |
 | FCF | Free cash flow — cash from operations minus capital spending |
 | Final-contraction low | The lowest low of a base's last 10 sessions — the natural stop shelf under a breakout (§3.2) |
