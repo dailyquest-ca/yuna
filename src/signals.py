@@ -295,39 +295,149 @@ def momentum_size(*, nav, mcn_score, stop_distance, budgets=(0.007, 0.009), band
 # ---------------------------------------------------------------------------- compounders
 
 
-def ccn(components, *, min_components=2, business=("engine", "cash_conv")):
-    """CCN v1.0 — equal weight over available components, renormalized (§3.1, §3.3).
+def ccn(components, *, required=("engine", "durability")):
+    """CCN — equal weight over engine · cash conversion · durability (§3.1, §3.3).
 
-    §3.3 renormalizes around *one* missing component. Size is available to almost everything, so
-    a floor is needed or a company whose engine and cash conversion are both unmeasurable scores
-    on smallness alone — that is how a $4 microcap once topped the bench. Builder's rule, on the
-    ratification list (roadmap Part 4).
+    Two of the three may never be renormalized away. §3.3 is explicit about the engine: "the
+    compounding engine never routes here — renormalizing away the engine pays a name for being
+    unmeasurable (missingness travels with the very components that survive)". That is not a
+    theory. Under the old rule the fifteen highest CCNs in production were fifteen dropped-engine
+    names, because unmeasurable engines cluster in businesses that score high on what remains, and
+    dropping a component imputes it at the mean of the survivors. Every drop was a promotion.
+
+    Durability carries the same bar by its own clause — under three reported years of ROIC the name
+    is not bench-eligible — so the only component that can go missing is cash conversion, and that
+    is the one §3.3's renormalization was written for.
     """
     have = {k: v for k, v in components.items() if v is not None and not np.isnan(v)}
-    if len(have) < min_components or not any(k in have for k in business):
-        return dict(score=None, confidence="unscorable", used=sorted(have))
+    if any(k not in have for k in required):
+        return dict(score=None, confidence="not-bench-eligible", used=sorted(have))
     score = float(sum(have.values()) / len(have))
     confidence = "full" if len(have) == len(components) else f"{len(have)}of{len(components)}"
     return dict(score=score, confidence=confidence, used=sorted(have))
 
 
 def engine_agrees(engine, revenue_cagr, *, tolerance=0.05):
-    """§3.1 reliability check: growth = ROIC x reinvestment is an identity, so it must agree with
-    observed 3-year revenue growth within 5 percentage points. Beyond that the engine component
-    routes down the data-confidence path — it is dropped, not quietly capped."""
+    """§3.1 reliability check: growth = ROIC x reinvestment is an identity, so the computed engine
+    must agree with observed 3-year revenue growth within 5 percentage points."""
     if engine is None or revenue_cagr is None:
         return None
     return abs(float(engine) - float(revenue_cagr)) <= tolerance
 
 
-def effective_shares(market_cap, last_close):
-    """§3.1: cap at price P uses effective shares = the vendor's USD market cap / last close.
+def engine_waterfall(engine, revenue_cagr, *, tolerance=0.05, cap=0.25):
+    """§3.1's engine waterfall. Returns (value, provenance) — provenance is None when the name has
+    no engine by either method, which makes it **not bench-eligible**.
 
-    This is what resolves ADR ratios, listing currency and share classes in one step; the
-    vendor's own share count does not."""
-    if not market_cap or not last_close or market_cap <= 0 or last_close <= 0:
+      * computed engine agrees with observed growth within 5pp  -> ('measured')
+      * unmeasurable, or diverges beyond 5pp                    -> observed 3-yr revenue growth,
+                                                                    capped at 25%, 'growth-derived'
+      * no revenue history either                               -> (None, None)
+
+    Growth = ROIC x reinvestment is an identity, so the observed side of it is the honest
+    substitute, and the cross-check does not apply to the substitute — it would be checking the
+    number against itself.
+
+    The floored-to-zero reinvestment defect (learnings #16 — ANET, AVGO, VRT all reading engine 0
+    while compounding above 20%) needs no special clause: an engine of zero against 27% observed
+    growth fails the cross-check arithmetically and falls back on its own.
+    """
+    if engine is not None and revenue_cagr is not None \
+       and abs(float(engine) - float(revenue_cagr)) <= tolerance:
+        return float(engine), "measured"
+    if revenue_cagr is not None:
+        return min(float(revenue_cagr), cap), "growth-derived"
+    return None, None
+
+
+# ---- Durability (§3.1) ------------------------------------------------------------------------
+#
+# Replaced size in the CCN on 2026-08-01. The size tilt was double-counted — the funnel's cohort
+# split already carries the small-cap hunt — and a component that rewards smallness hardest turned
+# the bench into a small-cap cyclical screen.
+
+CAPITAL_FREE_BEST = float("inf")        # capital-free compounding, top-coded (§3.1)
+CAPITAL_FREE_WORST = float("-inf")      # no capital AND no profit, bottom-coded
+
+
+def growth_consistency(revenues, *, comparisons=5):
+    """Positive-YoY years / 5, on 0-100 (§3.1).
+
+    `revenues` are annual revenues newest-first. Five comparisons need six fiscal years; a name with
+    fewer has the missing comparisons counted against it, which is what "unreported years count
+    against" means — the denominator is always 5.
+    """
+    vals = [None if v is None or (isinstance(v, float) and np.isnan(v)) else float(v)
+            for v in (revenues or [])]
+    positive = 0
+    for i in range(comparisons):
+        if i + 1 < len(vals) and vals[i] is not None and vals[i + 1] is not None \
+           and vals[i + 1] > 0 and vals[i] > vals[i + 1]:
+            positive += 1
+    return 100.0 * positive / comparisons
+
+
+def worst_year_roic(years, *, min_reported=3):
+    """The worst single reported year's ROIC over the last five (§3.1).
+
+    `years` is [(nopat, invested_capital)] newest-first. Returns (value, reported_count); the value
+    is None when fewer than three years are reported, which the plan makes **not bench-eligible**
+    rather than merely unscored.
+
+    A year with invested capital <= 0 does not produce a meaningful ratio, so §3.1 ranks it rather
+    than dividing: best-percentile when NOPAT > 0 — that is capital-free compounding, the strongest
+    thing a business can do — and worst when NOPAT <= 0. Infinities carry that ranking through the
+    percentile step, where min() picks the floor.
+    """
+    scored = []
+    for row in (years or [])[:5]:
+        try:
+            nopat, ic = row
+        except (TypeError, ValueError):
+            continue
+        if nopat is None or ic is None:
+            continue
+        nopat, ic = float(nopat), float(ic)
+        if np.isnan(nopat) or np.isnan(ic):
+            continue
+        if ic <= 0:
+            scored.append(CAPITAL_FREE_BEST if nopat > 0 else CAPITAL_FREE_WORST)
+        else:
+            scored.append(nopat / ic)
+    if len(scored) < min_reported:
+        return None, len(scored)
+    return min(scored), len(scored)
+
+
+def durability(growth_pct, roic_floor_pct):
+    """Equal-weight blend of the two sub-scores, both already on 0-100 (§3.1).
+
+    The caller percentiles the *blend* across L0, which is what makes this component an L0
+    percentile like the engine and cash conversion. Blending a 0-1 ratio with a 0-100 percentile —
+    the plan's wording before the 10:22 edit — made the growth term worth half a point out of a
+    hundred, which is to say inert.
+    """
+    parts = [p for p in (growth_pct, roic_floor_pct) if p is not None and not np.isnan(p)]
+    if len(parts) < 2:
         return None
-    return market_cap / last_close
+    return float(sum(parts) / 2.0)
+
+
+def effective_shares(market_cap, cap_date_close):
+    """§3.1: effective shares = the vendor's USD market cap / the close on the cap's `as_of` date.
+
+    The divisor is the close on the date the cap was stamped, frozen with the filing — not tonight's
+    close. Using the latest close made the hurdle a function of the quote, so it decayed every night:
+    `verify` found eleven mismatches running in both directions, names that had risen showing
+    understated hurdles and names that had fallen showing overstated ones. A hurdle is a statement
+    about a business and may only move when a filing moves it.
+
+    The vendor's own share count is not a substitute — the cap ratio is what resolves ADR ratios,
+    listing currency and share classes in one step.
+    """
+    if not market_cap or not cap_date_close or market_cap <= 0 or cap_date_close <= 0:
+        return None
+    return market_cap / cap_date_close
 
 
 def expected_return(price, *, fcf_ttm, shares, growth, fair_multiple, years=5):

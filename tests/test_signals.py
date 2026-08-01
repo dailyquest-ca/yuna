@@ -237,19 +237,101 @@ def test_start_low_may_size_below_the_band_floor():
 # --------------------------------------------------------------------------- §3.1 compounders
 
 def test_ccn_averages_three_components():
-    out = s.ccn(dict(engine=90.0, cash_conv=60.0, size=30.0))
+    out = s.ccn(dict(engine=90.0, cash_conv=60.0, durability=30.0))
     assert out["score"] == pytest.approx(60.0) and out["confidence"] == "full"
 
 
-def test_ccn_renormalizes_around_one_missing_component():
-    out = s.ccn(dict(engine=90.0, cash_conv=60.0, size=None))
+def test_ccn_renormalizes_around_missing_cash_conversion():
+    """The one component §3.3's renormalization may still drop."""
+    out = s.ccn(dict(engine=90.0, cash_conv=None, durability=60.0))
     assert out["score"] == pytest.approx(75.0) and out["confidence"] == "2of3"
 
 
-def test_size_alone_is_unscorable():
-    """Without the floor a $4 microcap tops the bench on smallness (learnings #14)."""
-    out = s.ccn(dict(engine=None, cash_conv=None, size=99.0))
-    assert out["score"] is None and out["confidence"] == "unscorable"
+def test_a_missing_engine_is_never_renormalized_away():
+    """§3.3: 'the compounding engine never routes here'. Under the old rule the fifteen highest CCNs
+    in production were fifteen dropped-engine names — dropping a component imputes it at the mean of
+    the survivors, and missingness travels with high cash conversion. Every drop was a promotion."""
+    out = s.ccn(dict(engine=None, cash_conv=96.0, durability=98.0))
+    assert out["score"] is None and out["confidence"] == "not-bench-eligible"
+
+
+def test_durability_under_three_reported_years_is_not_bench_eligible():
+    out = s.ccn(dict(engine=80.0, cash_conv=96.0, durability=None))
+    assert out["score"] is None and out["confidence"] == "not-bench-eligible"
+
+
+# --------------------------------------------------------------------------- §3.1 the waterfall
+
+def test_waterfall_scores_an_engine_that_agrees():
+    value, how = s.engine_waterfall(0.20, 0.16)
+    assert (value, how) == (pytest.approx(0.20), "measured")
+
+
+def test_waterfall_falls_back_when_the_cross_check_diverges():
+    value, how = s.engine_waterfall(0.40, 0.20)
+    assert (value, how) == (pytest.approx(0.20), "growth-derived")
+
+
+def test_waterfall_resolves_the_floored_to_zero_engine_without_a_special_clause():
+    """learnings #16: ANET reads engine 0 on 27% observed growth because reinvestment floors at 0.
+    The cross-check rejects it arithmetically and the fallback catches it — capped at 25%."""
+    value, how = s.engine_waterfall(0.0, 0.271465)
+    assert (value, how) == (pytest.approx(0.25), "growth-derived")
+
+
+def test_waterfall_caps_the_substitute_at_twenty_five_percent():
+    assert s.engine_waterfall(None, 1.00)[0] == pytest.approx(0.25)
+
+
+def test_no_engine_by_either_method_is_not_bench_eligible():
+    assert s.engine_waterfall(None, None) == (None, None)
+
+
+# --------------------------------------------------------------------------- §3.1 durability
+
+def test_growth_consistency_counts_five_comparisons_over_six_years():
+    """Five YoY comparisons need six fiscal years; the denominator is always 5."""
+    rising = [160.0, 150.0, 140.0, 130.0, 120.0, 110.0]
+    assert s.growth_consistency(rising) == pytest.approx(100.0)
+
+
+def test_unreported_years_count_against_growth_consistency():
+    """Three years give two comparisons out of five — 40, not 100."""
+    assert s.growth_consistency([120.0, 110.0, 100.0]) == pytest.approx(40.0)
+
+
+def test_growth_consistency_penalises_a_down_year():
+    assert s.growth_consistency([160.0, 150.0, 155.0, 130.0, 120.0, 110.0]) == pytest.approx(80.0)
+
+
+def test_worst_year_roic_takes_the_floor_not_the_average():
+    value, n = s.worst_year_roic([(30.0, 100.0), (25.0, 100.0), (5.0, 100.0), (28.0, 100.0)])
+    assert value == pytest.approx(0.05) and n == 4
+
+
+def test_under_three_reported_years_there_is_no_roic_floor():
+    assert s.worst_year_roic([(30.0, 100.0), (25.0, 100.0)]) == (None, 2)
+
+
+def test_capital_free_years_are_top_coded_when_profitable():
+    """§3.1: invested capital <= 0 with NOPAT > 0 is capital-free compounding — best percentile, so
+    it never becomes the floor unless every year is one."""
+    value, _ = s.worst_year_roic([(30.0, -50.0), (25.0, 100.0), (28.0, 100.0)])
+    assert value == pytest.approx(0.25)
+    value, _ = s.worst_year_roic([(30.0, -50.0), (25.0, -10.0), (28.0, -5.0)])
+    assert value == s.CAPITAL_FREE_BEST
+
+
+def test_capital_free_years_are_bottom_coded_when_unprofitable():
+    value, _ = s.worst_year_roic([(-30.0, -50.0), (25.0, 100.0), (28.0, 100.0)])
+    assert value == s.CAPITAL_FREE_WORST
+
+
+def test_durability_blends_two_sub_scores_on_one_scale():
+    """Both sides on 0-100 before blending. Under the pre-10:22 wording growth consistency was a
+    0-1 ratio against a 0-100 percentile, worth half a point out of a hundred — inert."""
+    assert s.durability(80.0, 60.0) == pytest.approx(70.0)
+    assert s.durability(100.0, None) is None
 
 
 def test_engine_agreement_is_a_flat_five_points():

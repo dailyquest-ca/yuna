@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import psycopg
 from db import connect, config, dry, Heartbeat
+import signals as sg
 
 START_NAV = float(os.environ.get("START_NAV", "200754.38"))
 LABEL = os.environ.get("LABEL", "compounders v1")
@@ -97,6 +98,21 @@ def as_of(ticker_raw, T):
     rev_cagr = ((rev_new / rev_old) ** (1 / span) - 1) if (rev_new and rev_old and rev_old > 0
                                                            and rev_new > 0 and span) else None
 
+    # Durability, point-in-time (§3.1) — the same two facts the live sweep derives, from only the
+    # filings that existed on T. `signals` owns both formulas; this file must never restate them.
+    growth_cons = sg.growth_consistency([y.get("rev") for y in ys[:6]])
+    per_year = []
+    for y in ys[:5]:
+        eq, cash, debt, nd = y.get("equity"), y.get("cash"), y.get("debt"), y.get("netdebt")
+        if debt is None and nd is not None and cash is not None:
+            debt = nd + cash
+        if y.get("ebit") is None or eq is None or cash is None or debt is None:
+            continue
+        tx, pre = y.get("tax"), y.get("pretax")
+        rate = min(0.5, max(0.0, tx / pre)) if tx is not None and pre else tax
+        per_year.append((y["ebit"] * (1 - rate), debt + eq - cash))
+    roic_worst, _ = sg.worst_year_roic(per_year)
+
     fcf3 = sum(y["fcf"] for y in y3 if y.get("fcf") is not None) if any(y.get("fcf") for y in y3) else None
     ni3 = sum(y["ni"] for y in y3 if y.get("ni") is not None) if any(y.get("ni") for y in y3) else None
     cash_conv = (fcf3 / ni3) if fcf3 is not None and ni3 and ni3 > 0 else None
@@ -121,7 +137,8 @@ def as_of(ticker_raw, T):
     fcf_ttm = qs[0][1] if qs else fcf3 / 3.0 if fcf3 else None
     shares = qs[0][2] if qs else sh_new
 
-    return dict(engine=engine, cash_conv=cash_conv, rev_cagr=rev_cagr, roic=roic,
+    return dict(engine=engine, cash_conv=cash_conv,
+                growth_cons=growth_cons, roic_worst=roic_worst, rev_cagr=rev_cagr, roic=roic,
                 reinvest=reinvest, c1=not fails, why="; ".join(fails) or None,
                 fcf_ttm=fcf_ttm, shares=shares, quarters=qs)
 
@@ -167,7 +184,7 @@ def main():
                 T = str(day)
 
                 if t in rebal:
-                    snap, mcaps = {}, {}
+                    snap = {}
                     for tk, meta in names.items():
                         a = as_of(meta["raw"], T)
                         if not a or not a["shares"]:
@@ -177,23 +194,26 @@ def main():
                             continue
                         a["price"] = float(p)
                         a["mcap"] = float(p) * a["shares"]
+                        # the engine waterfall, point-in-time — measured where the cross-check
+                        # agrees, observed growth capped at 25% where it does not (§3.1)
+                        a["engine_used"], a["provenance"] = sg.engine_waterfall(
+                            a["engine"], a["rev_cagr"], tolerance=TOL, cap=GROWTH_CAP)
                         snap[tk] = a
-                        mcaps[tk] = -math.log(a["mcap"]) if a["mcap"] > 0 else None
                     if snap:
-                        e_p = pct_rank({k: v["engine"] for k, v in snap.items()})
+                        e_p = pct_rank({k: v["engine_used"] for k, v in snap.items()})
                         c_p = pct_rank({k: v["cash_conv"] for k, v in snap.items()})
-                        s_p = pct_rank(mcaps)
+                        f_p = pct_rank({k: v["roic_worst"] for k, v in snap.items()})
+                        d_p = pct_rank({k: sg.durability(v["growth_cons"], f_p.get(k))
+                                        for k, v in snap.items()})
                         for tk, a in snap.items():
-                            parts = [("engine", e_p.get(tk)), ("cash", c_p.get(tk)), ("size", s_p.get(tk))]
-                            have = [(n, v) for n, v in parts if v is not None]
-                            if len(have) < 2 or not any(n in ("engine", "cash") for n, _ in have):
-                                a["ccn"] = None; continue
-                            a["ccn"] = sum(v for _, v in have) / len(have)
-                            # the §3.1 reliability check, point-in-time
-                            g = min(GROWTH_CAP, a["engine"]) if a["engine"] is not None else 0.0
-                            if a["engine"] is not None and a["rev_cagr"] is not None:
-                                if abs(a["engine"] - a["rev_cagr"]) > max(TOL, 0.5 * abs(a["rev_cagr"])):
-                                    g = max(0.0, min(g, a["rev_cagr"]))
+                            # Size is repealed; Durability replaces it, and neither the engine nor
+                            # durability may be renormalized away (§3.1, §3.3).
+                            scored = sg.ccn(dict(engine=e_p.get(tk), cash_conv=c_p.get(tk),
+                                                 durability=d_p.get(tk)))
+                            a["ccn"] = scored["score"]
+                            if a["ccn"] is None:
+                                continue
+                            g = a["engine_used"] if a["engine_used"] is not None else 0.0
                             obs = []
                             for q in a["quarters"][:20]:
                                 qd = str(q[0])[:7]

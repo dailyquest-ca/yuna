@@ -71,7 +71,9 @@ def main():
                 cur.execute("""select f.ticker, f.engine, f.cash_conversion, f.market_cap, f.shares_out,
                                       f.fcf_ttm, f.c1_pass, f.c1_fail_reason, f.roic, f.reinvest_rate,
                                       f.pfcf_current, f.data_confidence, f.goodwill_jump,
-                                      f.engine_agrees, f.revenue_cagr_3y, f.quote_ok, f.raw, u.is_holding
+                                      f.engine_agrees, f.revenue_cagr_3y, f.quote_ok, f.raw, u.is_holding,
+                                      f.growth_consistency, f.roic_worst_year, f.roic_years_reported,
+                                      f.effective_shares, f.cap_as_of
                                from v_fundamentals_latest f
                                join universe u on u.ticker=f.ticker
                                where u.kind='stock' and u.status='active' and (u.in_l0 or u.is_holding)""")
@@ -87,28 +89,46 @@ def main():
                                where ticker = any(%s) order by ticker, d desc""", (names,))
                 last = {t: float(c) for t, c in cur.fetchall()}
 
+            # ---- the engine waterfall, before any percentile (§3.1) ----
+            # The percentile field has to be built from the value each name is actually SCORED on,
+            # not from the raw computation — a measured 20% and a growth-derived 20% are the same
+            # rank. Provenance travels with the value so the bench row and every memo can say which
+            # it was, which §3.1 requires in words.
+            final_engine, provenance = {}, {}
+            for r in rows:
+                tk, engine, rev_cagr = r[0], r[1], r[14]
+                value, how = sg.engine_waterfall(engine, rev_cagr, tolerance=tol, cap=growth_cap)
+                final_engine[tk], provenance[tk] = value, how
+
             # ---- percentiles across all of L0 (§3.0) ----
-            eng_p = pct_rank([(r[0], r[1]) for r in rows])
+            eng_p = pct_rank([(tk, v) for tk, v in final_engine.items()])
             cc_p = pct_rank([(r[0], r[2]) for r in rows])
-            size_p = pct_rank([(r[0], -math.log(r[3])) for r in rows if r[3] and r[3] > 0])  # inverted
+            # Durability: the ROIC floor is percentiled across L0, blended equally with growth
+            # consistency (already 0-100), and the BLEND is percentiled again — that last step is
+            # what makes this component an L0 percentile like the other two (§3.1).
+            floor_p = pct_rank([(r[0], r[19]) for r in rows])
+            blend = {}
+            for r in rows:
+                tk, gc = r[0], r[18]
+                d = sg.durability(float(gc) if gc is not None else None, floor_p.get(tk))
+                if d is not None:
+                    blend[tk] = d
+            dur_p = pct_rank(list(blend.items()))
 
             out, unscored = [], []
             for (tk, engine, cc, mcap, shares, fcf, c1, c1why, roic, reinv,
-                 pfcf_cur, conf, gw_jump, agrees, rev_cagr, quote_ok, raw, is_hold) in rows:
+                 pfcf_cur, conf, gw_jump, agrees, rev_cagr, quote_ok, raw, is_hold,
+                 growth_cons, roic_worst, roic_years, eff_shares, cap_as_of) in rows:
                 px = last.get(tk)
-                # §3.1 engine reliability check: growth = ROIC x reinvestment is an identity, so it
-                # must agree with observed 3-yr revenue growth within 5 percentage points. Beyond
-                # that the engine component routes down the data-confidence path — it is DROPPED,
-                # not quietly capped to the number we like better. Agreement is decided here rather
-                # than read from the sweep: the tolerance is scoring policy, and changing it here
-                # costs no API calls.
                 agrees = sg.engine_agrees(engine, rev_cagr, tolerance=tol)
-                engine_trusted = engine is not None and agrees is not False
+                how = provenance[tk]
 
-                components = dict(engine=eng_p.get(tk) if engine_trusted else None,
-                                  cash_conv=cc_p.get(tk), size=size_p.get(tk))
+                components = dict(engine=eng_p.get(tk), cash_conv=cc_p.get(tk),
+                                  durability=dur_p.get(tk))
                 scored = sg.ccn(components)
                 if scored["score"] is None:
+                    # §3.1: no engine by either method, or under three reported ROIC years — the
+                    # plan makes both **not bench-eligible**, never silently scored on what remains.
                     unscored.append(tk)
                     continue
                 ccn = scored["score"]
@@ -124,13 +144,13 @@ def main():
                     fair = min(pfcf_cur, fair_cap_short)
                 else:
                     fair = None
-                # An untrusted engine cannot underwrite growth either. §3.3's rule is never to
-                # assume a missing value, so growth drops to zero rather than borrowing revenue
-                # CAGR — conservative by construction, and it can only lower a hurdle.
-                g = min(growth_cap, engine) if engine_trusted else 0.0
-                # §3.1 (B5): cap at price P uses effective shares = vendor cap / last close. The
-                # vendor's own share count reopens the ADR-ratio and share-class holes.
-                eff_shares = sg.effective_shares(mcap, px)
+                # The hurdle underwrites the same engine the CCN scores — the waterfall's value,
+                # capped, whichever side of the identity it came from. Growth-derived names carry
+                # §3.3's guardrails instead of a silent zero.
+                g = final_engine[tk] if final_engine[tk] is not None else 0.0
+                # §3.1: effective shares are FROZEN at the filing — cap / the close on the cap's
+                # `as_of` date, stored by the sweep. Re-deriving them from tonight's close made the
+                # hurdle a function of the quote and it decayed every night.
                 hp = sg.hurdle_price(fcf_ttm=fcf, shares=eff_shares, growth=g,
                                      fair_multiple=fair, floor=floor) if eff_shares else None
                 gap = ((px - hp) / hp) if px and hp else None
@@ -139,7 +159,11 @@ def main():
                     ticker=tk, ccn=ccn,
                     # the engine percentile is stored as *used* — null when the cross-check
                     # dropped it, so a reader can never mistake a 2-of-3 score for a full one
-                    engine=components["engine"], cash_conv=cc_p.get(tk), size_score=size_p.get(tk),
+                    engine=components["engine"], cash_conv=cc_p.get(tk),
+                    durability=dur_p.get(tk), engine_provenance=how,
+                    growth_consistency=float(growth_cons) if growth_cons is not None else None,
+                    roic_floor_pct=floor_p.get(tk), roic_years=roic_years,
+                    engine_used=final_engine[tk],
                     engine_raw=engine, cash_conv_raw=cc, roic=roic, reinvest_rate=reinv,
                     c1_pass=(c1 and quote_ok is True),
                     # the reason belongs on the row that FAILED. The previous form kept it when the
@@ -156,7 +180,10 @@ def main():
                     engine_growth=g, fair_multiple=fair,
                     derating_drag=(max(0.0, 1 - (fair / pfcf_cur) ** 0.2) if fair and pfcf_cur else None),
                     last_close=px, gap_to_hurdle=gap,
-                    data_confidence=("flagged" if (agrees is False or quote_ok is False) else confidence),
+                    # §3.1: growth-derived names carry §3.3's guardrails — bottom of the band and
+                    # manual sign-off — so the flag must survive onto the row that sizes them.
+                    data_confidence=("flagged" if (how == "growth-derived" or quote_ok is False)
+                                     else confidence),
                     serial_acquirer=bool(gw_jump),
                     is_holding=is_hold))
 
@@ -194,17 +221,22 @@ def main():
                     # superseded bench for exactly this reason. Purge on rebuild; the weekly rank
                     # re-seats whatever is still within 10% of a hurdle (§3.0 L2).
                     cur.execute("delete from queue where source='compounder'")
-                    cur.executemany("""insert into bench(ticker,rank,cohort,ccn,engine,cash_conv,size_score,
+                    cur.executemany("""insert into bench(ticker,rank,cohort,ccn,engine,cash_conv,durability,
+                            engine_provenance,growth_consistency,roic_floor_pct,roic_years,engine_used,
                             engine_raw,cash_conv_raw,roic,reinvest_rate,c1_pass,c1_fail_reason,
                             hurdle_price,fcf_yield,engine_growth,derating_drag,fair_multiple,
                             last_close,gap_to_hurdle,data_confidence,serial_acquirer,computed_at)
-                          values (%(ticker)s,%(rank)s,%(cohort)s,%(ccn)s,%(engine)s,%(cash_conv)s,%(size_score)s,
+                          values (%(ticker)s,%(rank)s,%(cohort)s,%(ccn)s,%(engine)s,%(cash_conv)s,%(durability)s,
+                            %(engine_provenance)s,%(growth_consistency)s,%(roic_floor_pct)s,%(roic_years)s,%(engine_used)s,
                             %(engine_raw)s,%(cash_conv_raw)s,%(roic)s,%(reinvest_rate)s,%(c1_pass)s,%(c1_fail_reason)s,
                             %(hurdle_price)s,%(fcf_yield)s,%(engine_growth)s,%(derating_drag)s,%(fair_multiple)s,
                             %(last_close)s,%(gap_to_hurdle)s,%(data_confidence)s,%(serial_acquirer)s,now())
                           on conflict (ticker) do update set rank=excluded.rank, cohort=excluded.cohort,
                             ccn=excluded.ccn, engine=excluded.engine, cash_conv=excluded.cash_conv,
-                            size_score=excluded.size_score, engine_raw=excluded.engine_raw,
+                            durability=excluded.durability, engine_provenance=excluded.engine_provenance,
+                            growth_consistency=excluded.growth_consistency,
+                            roic_floor_pct=excluded.roic_floor_pct, roic_years=excluded.roic_years,
+                            engine_used=excluded.engine_used, engine_raw=excluded.engine_raw,
                             cash_conv_raw=excluded.cash_conv_raw, roic=excluded.roic,
                             reinvest_rate=excluded.reinvest_rate, c1_pass=excluded.c1_pass,
                             c1_fail_reason=excluded.c1_fail_reason, hurdle_price=excluded.hurdle_price,

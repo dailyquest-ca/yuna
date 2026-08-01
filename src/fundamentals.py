@@ -15,6 +15,7 @@ import os, sys, json, math, datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 import psycopg
 from db import connect, config, get, dry, Heartbeat
+import signals as sg
 
 WORKERS = int(os.environ.get("WORKERS", "8"))
 BATCH = 100
@@ -162,6 +163,33 @@ def extract(ticker, r, quote_ccy=None):
         reinvest = max(0.0, min(1.5, (capex_3y - da_3y + dwc_3y) / nopat_3y))
     engine = roic * reinvest if roic is not None and reinvest is not None else None
 
+    # ---- Durability (§3.1) — two name-level facts; score.py does the cross-sectional percentiles.
+    # Five YoY comparisons need six fiscal years of revenue; the denominator is always 5, so a short
+    # history counts against rather than being excused.
+    revenues = [num((is_y.get(k) or {}).get("totalRevenue")) for k in ys[:6]]
+    growth_consistency = sg.growth_consistency(revenues)
+
+    # Per-year ROIC over the last five, from the same definitions the 3-year figures use: NOPAT =
+    # EBIT x (1 - tax), invested capital = debt + equity - cash. Per-year tax where the statement
+    # gives it, the blended rate where it does not.
+    per_year = []
+    for k in ys[:5]:
+        i_row, b_row = is_y.get(k) or {}, bs_y.get(k) or {}
+        ebit_y = num(i_row.get("ebit"))
+        if ebit_y is None:
+            continue
+        tx, pre = num(i_row.get("incomeTaxExpense")), num(i_row.get("incomeBeforeTax"))
+        rate = min(0.5, max(0.0, tx / pre)) if tx is not None and pre else tax_rate
+        eq_y = num(b_row.get("totalStockholderEquity"))
+        cash_y = num(b_row.get("cashAndShortTermInvestments")) or num(b_row.get("cash"))
+        debt_y = num(b_row.get("shortLongTermDebtTotal"))
+        if debt_y is None:
+            debt_y = s([num(b_row.get("longTermDebtTotal")), num(b_row.get("shortTermDebt"))])
+        if eq_y is None or cash_y is None or debt_y is None:
+            continue
+        per_year.append((ebit_y * (1 - rate), debt_y + eq_y - cash_y))
+    roic_worst, roic_years = sg.worst_year_roic(per_year)
+
     rev_new = num((is_y.get(ys[0]) or {}).get("totalRevenue"))
     span = min(3, n_years - 1)
     rev_old = num((is_y.get(ys[span]) or {}).get("totalRevenue")) if span >= 1 else None
@@ -297,6 +325,8 @@ def extract(ticker, r, quote_ccy=None):
         eps_yoy_latest=y0, eps_yoy_prev=y1, m4_pass=m4,
         data_confidence=confidence,
         cap_as_of=cap_as_of, cap_close=None, effective_shares=None,
+        growth_consistency=growth_consistency, roic_worst_year=roic_worst,
+        roic_years_reported=roic_years,
         # §4.1: the raw filing document lives in the database now, not compressed in the repo — the
         # point-in-time asset §4.8 calls the honest backtest is only honest if it is queryable.
         raw_doc=json.dumps(r, default=str),
@@ -342,7 +372,8 @@ COLS = ["ticker", "filing_date", "period_end", "currency", "sector", "industry",
         "ebitda", "net_debt_ebitda", "debt_grows_faster", "goodwill", "goodwill_jump", "c1_pass",
         "c1_fail_reason", "pfcf_current", "pfcf_median", "pfcf_obs", "eps_yoy_latest",
         "eps_yoy_prev", "m4_pass", "data_confidence", "primary_ticker", "statement_currency",
-        "quote_ok", "cap_as_of", "cap_close", "effective_shares", "raw", "raw_doc"]
+        "quote_ok", "cap_as_of", "cap_close", "effective_shares",
+        "growth_consistency", "roic_worst_year", "roic_years_reported", "raw", "raw_doc"]
 JSON_COLS = {"raw", "raw_doc"}
 
 

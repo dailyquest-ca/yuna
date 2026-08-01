@@ -66,11 +66,11 @@ def check_gaps(cur):
 
 def check_ccn(cur):
     """The CCN must be the mean of the percentiles the row actually stores (§3.1, §3.3)."""
-    cur.execute("""select ticker, ccn, engine, cash_conv, size_score, data_confidence
+    cur.execute("""select ticker, ccn, engine, cash_conv, durability, data_confidence
                    from bench where ccn is not null""")
     bad = []
-    for ticker, ccn, eng, cc, size, conf in cur.fetchall():
-        parts = [float(x) for x in (eng, cc, size) if x is not None]
+    for ticker, ccn, eng, cc, dur, conf in cur.fetchall():
+        parts = [float(x) for x in (eng, cc, dur) if x is not None]
         if not parts:
             continue
         expect = sum(parts) / len(parts)
@@ -85,18 +85,19 @@ def what_carries_the_scores(cur, top=15):
     """§3.1 calls the engine "the compounding engine" and weights it a third. If the top of the bench
     is carried by cash conversion and smallness, with no measurable engine at all, the score has
     stopped measuring what it is named after — and that is a plan question, not a bug."""
-    cur.execute("""select ticker, round(ccn::numeric,1), engine, cash_conv, size_score,
-                          data_confidence, round((100*engine_raw)::numeric,1)
+    cur.execute("""select ticker, round(ccn::numeric,1), engine, cash_conv, durability,
+                          data_confidence, round((100*engine_used)::numeric,1), engine_provenance
                    from bench order by ccn desc limit %s""", (top,))
     rows = []
     engineless = 0
-    for ticker, ccn, eng, cc, size, conf, raw in cur.fetchall():
+    for ticker, ccn, eng, cc, dur, conf, used, how in cur.fetchall():
         has_engine = eng is not None
         engineless += 0 if has_engine else 1
         rows.append(dict(ticker=ticker, ccn=float(ccn), engine_pct=float(eng) if eng else None,
                          cash_conv_pct=float(cc) if cc else None,
-                         size_pct=float(size) if size else None,
-                         engine_raw_pct=float(raw) if raw is not None else None, confidence=conf))
+                         durability_pct=float(dur) if dur else None,
+                         engine_used_pct=float(used) if used is not None else None,
+                         provenance=how, confidence=conf))
     return rows, engineless
 
 
@@ -165,8 +166,9 @@ def main():
                       f"{b['er_at_stored']:.1%}; clears at {b['hurdle_that_clears_the_floor']}")
             for row in top:
                 print(f"  TOP {row['ticker']:<9} CCN {row['ccn']:>5} · engine "
-                      f"{row['engine_pct'] if row['engine_pct'] is not None else 'DROPPED':>7} · "
-                      f"cash {row['cash_conv_pct']} · size {row['size_pct']} · {row['confidence']}")
+                      f"{row['engine_pct'] if row['engine_pct'] is not None else 'DROPPED':>7} "
+                      f"({row['provenance']}) · cash {row['cash_conv_pct']} · "
+                      f"durability {row['durability_pct']} · {row['confidence']}")
     return 0
 
 
