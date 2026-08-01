@@ -1,6 +1,6 @@
 # Yuna — Zak's Trading Agent
 
-*Updated: 2026-07-31 16:37 UTC*
+*Updated: 2026-08-01 8:57 AM (UTC−6)*
 **Opened:** 2026-07-29 · **Owner:** Zak (decisions, execution) · Yuna (research, ranking, tickets)
 **Rule:** This document is law. Changes only by announced edit — exact section, exact old line, exact new line, Zak's approval — and every edit bumps the Updated stamp.
 
@@ -103,6 +103,7 @@ Stop widths and trail mechanics are set in §3.2.
 - Sleeve weights are measured on **total NAV across all accounts** — placement never changes the math.
 - **Momentum lives in one account only** (TFSA) — stops across accounts is pain for zero benefit.
 - New contributions route **TFSA → RRSP → non-registered**.
+- **One position, one account, one order.** If the placement-priority account's cash can't fund the full size, the position routes to the next account that can fund it whole — topping up an account is Zak's call, never assumed.
 - Borrowed money never funds a registered account — the interest deduction dies at that line.
 - **Accepted cost:** TFSA losses burn contribution room permanently. Momentum takes small losses by design; expected value still favours the TFSA, but the asymmetry is real.
 
@@ -129,7 +130,7 @@ Two pipelines. They share only the raw universe.
 | What we buy | The business | The trend |
 | Candidates | 40–60 bench · monthly | 100–150 · weekly |
 | Gates | Quality floor (computed) · Business model (judgment) | Market stage · Trend template · Setup · Earnings |
-| Score | CCN v1.0 | MCN v1.0 |
+| Score | CCN | MCN |
 | Entry signal | Price ≤ hurdle (checked daily) | Pivot break — volume confirms at EOD |
 | First position | Full size | 50%, pyramid to full |
 | Add on | Weakness below hurdle | Strength above pivot |
@@ -152,7 +153,7 @@ Two pipelines. They share only the raw universe.
 
 **L0 filters:** common stock on NYSE, NASDAQ, or NYSE American (no OTC) · price ≥ $5 · **ADDV** (average daily dollar volume = shares × price, 50-day median) ≥ $10M · market cap ≥ $300M · listed ≥ 6 months · delisted names retained for backtesting.
 
-**Foreign issuers:** US-listed foreign issuers and ADRs are full L0 and momentum members — price and volume are USD, and price doesn't care where the headquarters is. For the compounder pipeline they are eligible only when FCF and market cap are expressed in one currency (financials converted at fiscal-period-end FX; market cap: the vendor's USD figure — §3.1); if conversion data is unavailable → data-confidence path (§3.3).
+**Foreign issuers:** US-listed foreign issuers and ADRs are full L0 and momentum members — price and volume are USD, and price doesn't care where the headquarters is. For the compounder pipeline they are eligible only when FCF and market cap are expressed in one currency (financials converted at fiscal-period-end FX; market cap: the vendor's USD figure — §3.1); if conversion data is unavailable **or the statement currency is unknown** → data-confidence path (§3.3).
 
 **L2 composition:** top-10 MCN names in BUY state + every bench name within 10% of its hurdle (price ≤ 1.10 × hurdle) + all current holdings. Cap 20 — holdings always included; remaining seats by trigger proximity (= |last close − trigger| ÷ last close), then score; spare seats fill from L1-M by MCN rank, for visibility. **Holdings are always scored, by both pipelines — membership lists never drop a name the book owns.**
 
@@ -202,7 +203,7 @@ Bench built **half smaller-cap, half larger-cap by mechanism**: the funnel takes
 
 **Gate C1 — Quality floor** *(computed)*
 - Positive free cash flow
-- Growth funded internally: net share issuance ≤ 2%/yr (3-yr avg) · net debt not growing faster than EBITDA
+- Growth funded internally: net share issuance ≤ 2%/yr (3-yr avg) · above 1.0× net debt/EBITDA, net debt must not grow faster than EBITDA — below 1.0×, debt growth is a C2-memo flag, never a kill (a near-zero base makes any growth read as infinite; the level is what makes the growth meaningful)
 - Leverage: net debt / EBITDA ≤ 2.5×
 - Banks and insurers excluded — vendor industries named `Banks - …` or `Insurance - …`; Insurance Brokers, Credit Services, Capital Markets and the rest of Financial Services remain eligible (EBITDA is meaningless for underwriters and deposit-takers, not for fee businesses). A name with no vendor industry is not excludable by this test — the gap is named on its C2 memo
 - Goodwill jumps don't fail the gate — they route a serial-acquirer flag to the C2 memo
@@ -212,22 +213,22 @@ Does scale make this company stronger? Does it share gains with customers to wid
 Proxy inputs: gross margin stability · market share trend · incremental margin · revenue per employee trend.
 Every memo and every decision logged as an observation.
 
-**CCN v1.0 — equal weight, 0–100** *(components are L0 percentiles)*
+**CCN — equal weight, 0–100** *(components are L0 percentiles)*
 
 | Component | Weight | Definition |
 |---|---|---|
-| Compounding engine | 33% | ROIC × reinvestment rate, 3-yr smoothed. Requires ≥ 3 fiscal years, else → data-confidence path (§3.3) |
+| Compounding engine | 33% | ROIC × reinvestment rate, 3-yr smoothed — falls back per the engine waterfall below. A name with no computable engine by either method is **not bench-eligible**; the data-confidence path (§3.3) never applies to the engine |
 | Cash conversion | 33% | 3-yr FCF ÷ 3-yr net income |
-| Size | 33% | Percentile of log market cap, inverted — smaller scores higher |
+| Durability | 33% | Equal-weight of 2 sub-scores over the last 5 fiscal years: **growth consistency** = years with positive YoY revenue growth ÷ 5 (unreported years count against) · **ROIC floor** = the worst single reported year's ROIC, percentile (minimum 3 reported years, else not bench-eligible). A year with invested capital ≤ 0 counts best-percentile when NOPAT > 0 — capital-free compounding — and worst when NOPAT ≤ 0 |
 
 **Formulas:** NOPAT = EBIT × (1 − effective tax) · Invested capital = debt + equity − cash · Reinvestment rate = (capex − D&A + ΔWC) ÷ NOPAT, floored at 0, capped at 150%.
 
-**Engine reliability check:** growth = ROIC × reinvestment is an identity. Compute the engine from cash-flow components, compare to observed 3-yr revenue growth — agreement (within **5 percentage points**) = trustworthy · beyond 5pp = divergence: the engine component routes down the data-confidence path (§3.3) and the flag lands on the C2 memo · never silently score.
+**Engine waterfall:** growth = ROIC × reinvestment is an identity, and the cross-check exploits it. Compute the engine from cash-flow components and compare it to observed 3-yr revenue growth — agreement within **5 percentage points** → trustworthy, score it. Unmeasurable (insufficient or undefined cash-flow inputs — < 3 fiscal years, NOPAT ≤ 0) **or** divergence beyond 5pp → the engine becomes **observed 3-yr revenue growth, capped at 25%**, marked **growth-derived** on the bench row and every memo that cites it — the observed side of the identity is the honest substitute, and the cross-check doesn't apply to it (it would check the number against itself). Growth-derived names carry §3.3's guardrails: bottom of the size band, manual sign-off. Revenue history also < 3 years → no engine by either method → **not bench-eligible** · never silently score. *A floored-to-zero engine on a growing business needs no special clause — it fails the cross-check arithmetically and falls back on its own. Second recorded limit: the fallback is pro-cyclical — a trough year reads as decay (an Old Dominion at the bottom of a freight cycle scores like a melting business); the formula stays honest about what it sees, and R5 judgment shops troughs.*
 
-**Entry hurdle v1.0** — separate from the CCN, computed daily per bench name:
+**Entry hurdle** — separate from the CCN, computed daily per bench name:
 
 > **Expected return at price P = FCF yield + engine growth − derating drag**
-> - FCF yield = TTM free cash flow ÷ market cap at P — **market cap is the vendor's USD figure** (it resolves ADR ratios, listing currency, and share class); cap at price P uses **effective shares = vendor cap ÷ last close** · vendor cap missing → data-confidence path (§3.3)
+> - FCF yield = TTM free cash flow ÷ market cap at P — **market cap is the vendor's USD figure** (it resolves ADR ratios, listing currency, and share class); cap at price P uses **effective shares = vendor cap ÷ the close on the cap's report date, frozen with the filing** — the hurdle moves when a filing changes FCF, growth, or the fair multiple, never because the quote moved; `gap_to_hurdle` carries price · corporate actions that change the count between filings (splits, large buybacks) re-derive shares under the per-ticker call exception · vendor cap missing → data-confidence path (§3.3)
 > - Engine growth capped at **25%**
 > - Derating drag = annualized 5-yr slide from current P/FCF down to the **fair multiple** = lower of the stock's own 5-yr median P/FCF or **30×**. Names with < 3 yrs of history: fair = lower of current or 25×
 > - The drag is **never a credit** — cheapness earns no bonus. The margin of safety lives here
@@ -235,9 +236,9 @@ Every memo and every decision logged as an observation.
 
 15% is an underwriting floor, not the expectation — growth is capped and rerating earns nothing, so what underwrites at 15% has historically realized above it. Analyst target prices are never an input (documented optimism bias); they serve only as a data-sanity flag when our hurdle diverges wildly from the street.
 
-**Sizing:** CCN 70–84 → **12%** of NAV · CCN 85+ → **15%** · flat 12% for at least the first two full calendar quarters after cutover (Phase 0, §6, complete) — at a monthly approval (R5) thereafter, the shadow-book cohort comparison (85+ vs 70–84) is presented and Zak rules whether 15% sizing unlocks; absent a ruling, flat 12% continues · capped by the sleeve ceiling — the last name entered sizes to the remaining room. Full position in a single order at or below the hurdle.
+**Sizing:** CCN 70–84 → **12%** of NAV · CCN 85+ → **15%** · flat 12% for at least the first two full calendar quarters after cutover (Phase 0, §6, complete) — at a monthly approval (R5) thereafter, the shadow-book cohort comparison (85+ vs 70–84) is presented and Zak rules whether 15% sizing unlocks; absent a ruling, flat 12% continues · capped by the sleeve ceiling — the last name entered sizes to the remaining room. Full position in a single order at or below the hurdle — a **GTC buy limit at the hurdle price**: it fills immediately anywhere at/below the hurdle, waits above it, and is cancelled and replaced when a filing moves the hurdle.
 
-**Adding / averaging down — permitted.** CCN ≥ 70 and price below hurdle: 5–15% below → add **50%** of original size · more than 15% below → add **100%** · max 2 adds per name per 12 months (crash-protocol tactical adds exempt) · the 25% single-name entry ceiling still applies.
+**Adding / averaging down — permitted.** CCN ≥ 70, price below hurdle, **and price below the entry fill** — add bands measure from the fill, so entry day arms nothing however deep the discount: 5–15% below the fill → add **50%** of original size · beyond 15% below the fill → add **100%** · max 2 adds per name per 12 months (crash-protocol tactical adds exempt) · the 25% single-name entry ceiling still applies.
 
 **Entry snapshot:** at purchase, raw component values (engine, cash conversion, margins) are recorded. Exits are judged against this snapshot — **absolute, not relative.**
 
@@ -265,7 +266,7 @@ Every memo and every decision logged as an observation.
 
 **L1-M membership = M2 + M4 pass, ranked by MCN, top 150.**
 
-**M1 v1.0 — Market stage (Weinstein):** S&P 500 Friday close above its 30-week average **and** the average no lower than 4 weeks ago → ON. Friday close below the average → OFF. Weekly closes only — no intraday flips. The gate is a **latch** — it holds its state until the opposite condition fires (price above a *falling* average changes nothing). "Friday" = the last trading day of the week. Whipsaw in choppy tapes is the accepted cost; every flip is logged as an observation.
+**M1 — Market stage (Weinstein):** S&P 500 Friday close above its 30-week average **and** the average no lower than 4 weeks ago → ON. Friday close below the average → OFF. Weekly closes only — no intraday flips. The gate is a **latch** — it holds its state until the opposite condition fires (price above a *falling* average changes nothing). "Friday" = the last trading day of the week. Whipsaw in choppy tapes is the accepted cost; every flip is logged as an observation.
 
 **M2 — Trend template:** above the 150 & 200-day · 150 above 200 · 200-day rising (above its value 21 sessions ago) · above the 50-day · ≥ 30% off the 52-week low · within 25% of the 52-week high.
 
@@ -273,9 +274,9 @@ Every memo and every decision logged as an observation.
 
 **Base detection** *(deterministic — every detected base is ≥ 25 sessions by construction)*: the **pivot** is the highest high in the window **120 to 25 sessions ago**; the base runs from the pivot's session to today. A base is **broken** by either: any later session **closing** above the pivot — the breakout happened — or any later session's **high** exceeding pivot × 1.005 without such a close — the pivot was tested and rejected, spent. Either way, WAIT for the next base. Highs within the 0.5% grace are noise; closes decide whether a breakout succeeded, highs beyond noise decide whether the pivot survives. An unbroken base is **valid** when depth (pivot to lowest low) ≤ 25%. **Final-contraction low = the lowest low of the last 10 sessions.** Entry and initial stop per the entry mechanic (§5.1) and the Stops rule below.
 
-**M4 — Earnings acceleration:** latest reported quarter YoY EPS growth ≥ 25%, **or** accelerating for two consecutive quarters with the latest ≥ 15%.
+**M4 — Earnings acceleration:** latest reported quarter YoY EPS growth ≥ 25%, **or** accelerating for two consecutive quarters with the latest ≥ 15%. EM ADRs whose EPS is inflation- or FX-flattered pass this test mechanically — the R3 workup names the currency context; judgment stays human.
 
-**MCN v1.0 — equal weight, 0–100** *(components are percentiles; all ranking windows end 10 trading days ago)*
+**MCN — equal weight, 0–100** *(components are percentiles; all ranking windows end 10 trading days ago)*
 
 | Component | Weight | Definition |
 |---|---|---|
@@ -308,7 +309,7 @@ A pyramid stalled below full size for 4 weeks either completes on the next base 
 - Ratchet: full size → breakeven · +15% from average cost → trail 10% below highest close since entry · stops ratchet up, never down.
 - **Euphoria rule** — tighten, never sell: when price closes > 2 standard deviations above its own 50-day (std dev of closes, 50-day window) → trail tightens to **5%** below highest close since entry.
 
-**Sizing:** conviction sets the risk budget — **0.7% of NAV** at MCN 70–84, **0.9%** at 85+ (the first 90 calendar days from the system's first momentum entry fill run 0.5% / 0.7% — the start-low rule) · stop distance is the divisor · **size = budget ÷ stop**, capped by the Section 2 bands and by the sleeve ceiling — the last name entered sizes to the remaining room.
+**Sizing:** conviction sets the risk budget — **0.7% of NAV** at MCN 70–84, **0.9%** at 85+ (the first 90 calendar days from the system's first momentum entry fill run 0.5% / 0.7% — the start-low rule) · **MCN < 70 never tickets — BUY-state names below 70 stay queued** · stop distance is the divisor · **size = budget ÷ stop**, capped by the Section 2 bands and by the sleeve ceiling — the last name entered sizes to the remaining room.
 
 *Why these numbers:* the budget is how much NAV is lost if the stop fires. Wide stop → smaller position; tight stop → bigger. At an 8% stop these budgets yield ~8.8% and ~11.3% positions — inside the band, so the formula genuinely governs; genuinely tight stops still clip at the 12% ceiling. Four momentum names stopping out together costs ~3.6% of NAV. During the start-low window the reduced budgets may size below the 8% band floor — the start-low rule overrides the floor; the 4% NAV minimum still binds.
 
@@ -334,7 +335,7 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 
 **Holding through earnings (momentum):** on the last session before a scheduled report, a position holds through the print only with a cushion — last close ≥ 1.08 × average cost (one full stop-width of profit absorbs the gap). Below that cushion → exit ticket that evening. Stops stay placed either way. Compounders hold through earnings by design — the thesis, not the print, is the exit.
 
-**Data confidence:** never assume a missing value — drop the component, renormalize remaining weights to 100, mark the name as scored on 2 of 3. An incompletely-scored name is capped at the bottom of its size band and requires manual sign-off. A failed engine cross-check (§3.1) routes here the same way.
+**Data confidence:** never assume a missing value — drop the component, renormalize remaining weights to 100, mark the name as scored on 2 of 3. An incompletely-scored name is capped at the bottom of its size band and requires manual sign-off. **The compounding engine never routes here** — renormalizing away the engine pays a name for being unmeasurable (missingness travels with the very components that survive); the engine has its own waterfall (§3.1).
 
 **Data discipline (non-negotiable):** fundamentals used as of **filing date**, never fiscal period end. Delisted names retained in the universe.
 
@@ -346,7 +347,7 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 
 **Shadow book:** every pass and every exit snapshots score + price, marked at 30 / 60 / 90 days. Mechanics live with the build (§4.8).
 
-**Versioning:** CCN v1.0 · MCN v1.0 · Hurdle v1.0 · M1 v1.0. Changes increment and are logged so later versions can be measured against earlier ones. All formulas are **version 1 of an experiment** — a reasoned prior, not evidence. The shadow book converts one into the other. **Only formulas carry version labels** — rules, mechanisms, and the plan itself stay unversioned until the system is live.
+**Versioning:** every formula — CCN, MCN, Hurdle, M1 — is **v1**, and stays v1 until the system is live: nothing has been released, so there is nothing to increment. Pre-release changes are just development — the plan text is the spec, the changelog is the lineage. Version numbers start counting at cutover; from then on, changes increment and are logged so later versions can be measured against earlier ones. All formulas are **version 1 of an experiment** — a reasoned prior, not evidence. The shadow book converts one into the other. Nothing else — rules, mechanisms, the plan itself — ever carries a version label.
 
 
 ---
@@ -405,7 +406,7 @@ Five **scheduled** jobs form the operating cadence — the canonical set every f
 
 | Job | When | What it does |
 |---|---|---|
-| **`nightly-ingest`** | Mon–Fri **02:00 UTC** (≈ 6–7 PM PT) | Pull the day's bars (bulk) + FX + corporate actions → quarantine → recompute stops, trails, hurdles, market gate → update queue states → event scan (earnings ≤ 5 days, gaps ± 7%) |
+| **`nightly-ingest`** | Mon–Fri **02:00 UTC** (≈ 6–7 PM PT) | Pull the day's bars (bulk) + FX + corporate actions → quarantine → recompute stops, trails, hurdles, market gate → update queue states → book revalued from the night's bars — **every holding's valuation price must equal its latest bar; any mismatch fails the run** → event scan (earnings ≤ 5 days, gaps ± 7%) |
 | **`nightly-retry`** | Mon–Fri **03:00 UTC** | First step reads the runs table — exits if the night is already green, re-runs the ingest if not |
 | **`weekly-rank`** | Sat **12:00 UTC** | Group RS → rebuild L1-M → MCN → re-rank the queue → rewrite triggers |
 | **`monthly-funnel`** | 1st Sat **10:00 UTC** | Rebuild L0 → Gate C1 → CCN → funnel output for the approval session |
@@ -531,9 +532,9 @@ Yuna writes like a sharp friend who happens to run a research desk — not like 
 | 3 | **Gaps ±7%** | Momentum gapped below its stop-limit → order unfilled → **manual exit at open** ticket · Compounder gapped down → check invalidators + hurdle (a gap can create an add) |
 | 4 | **Fired stops** | Price crossed a stop → position marked *presumed stopped* → brief asks Zak to confirm the fill |
 | 5 | **Gate transition** (Mondays) | M1 flips only on Friday close · OFF → momentum exit tickets · ON → queue re-armed |
-| 6 | **Triggers & hurdles** | Entry/add tickets for whatever the nightly job armed · blackout, sleeve room, theme entry-cap, add-caps enforced before any ticket is written · effective-bets count printed on every draft ticket (⚠️ below 4 — §2.2) · **max 2 new-entry tickets per brief** — extras wait in queue order |
+| 6 | **Triggers & hurdles** | Entry/add tickets for whatever the nightly job armed · blackout, sleeve room, theme entry-cap, add-caps enforced before any ticket is written · every entry ticket names its **account, currency (FX estimate printed), theme, and risk in C$ and % of NAV** · effective-bets count printed on every draft ticket (⚠️ below 4 — §2.2) · **max 2 new-entry tickets per brief** — extras wait in queue order |
 | 7 | **Unconfirmed stop moves** | Repeat as one line until Zak confirms |
-| 8 | **Compose** | Snapshot first (freshness · NAV + move · tickets as broker-ready pairs · "**You:** …") · context below as needed · written to briefs |
+| 8 | **Compose** | Snapshot first (freshness · NAV + move · **the full blackout wall, holdings included** · tickets as broker-ready pairs · "**You:** …") · context below as needed · written to briefs |
 
 **Entry mechanic ✅ RULED (2026-07-29 · confirmation amended 2026-07-31):** breakout entries execute as **GTC buy stop-limit orders at the pivot** (trigger = pivot · limit = pivot + 2%), placed from the brief when a name reaches BUY state. The volume condition cannot live inside a broker order, so it is judged at EOD under the **breakout-confirmation rule (§3.2)**: confirmed → the pyramid arms · unconfirmed → the pyramid freezes at 50%, three sessions to confirm late, exit only on a close back below the pivot. Pyramid steps 2–3 ship as add stop-limits in the brief once the breakout confirms (both limits at pivot × 1.05 — §3.2).
 
@@ -555,7 +556,7 @@ Zak provides settled Wealthsimple activity **plus per-account cash balances and 
 
 Funnel output → new bench candidates, each with a **C2 memo**:
 
-> **C2 memo template (target ~200 words):** company + one-line what-it-does · the three Gate C2 questions, two sentences each (does scale strengthen it? gains shared to widen the moat? where does the next dollar go and what does it earn?) · proxy metrics table · serial-acquirer flag if goodwill jumped · **PASS / FAIL + confidence**.
+> **C2 memo template (target ~200 words):** company + one-line what-it-does · the three Gate C2 questions, two sentences each (does scale strengthen it? gains shared to widen the moat? where does the next dollar go and what does it earn?) · proxy metrics table · serial-acquirer flag if goodwill jumped · owner-FCF note for float and credit-book businesses (reported FCF can be customer float in costume) · **PASS / FAIL + confidence**.
 
 → **annual re-underwrites** for any holding at its purchase anniversary this month (Gate C2 from scratch, invalidators re-set) → evictions list (rule-driven, reported) → audit snapshot: return vs the 30% bar · sleeve observations · breaches · learnings due for **promotion or expiry** → Zak rules → approvals join the bench, rejections get 12-month cooldown rows.
 
@@ -611,7 +612,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 - [x] Vision, portfolio architecture, selection engine — §1–3
 - [x] Mechanics, session runbooks, deployment protocol — §4–6
 - [x] Data vendor selected, plan verified against vendor docs
-- [x] All formulas specified — CCN v1.0 · MCN v1.0 · Hurdle v1.0 · M1 v1.0
+- [x] All formulas specified — CCN · MCN · Hurdle · M1 (all v1 until release — §3.3)
 - [x] D1–D7 resolved in the sections · D9 and D11 absorbed by Phase 0's strict rule
 
 ---
@@ -631,6 +632,10 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 
 | Date | Entry |
 |---|---|
+| 2026-08-01 | **Version labels retired until release.** Incrementing minors pre-release implied a shipping history that doesn't exist — this is still development. Labels stripped from every header, table, and checklist; the §3.3 Versioning paragraph is now their only home and says one thing: every formula is v1 until cutover, and counting starts when the system is live. The plan text is the spec; the changelog is the lineage. History rows keep their old labels — the record stays the record. |
+| 2026-08-01 | **Audit batch — trial-run teardown (8 edits).** Nightly-ingest gains the book-valuation canary (every holding's price = its latest bar, or the run fails) · compounder entry order legislated as a GTC buy limit at the hurdle · averaging-down bands measure from the entry fill — entry day arms nothing · MCN < 70 never tickets · M4 EM-ADR currency note · one-position-one-account funding rule (§2.6) · R1 tickets name account / currency-FX / theme / risk in C$ and % NAV · every R1 snapshot restates the full blackout wall, holdings included |
+| 2026-08-01 | **Vetting rulings V3 + V4b — durability replaces size; the debt tripwire gets a floor; four data-truths become law.** Independent read-only re-scores against production drove all of it. v1.0's crown was a small-cap cyclical screen; v1.1's crown — Durability = growth years ÷ 5 + worst-year ROIC percentile, capital-free years top-coded — reads like a compounder bench, and the size tilt was double-counted (the cohort split already carries the small-cap hunt). CCN v1.0 → v1.1. Aristocrat autopsy: 19 of 26 canonical compounders died at C1 — V/MA/SPGI/MCO by a **code** bug (vendor sector flag instead of B4's industry strings — agent order V4a, the plan's letter was already correct), MSFT/GOOGL/BKNG at 0.2–0.5× leverage by the debt-growth tripwire → **V4b**: the growth test applies only above 1.0× net debt/EBITDA; below, C2 flag, never a kill. Foreign-issuer law hardened: unknown statement currency → data-confidence (exhibits: WSE null currency, PDD storing raw CNY against a USD cap). C2 memo template gains the owner-FCF note for float and credit-book businesses (MELI-class). Second engine limit recorded: the growth-derived fallback is pro-cyclical — ODFL at the freight trough scored near the bottom on a −4.2% engine; R5 shops troughs. **70/85 sizing cutoffs and bench ranks re-observed on the first production v1.1 score — Zak re-rules if the distribution moved.** |
+| 2026-08-01 | **Vetting rulings V1–V2 — the engine waterfall and the frozen share count.** `verify` run 1: the top 15 CCNs were all dropped-engine names — drop-and-renormalize imputes the missing engine at the mean of the survivors, and missingness travels with high cash conversion and smallness: a promotion machine (the E4 routing and B5's ÷-last-close were both this desk's wordings). V1: the engine never routes to data-confidence — within 5pp → score; unmeasurable or divergent → engine = observed 3-yr revenue growth capped at 25%, marked growth-derived, §3.3 guardrails attached; no engine by either method → not bench-eligible. The floor-at-zero defect (learnings #16) resolves through the cross-check automatically. V2: effective shares freeze at the filing (vendor cap ÷ close on the cap's report date) — the hurdle is a function of filings, never the quote; corp actions re-derive via the per-ticker call exception. `verify`'s two-way hurdle mismatches were the moving-shares signature. R5 approvals held until re-score + clean `verify`. |
 | 2026-07-31 | **X4 — "fresh" deleted from the re-entry rule.** Base life is legislated in one place — detection (§3.2). A sub-noise shakeout (high inside the 0.5% band, close back below pivot) exits via the hair-trigger while the base survives by law; "fresh" either contradicted detection or meant nothing. Re-entry = a valid base + all gates. Consequence accepted with eyes open: same-pivot re-entry after a shakeout — the classic pattern. Any poke beyond 0.5% still spends the pivot and forces a new base. |
 | 2026-07-31 | **Simplification round S1–S5 — ruthless pass: four kills and a minor.** near-BUY deleted entirely: detection window back to 120→25 (validity ≥ 25 by construction; X3's two-way break kept), forming state / base age / provisional triggers / the invented 15 all gone; WAIT = no valid base yet, re-scanned nightly; L2 spare seats fill from L1-M by MCN rank; glossary entry removed, Pivot restored to 25-by-construction. Averaging-down ranges → fixed tiers (**50% / 100%**). Goodwill dual-ROIC run deleted — computed a confidence label with no defined consequence; the serial-acquirer flag and data-confidence path already carry the risk. MCN setup 4 → 3 sub-scores — pullback contraction dropped (noisiest signal, both windows invented); tight · quiet · near-highs at equal weight. Euphoria rule loses its second trigger — the 2σ test carries it without per-position running-max state. Net: one state machine, two invented numbers, one dangling computation, one noisy signal leave the law; no behavior of value leaves with them. |
 | 2026-07-31 | **X-rulings — gap mechanics simplified structurally.** X3: a base is broken by any later **close** above the pivot (breakout happened) OR any later **high** beyond pivot × 1.005 without one (pivot tested and rejected — spent); highs within the grace are noise. Closes judge breakouts, highs-beyond-noise judge pivot survival — kills the exit-and-instant-re-arm churn loop and gives "fresh base" teeth; redundant last-close clause trimmed. X2 dissolved rather than ruled: the gap-up market-order rule (and its nobody-at-the-open observer problem) is deleted — both pyramid add tickets carry **limit pivot × 1.05**, the schedule's ceiling; skipped bands complete at the open automatically, gaps beyond +5% fill nothing, all enforced by resting GTC orders unwatched. Pyramid trigger cells sharpened from bands to triggers (+2% / +4%). §5.1 mirrors the unified limit. Deliberate residue named and accepted: a fade-back-to-ceiling fill. |
@@ -679,10 +684,13 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | DATABASE_URL | The Supabase Postgres connection string (session pooler) — the jobs' all-powerful credential; lives only in GitHub Actions secrets |
 | Derating drag | The annual cost of a rich valuation sliding toward a fair one — always a cost, never a credit |
 | DRY_RUN | A switch that makes a job compute everything and write nothing |
+| Durability | CCN component: growth consistency (growth years ÷ 5) and worst-reported-year ROIC percentile, equal weight; capital-free years (invested capital ≤ 0) count best when NOPAT > 0 (§3.1) |
 | Effective bets | 1 ÷ Σ wᵢwⱼρᵢⱼ — how many truly independent positions the book holds once correlation is counted (§2.2) |
+| Effective shares | Vendor USD market cap ÷ the close on the cap's report date, frozen with the filing — the hurdle's share count (§3.1) |
 | EOD | End-of-day — one price record per stock per day, after the close |
 | FCF | Free cash flow — cash from operations minus capital spending |
 | Final-contraction low | The lowest low of a base's last 10 sessions — the natural stop shelf under a breakout (§3.2) |
+| Growth-derived | Engine scored as observed 3-yr revenue growth, capped at 25%, when the cash-flow engine is unmeasurable or fails the cross-check; carries §3.3's guardrails (§3.1) |
 | GTC | Good-til-cancelled — an order that stands until filled, cancelled, or expired (90 days at Wealthsimple) |
 | HELOC | Home equity line of credit — readvanceable, so it's exempt from the never-increase-into-strength rule |
 | Hurdle | The computed price at which a compounder's expected return clears 15%/yr — the "start now" line (§3.1) |
