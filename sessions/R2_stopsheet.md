@@ -24,7 +24,7 @@ broken pipeline must never do is talk Zak into moving them on stale numbers.
 ## Step 2 — The protective set
 
 ```sql
-select kind, ticker, reason, stop, stop_limit_price, note from armed
+select kind, ticker, reason, stop, stop_limit_price, note from v_armed_latest
   where urgency='protective' order by kind, ticker;
 select ticker, stop, stop_limit, trail_mode from book
   where status='open' and sleeve='momentum' order by ticker;

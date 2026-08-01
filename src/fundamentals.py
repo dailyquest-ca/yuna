@@ -228,7 +228,12 @@ def extract(ticker, r, quote_ccy=None):
     if net_debt is not None and nd_old is not None and net_debt > 0 and nd_old > 0 \
        and ebitda and eb_old and eb_old > 0:
         debt_faster = (net_debt / nd_old) > (ebitda / eb_old)
-        if debt_faster:
+        # §3.1 C1, ruling V4b: the growth test bites only ABOVE 1.0x net debt/EBITDA. Below that the
+        # level is too small for the growth to mean anything — a near-zero base makes any increase
+        # read as explosive — so it becomes a C2-memo flag and never a kill. This one clause was
+        # rejecting 864 of 2,832 names, more than the 623 that passed the whole gate, and it is what
+        # killed MSFT, GOOGL and BKNG at 0.2-0.5x leverage in the aristocrat autopsy.
+        if debt_faster and nd_ebitda is not None and nd_ebitda > 1.0:
             fails.append("net debt growing faster than EBITDA")
 
     if is_fin:
@@ -256,7 +261,18 @@ def extract(ticker, r, quote_ccy=None):
               (y0 is not None and y1 is not None and y0 > y1 and y0 >= 0.15))
 
     have = sum(x is not None for x in (engine, cash_conv, mcap))
-    confidence = "flagged" if flagged or have < 2 else ("full" if have == 3 else "2of3")
+    # §3.0, hardened 2026-08-01: a foreign issuer is compounder-eligible only when FCF and market cap
+    # are expressed in one currency — "if conversion data is unavailable **or the statement currency
+    # is unknown** → data-confidence path". Unknown is not the same as matching; 24 names were being
+    # scored as though a currency we never read agreed with the one we quote in.
+    confidence = ("flagged" if flagged or have < 2 or stmt_ccy is None
+                  else ("full" if have == 3 else "2of3"))
+
+    # §3.1: cap at price P uses effective shares = vendor cap / the close on the cap's `as_of` date,
+    # frozen with the filing. The vendor stamps General.UpdatedAt; where it gives none the plan names
+    # the fetch date. `cap_close` and `effective_shares` are filled from our own bars after the write
+    # (freeze_effective_shares) — extraction has no database.
+    cap_as_of = day(G.get("UpdatedAt")) or dt.date.today().isoformat()
 
     return dict(
         ticker=ticker, name=G.get("Name"), filing_date=filing_date, period_end=day(ys[0]),
@@ -280,6 +296,10 @@ def extract(ticker, r, quote_ccy=None):
         pfcf_median=None, pfcf_obs=None,
         eps_yoy_latest=y0, eps_yoy_prev=y1, m4_pass=m4,
         data_confidence=confidence,
+        cap_as_of=cap_as_of, cap_close=None, effective_shares=None,
+        # §4.1: the raw filing document lives in the database now, not compressed in the repo — the
+        # point-in-time asset §4.8 calls the honest backtest is only honest if it is queryable.
+        raw_doc=json.dumps(r, default=str),
         raw=json.dumps({
             "quarterly_fcf": qseries,
             # Point-in-time history. Every statement EODHD returns carries its own filing_date,
@@ -322,7 +342,40 @@ COLS = ["ticker", "filing_date", "period_end", "currency", "sector", "industry",
         "ebitda", "net_debt_ebitda", "debt_grows_faster", "goodwill", "goodwill_jump", "c1_pass",
         "c1_fail_reason", "pfcf_current", "pfcf_median", "pfcf_obs", "eps_yoy_latest",
         "eps_yoy_prev", "m4_pass", "data_confidence", "primary_ticker", "statement_currency",
-        "quote_ok", "raw"]
+        "quote_ok", "cap_as_of", "cap_close", "effective_shares", "raw", "raw_doc"]
+JSON_COLS = {"raw", "raw_doc"}
+
+
+def freeze_effective_shares(conn, tickers):
+    """§3.1 — pin the hurdle's share count to the filing, not to tonight's quote.
+
+    effective shares = vendor cap / the close on the cap's `as_of` date. The close is taken from our
+    own bars, using the last session at or before that date: a document stamped on a weekend or
+    fetched before the day's bar landed must not silently produce no share count.
+
+    Why this exists at all: with the count re-derived from the *latest* close every night, the hurdle
+    moved whenever the quote moved. `verify` found eleven mismatches running in both directions —
+    names that had risen showed understated hurdles, names that had fallen showed overstated ones —
+    which is the signature of a divisor that travels with price. A hurdle is a statement about the
+    business; it may only move when a filing moves it.
+    """
+    if dry():
+        return 0
+    with conn.cursor() as cur:
+        cur.execute("""update fundamentals f
+                          set cap_close = p.close,
+                              effective_shares = f.market_cap / p.close
+                        from lateral (select close from prices
+                                       where ticker = f.ticker and d <= f.cap_as_of
+                                       order by d desc limit 1) p
+                       where f.ticker = any(%s)
+                         and f.market_cap is not null and f.market_cap > 0
+                         and f.cap_as_of is not null
+                         and p.close > 0
+                         and f.effective_shares is null""", (list(tickers),))
+        n = cur.rowcount
+    conn.commit()
+    return n
 
 
 def flush(conn, rows, errors):
@@ -330,7 +383,7 @@ def flush(conn, rows, errors):
     cannot cost us the other ninety-nine."""
     if not rows or dry():
         return 0
-    ph = ",".join("%s::jsonb" if c == "raw" else "%s" for c in COLS)
+    ph = ",".join("%s::jsonb" if c in JSON_COLS else "%s" for c in COLS)
     setters = ",".join(f"{c}=excluded.{c}" for c in COLS if c not in ("ticker", "filing_date"))
     sql = (f"insert into fundamentals({','.join(COLS)}) values ({ph}) "
            f"on conflict (ticker,filing_date) do update set {setters}, fetched_at=now()")
@@ -440,6 +493,8 @@ def main():
                         done += flush(conn, buf, errors); buf = []
                         print(f"  {done} written, {fail} failed, {hb.calls[0]} calls")
             done += flush(conn, buf, errors)
+            frozen = freeze_effective_shares(conn, targets)
+            hb.detail["effective_shares_frozen"] = frozen
 
             hb.rows = done
             # EODHD bills a fundamentals request at 10 units — calls_used counts requests

@@ -31,7 +31,7 @@ must not stop a momentum entry.
 ## Step 2 — Quarantine
 
 ```sql
-select * from armed where reason='quarantine';
+select * from v_armed_latest where reason='quarantine';
 ```
 
 Anything quarantined needs a live second source before it acts — pull an EODHD live quote through
@@ -41,7 +41,7 @@ in the brief. A quarantined print never silently fires a sell.
 ## Step 3 — Gaps and fired stops
 
 ```sql
-select * from armed where kind='exit' and reason in ('gap','stop') order by ticker;
+select * from v_armed_latest where kind='exit' and reason in ('gap','stop') order by ticker;
 ```
 
 - `reason='gap'` on a momentum name means the open was below the stop-limit, so the resting sell
@@ -55,7 +55,7 @@ select * from armed where kind='exit' and reason in ('gap','stop') order by tick
 ## Step 4 — Protective moves
 
 ```sql
-select ticker, stop, stop_limit_price, note from armed
+select ticker, stop, stop_limit_price, note from v_armed_latest
   where kind='stop_move' order by ticker;
 ```
 
@@ -77,7 +77,7 @@ observation, and the brief says what it means in one sentence, not three.
 ```sql
 select kind, ticker, sleeve, account, reason, order_type, trigger_price, limit_price, stop,
        stop_limit_price, qty, size_pct, score, blocked_by, note
-  from armed where kind in ('entry','add') order by blocked_by nulls first, score desc nulls last;
+  from v_armed_latest where kind in ('entry','add') order by blocked_by nulls first, score desc nulls last;
 select detail->>'effective_bets' bets, detail->>'effective_bets_warn' warn
   from briefs where kind='nightly' order by id desc limit 1;
 ```
@@ -101,7 +101,7 @@ the group cap" tells Zak something real about the book.
 ## Step 7 — Checks asked of you
 
 ```sql
-select ticker, reason, score, note, detail from armed where kind='check';
+select ticker, reason, score, note, detail from v_armed_latest where kind='check';
 ```
 
 An invalidator read is two sentences, not a memo. A sub-55 CCN opens the 48-hour review clock —

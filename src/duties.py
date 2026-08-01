@@ -19,6 +19,7 @@ from db import connect, config, dry, get, jsonb, nav_cad, observe, Heartbeat
 import signals as sg
 
 CAL_DAYS = 45
+CAL_BACK = 400          # a full reporting year behind, so "already reported" is a fact, not a guess
 
 
 # --------------------------------------------------------------------------- fills (§4.5)
@@ -135,8 +136,14 @@ def rebase_for_splits(conn, hb):
 # --------------------------------------------------------------------------- earnings (§4.1)
 def sync_earnings(conn, hb):
     today = dt.date.today()
+    # Forward-only left the system unable to tell "already reported, next print is beyond the window"
+    # from "the calendar has a hole" — MEDP, a July reporter, simply had no row at all. The window now
+    # reaches back a full reporting year, so `v_earnings_state` can answer both questions from the
+    # ledger: last_reported_date and next_report_date, per ticker, with no denormalized column to
+    # drift. One extra call on a job that already spends 46.
     data = get("calendar/earnings", hb.calls,
-               **{"from": today.isoformat(), "to": (today + dt.timedelta(days=CAL_DAYS)).isoformat()})
+               **{"from": (today - dt.timedelta(days=CAL_BACK)).isoformat(),
+                  "to": (today + dt.timedelta(days=CAL_DAYS)).isoformat()})
     rows = (data or {}).get("earnings", []) if isinstance(data, dict) else (data or [])
     with conn.cursor() as cur:
         cur.execute("select ticker from universe where status='active'")
@@ -388,7 +395,11 @@ class Arm:
         cols = ("run_id kind ticker sleeve account reason urgency order_type trigger_price "
                 "limit_price stop stop_limit_price qty size_pct score blocked_by note detail").split()
         with conn.cursor() as cur:
-            cur.execute("truncate armed")
+            # §4.3 legislates `armed` as an append ledger stamped with run ids. It used to be
+            # truncated here, so the machine's own record of what it proposed lasted exactly one
+            # night — which is why armed rows carrying scores the queue disagreed with (RS at 79.9
+            # against a queue reading 69.7) could only be caught by looking on the right day.
+            # Sessions read `v_armed_latest`; the history stays for the shadow book to mark.
             cur.executemany(
                 f"insert into armed({','.join(cols)}) values ({','.join('%s' for _ in cols)})",
                 [tuple([run_id] + [jsonb(r.get(c)) if c == "detail" else r.get(c)
@@ -759,8 +770,10 @@ def shadow_book(conn, hb, bars):
     """
     written, marked = 0, 0
     with conn.cursor() as cur:
+        # tonight's arming only — `armed` is a ledger now (§4.3), so an unqualified read would
+        # re-mark every pass the machine has ever made, every night.
         cur.execute("""select kind, ticker, reason, score, blocked_by, note from armed
-                       where kind in ('entry', 'exit')""")
+                       where kind in ('entry', 'exit') and run_id = %s""", (hb.id,))
         for kind, tk, reason, score, blocked, note in cur.fetchall():
             b = bars.get(tk)
             price = float(b[-1]["close"]) if b and b[-1]["close"] is not None else None

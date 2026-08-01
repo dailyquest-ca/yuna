@@ -1,0 +1,47 @@
+name: backfill
+# Dispatch-only tooling (§4.2) for the one-time deepening §4.1 sanctions: ten years of bars, a
+# trailing year of dividends, and the raw filing documents. Per-ticker history calls are the cold
+# -start exception, never the routine — the job meters the vendor's quota before spending and
+# truncates rather than dying two-thirds of the way through.
+on:
+  workflow_dispatch:
+    inputs:
+      what:
+        description: 'passes to run: bars,dividends,fundamentals'
+        default: 'bars,dividends,fundamentals'
+      years:
+        description: 'bar depth in years (§4.1 window is 10)'
+        default: '10'
+      sweep_limit:
+        description: 'largest N by market cap; 0 = every L0 name'
+        default: '0'
+      tickers:
+        description: 'optional explicit list, e.g. AVGO.US,NVDA.US'
+        default: ''
+      dry_run:
+        description: 'fetch and count, write nothing'
+        default: 'false'
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/backfill.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
+          WHAT: ${{ inputs.what }}
+          YEARS: ${{ inputs.years }}
+          SWEEP_LIMIT: ${{ inputs.sweep_limit }}
+          TICKERS: ${{ inputs.tickers }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py backfill /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

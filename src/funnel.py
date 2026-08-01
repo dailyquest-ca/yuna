@@ -92,11 +92,21 @@ def main():
                                      and ticker like '%%.US'
                                      and ticker <> all(%s)""",
                                 ([c + ".US" for c in common],))
+                    # COALESCE, not assignment. Line ~75 gives every liquid name the screener did
+                    # not decorate a row of (None,None,None,None) — so a bare assignment wiped
+                    # sector, industry and market cap off 2,108 of 2,762 L0 names every census, and
+                    # only the handful re-swept that month got them back. The damage was silent and
+                    # large: MCN's industry-group component scored a flat neutral 50 for ~76% of the
+                    # field (one of three equal weights, constant), and §2.2's two-per-group cap
+                    # filed every wiped name under the same 'unknown' bucket. A census that learns
+                    # nothing new must not forget what it knew.
                     cur.executemany("""insert into universe(ticker,name,kind,exchange,currency,in_l0,sector,industry,market_cap_usd)
                         values (%s,%s,'stock','US','USD',true,%s,%s,%s)
                         on conflict (ticker) do update set name=coalesce(excluded.name,universe.name),
-                          in_l0=true, sector=excluded.sector, industry=excluded.industry,
-                          market_cap_usd=excluded.market_cap_usd, status='active'""",
+                          in_l0=true, sector=coalesce(excluded.sector,universe.sector),
+                          industry=coalesce(excluded.industry,universe.industry),
+                          market_cap_usd=coalesce(excluded.market_cap_usd,universe.market_cap_usd),
+                          status='active'""",
                         [(c+".US", n, se, ind, cap) for c,(n,se,ind,cap) in rows.items()])
                 conn.commit()
             with conn.cursor() as cur:

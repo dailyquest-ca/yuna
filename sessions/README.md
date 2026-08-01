@@ -36,7 +36,7 @@ a guess.
 ```sql
 select kind, ticker, reason, urgency, order_type, trigger_price, limit_price,
        stop, stop_limit_price, qty, size_pct, score, blocked_by, note
-  from armed order by urgency desc, kind, score desc nulls last;
+  from v_armed_latest order by urgency desc, kind, score desc nulls last;
 ```
 
 - `urgency='protective'` — stop moves, fired stops, gap-throughs, gate-off exits, blackout
