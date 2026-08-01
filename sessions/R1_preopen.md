@@ -107,6 +107,18 @@ Every offerable row (`blocked_by is null`) becomes a ticket, subject to:
   Same-account unsettled proceeds from a sell already ticketed ahead of it count; proceeds never
   cross accounts.
 
+**Check the arming is not older than the ranking.** `armed` is a ledger and `v_armed_latest` is the
+most recent night's — but if a weekly rank has run since, the queue holds newer scores than the rows
+you are reading, and a ticket must never quote a superseded MCN:
+
+```sql
+select (select max(started_at) from runs where job='duties' and status<>'red') as armed_at,
+       (select max(started_at) from runs where job='weekly-rank') as ranked_at;
+```
+
+If `ranked_at > armed_at`, re-read the score from `queue` before writing any ticket, and say in the
+brief that you did.
+
 Blocked rows are the interesting half of the brief. "Two names at their hurdle, both held back by
 the group cap" tells Zak something real about the book.
 

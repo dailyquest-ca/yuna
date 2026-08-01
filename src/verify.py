@@ -101,6 +101,53 @@ def what_carries_the_scores(cur, top=15):
     return rows, engineless
 
 
+def check_provenance(cur):
+    """§3.1: every bench name has an engine by one method or the other, and says which.
+
+    A null provenance on a scored row means something reached the bench without going through the
+    waterfall — which is precisely the state the waterfall exists to make impossible.
+    """
+    cur.execute("""select ticker, ccn, engine, engine_provenance, durability, data_confidence
+                     from bench where ccn is not null""")
+    bad = []
+    for ticker, ccn, eng, how, dur, conf in cur.fetchall():
+        if how not in ("measured", "growth-derived") or eng is None or dur is None:
+            bad.append(dict(ticker=ticker, ccn=round(float(ccn), 1), engine_pct=eng,
+                            provenance=how, durability=dur,
+                            why="scored without an engine, a durability or a provenance"))
+        elif how == "growth-derived" and conf != "flagged":
+            # §3.1 attaches §3.3's guardrails to growth-derived names — bottom of the band and
+            # manual sign-off. Those only bite if the row is marked.
+            bad.append(dict(ticker=ticker, ccn=round(float(ccn), 1), provenance=how,
+                            confidence=conf, why="growth-derived but not flagged for guardrails"))
+    return bad
+
+
+def check_hurdle_is_price_invariant(cur):
+    """§3.1: the hurdle moves when a filing moves it, never because the quote moved.
+
+    The share count must come from the FILING — cap over the close on the cap's `as_of` date. If a
+    bench row's hurdle implies a share count that matches today's close instead, the divisor is
+    travelling with price again, which is what produced eleven two-way mismatches.
+    """
+    cur.execute("""select b.ticker, f.effective_shares, f.market_cap, f.cap_close, b.last_close
+                     from bench b join v_fundamentals_latest f on f.ticker = b.ticker
+                    where b.hurdle_price is not null and f.effective_shares is not null
+                      and f.market_cap is not null and b.last_close is not null
+                      and f.cap_close is not null""")
+    bad = []
+    for ticker, eff, cap, cap_close, last in cur.fetchall():
+        frozen = float(cap) / float(cap_close)
+        drifting = float(cap) / float(last)
+        # only interesting when the two answers differ — an unmoved quote makes them identical
+        if abs(frozen - drifting) / max(frozen, 1e-9) > 0.005 \
+           and abs(float(eff) - drifting) < abs(float(eff) - frozen):
+            bad.append(dict(ticker=ticker, stored_shares=float(eff),
+                            frozen_at_filing=frozen, implied_by_todays_close=drifting,
+                            why="share count tracks the quote, not the filing"))
+    return bad
+
+
 def main():
     with connect() as conn:
         with Heartbeat(conn, "verify") as hb:
@@ -109,6 +156,8 @@ def main():
                 hurdles = check_hurdles(cur, floor)
                 gaps = check_gaps(cur)
                 ccns = check_ccn(cur)
+                prov = check_provenance(cur)
+                drift = check_hurdle_is_price_invariant(cur)
                 top, engineless = what_carries_the_scores(cur)
 
                 # §4.7: a job that half-fails goes amber — but "amber" with a count is a status, not
@@ -131,10 +180,19 @@ def main():
                          detail="top-of-bench names carrying no measurable compounding engine — "
                                 "§3.1 makes those not bench-eligible",
                          names=[r["ticker"] for r in top if r["engine_pct"] is None][:20]),
+                    dict(check="every_score_declares_its_engine", failures=len(prov),
+                         detail="a bench row scored without an engine, a durability or a stated "
+                                "provenance — or growth-derived without §3.3's guardrail flag",
+                         names=[b["ticker"] for b in prov][:20]),
+                    dict(check="hurdle_is_price_invariant", failures=len(drift),
+                         detail="the hurdle's share count tracks today's quote rather than the "
+                                "close on the cap's as_of date (§3.1)",
+                         names=[b["ticker"] for b in drift][:20]),
                 ]
                 failed = [c for c in checks if c["failures"]]
                 findings = dict(hurdle_mismatches=hurdles, gap_mismatches=gaps,
-                                ccn_mismatches=ccns, top_of_bench=top,
+                                ccn_mismatches=ccns, provenance_gaps=prov, share_drift=drift,
+                                top_of_bench=top,
                                 engineless_in_top=engineless,
                                 checks=checks, causes=[c["check"] for c in failed])
                 hb.detail.update(findings)
@@ -148,7 +206,7 @@ def main():
                                 f"{b['hurdle_that_clears_the_floor']}. A hurdle that cannot be "
                                 f"rebuilt from its own row must not be traded on.",
                                 ticker=b["ticker"], detail=b, once=True)
-                    for b in gaps + ccns:
+                    for b in gaps + ccns + prov + drift:
                         observe(cur, "breach",
                                 f"{b['ticker']}: a stored figure disagrees with the row it sits on "
                                 f"— {jsonb(b)}", ticker=b["ticker"], detail=b, once=True)
