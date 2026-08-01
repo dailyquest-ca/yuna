@@ -50,7 +50,7 @@ def features(data, meta):
 
 def main():
     with connect() as conn:
-        with Heartbeat(conn, "weekly-rank") as hb:
+        with Heartbeat(conn, "weekly-rank", scheduled_utc="12:00") as hb:
             with conn.cursor() as cur:
                 queue_cap = int(config(cur, "queue_cap", 20))
                 limit_over = float(config(cur, "entry_limit_over_pivot", 0.02))
@@ -158,7 +158,11 @@ def main():
 
             for ticker, hurdle, last_close, ccn_score in near_hurdle:
                 gap = (float(last_close) - float(hurdle)) / float(hurdle)
-                seat(ticker, "compounder", "BUY" if gap <= 0 else "WATCH", trigger=float(hurdle),
+                # WATCH was invented here and exists nowhere in the plan. §6 step 3 names the state
+                # in plain words — approved names at or below hurdle enter immediately, "above-hurdle
+                # names wait on the daily check" — so the legislated pair is BUY / WAIT, and the
+                # queue's state column is now constrained to it (migration 025).
+                seat(ticker, "compounder", "BUY" if gap <= 0 else "WAIT", trigger=float(hurdle),
                      limit=float(hurdle), score=float(ccn_score) if ccn_score else None,
                      note=f"hurdle {float(hurdle):.2f} · {gap:+.1%}")
 

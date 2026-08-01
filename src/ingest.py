@@ -19,6 +19,8 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 from db import connect, config, dry, get, jsonb, Heartbeat
 
 JOB = os.environ.get("JOB_NAME", "nightly-ingest")
+# §4.2: each scheduled job has an appointment. The heartbeat compares arrival to it.
+SCHEDULE = {"nightly-ingest": "02:00", "nightly-retry": "03:00"}
 REPAIR_CAP = int(os.environ.get("REPAIR_CAP", "250"))     # per-ticker pulls allowed per night
 GAP_DAYS = 5
 
@@ -54,7 +56,7 @@ def upsert(cur, ticker, bars):
 
 def main():
     with connect() as conn:
-        with Heartbeat(conn, JOB) as hb:
+        with Heartbeat(conn, JOB, scheduled_utc=SCHEDULE.get(JOB)) as hb:
             if JOB == "nightly-retry":            # §4.2: exit if the night is already green
                 with conn.cursor() as cur:
                     cur.execute("""select 1 from runs where job='nightly-ingest' and status='green'

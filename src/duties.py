@@ -963,9 +963,17 @@ def main():
             approved, any_hurdle = refresh_marks(conn, hb)
             if not dry():
                 with conn.cursor() as cur:
+                    # the grain is the day, not the run (migration 025). Two runs on one date used
+                    # to leave two NAVs and no rule for choosing; the last computation of a date now
+                    # replaces the earlier one, which is what "daily NAV" meant all along.
                     cur.execute("""insert into nav_snapshots(d,nav_cad,equities_cad,cash_cad,
                                      debt_cad,usdcad,provisional,detail)
-                                   values (current_date,%s,%s,%s,%s,%s,true,%s)""",
+                                   values (current_date,%s,%s,%s,%s,%s,true,%s)
+                                   on conflict (d) do update set
+                                     nav_cad=excluded.nav_cad, equities_cad=excluded.equities_cad,
+                                     cash_cad=excluded.cash_cad, debt_cad=excluded.debt_cad,
+                                     usdcad=excluded.usdcad, provisional=excluded.provisional,
+                                     detail=excluded.detail, computed_at=now()""",
                                 (nav, n["book_equities"], n["cash"], n["debt"], fx,
                                  jsonb(dict(accounts=n["accounts"], per_ticker=n["per_ticker"],
                                             effective_bets=bets,

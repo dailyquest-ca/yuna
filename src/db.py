@@ -4,6 +4,7 @@ Kept deliberately thin — the jobs stay readable, and the heartbeat contract (o
 per job, green | amber | red, tracebacks embedded on death) lives in exactly one place.
 """
 import os, sys, json, time, traceback, urllib.request, urllib.error
+import datetime as dt
 import psycopg
 
 EODHD = "https://eodhd.com/api"
@@ -154,10 +155,42 @@ class Heartbeat:
     """with Heartbeat(conn, 'daily') as hb: ...  — opens a running row, closes it green,
     or red with the traceback if the body raises. hb.detail / hb.calls / hb.rows are yours."""
 
-    def __init__(self, conn, job, dry_run=None):
+    DRIFT_AMBER = dt.timedelta(minutes=30)
+
+    def __init__(self, conn, job, dry_run=None, scheduled_utc=None):
         self.conn, self.job = conn, job
         self.dry_run = dry() if dry_run is None else dry_run
+        self.scheduled_utc = scheduled_utc
         self.detail, self.calls, self.rows, self.status = {}, [0], 0, "green"
+
+    def _drift(self):
+        """§4.2 gives each job a time; Actions gives it a queue. Record what was asked for against
+        what happened, and go amber past half an hour.
+
+        A run late enough matters: `nightly-retry` fires an hour after the primary and the evening
+        stop sheet reads both windows, so a 3-hour slip silently inverts the ordering the plan
+        assumes. Production drifted to 05:23 UTC against an 02:00 spec and nothing said so — the
+        cron was right the whole time. Only scheduled runs are judged; a manual dispatch has no
+        appointment to be late for.
+        """
+        if not self.scheduled_utc or os.environ.get("GITHUB_EVENT_NAME") != "schedule":
+            return
+        try:
+            hh, mm = (int(x) for x in self.scheduled_utc.split(":"))
+        except (TypeError, ValueError):
+            return
+        now = dt.datetime.now(dt.timezone.utc)
+        due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if now - due > dt.timedelta(hours=12):        # fired just before midnight for a morning slot
+            due += dt.timedelta(days=1)
+        elif due - now > dt.timedelta(hours=12):
+            due -= dt.timedelta(days=1)
+        drift = now - due
+        self.detail["schedule"] = dict(due_utc=due.isoformat(), started_utc=now.isoformat(),
+                                       drift_minutes=round(drift.total_seconds() / 60, 1))
+        if drift > self.DRIFT_AMBER:
+            self.amber(f"started {drift.total_seconds() / 60:.0f} min after its "
+                       f"{self.scheduled_utc} UTC slot — Actions queueing, not a bad cron")
 
     def __enter__(self):
         with self.conn.cursor() as cur:
@@ -165,6 +198,7 @@ class Heartbeat:
                         (self.job, self.dry_run))
             self.id = cur.fetchone()[0]
         self.conn.commit()
+        self._drift()
         return self
 
     def amber(self, why):

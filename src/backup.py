@@ -14,7 +14,7 @@ OUT = "backups"
 def main():
     stamp = dt.date.today().isoformat()
     with connect() as conn:
-        with Heartbeat(conn, "monthly-backup") as hb:
+        with Heartbeat(conn, "monthly-backup", scheduled_utc="14:00") as hb:
             with conn.cursor() as cur:
                 cur.execute("""select table_name from information_schema.tables
                                where table_schema='public' and table_type='BASE TABLE'

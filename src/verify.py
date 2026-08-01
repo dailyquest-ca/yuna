@@ -110,9 +110,32 @@ def main():
                 ccns = check_ccn(cur)
                 top, engineless = what_carries_the_scores(cur)
 
+                # §4.7: a job that half-fails goes amber — but "amber" with a count is a status, not
+                # a cause. Production went amber with the reasons discoverable only by reading rows.
+                # Every check now names itself, passing or failing, so the run log answers "what is
+                # wrong" without an investigation.
+                checks = [
+                    dict(check="hurdle_reproduces_floor", failures=len(hurdles),
+                         detail=f"stored hurdle does not re-derive the {floor:.0%} floor from its "
+                                f"own components (§3.1)",
+                         names=[b["ticker"] for b in hurdles][:20]),
+                    dict(check="gap_matches_close_and_hurdle", failures=len(gaps),
+                         detail="gap_to_hurdle disagrees with the last_close and hurdle beside it",
+                         names=[b["ticker"] for b in gaps][:20]),
+                    dict(check="ccn_is_mean_of_components", failures=len(ccns),
+                         detail="stored CCN is not the mean of the percentiles on its own row "
+                                "(§3.1, §3.3)",
+                         names=[b["ticker"] for b in ccns][:20]),
+                    dict(check="top_bench_has_measurable_engines", failures=engineless,
+                         detail="top-of-bench names carrying no measurable compounding engine — "
+                                "§3.1 makes those not bench-eligible",
+                         names=[r["ticker"] for r in top if r["engine_pct"] is None][:20]),
+                ]
+                failed = [c for c in checks if c["failures"]]
                 findings = dict(hurdle_mismatches=hurdles, gap_mismatches=gaps,
                                 ccn_mismatches=ccns, top_of_bench=top,
-                                engineless_in_top=engineless)
+                                engineless_in_top=engineless,
+                                checks=checks, causes=[c["check"] for c in failed])
                 hb.detail.update(findings)
 
                 if not dry():
@@ -130,8 +153,11 @@ def main():
                                 f"— {jsonb(b)}", ticker=b["ticker"], detail=b, once=True)
                 conn.commit()
 
-            if hurdles or gaps or ccns:
-                hb.amber(f"{len(hurdles)} hurdle, {len(gaps)} gap and {len(ccns)} CCN mismatch(es)")
+            for c in failed:
+                hb.amber(f"{c['check']}: {c['failures']} — {c['detail']}"
+                         + (f" · {', '.join(c['names'])}" if c["names"] else ""))
+            print(f"verify: {len(failed)} check(s) failing — "
+                  f"{', '.join(c['check'] for c in failed) or 'none'}")
             print(f"verify: {len(hurdles)} hurdle mismatches · {len(gaps)} gap · {len(ccns)} CCN · "
                   f"{engineless} of {len(top)} top-bench names have no measurable engine")
             for b in hurdles:

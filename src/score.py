@@ -142,7 +142,12 @@ def main():
                     engine=components["engine"], cash_conv=cc_p.get(tk), size_score=size_p.get(tk),
                     engine_raw=engine, cash_conv_raw=cc, roic=roic, reinvest_rate=reinv,
                     c1_pass=(c1 and quote_ok is True),
-                    c1_fail_reason=(c1why if c1 else None) if quote_ok is True else
+                    # the reason belongs on the row that FAILED. The previous form kept it when the
+                    # gate passed (where it is always null) and threw it away when the gate failed,
+                    # so every C1 rejection reached the bench mute: AVGO's fundamentals row read
+                    # "net issuance 4.7%/yr" while its bench row read nothing at all. §3.1 requires
+                    # the gap to be named on the C2 memo, and a memo cannot name what was discarded.
+                    c1_fail_reason=(None if c1 else c1why) if quote_ok is True else
                         ((c1why + " · " if c1why else "") +
                          "reports in a foreign currency or trades as a depositary receipt — "
                          "excluded pending the §3.0 one-currency conversion (roadmap Part 4)"),
@@ -183,6 +188,12 @@ def main():
                     cur.execute("""delete from bench where months_outside_top60 >= 2
                                    and not approved and ticker not in
                                      (select ticker from universe where is_holding)""")
+                    # A rebuilt bench orphans the queue's compounder seats: their hurdles, gaps and
+                    # CCNs were copied from bench rows that no longer exist, and nothing re-seats
+                    # them until Saturday's rank. ZM / VEON / HRMY sat in production quoting a
+                    # superseded bench for exactly this reason. Purge on rebuild; the weekly rank
+                    # re-seats whatever is still within 10% of a hurdle (§3.0 L2).
+                    cur.execute("delete from queue where source='compounder'")
                     cur.executemany("""insert into bench(ticker,rank,cohort,ccn,engine,cash_conv,size_score,
                             engine_raw,cash_conv_raw,roic,reinvest_rate,c1_pass,c1_fail_reason,
                             hurdle_price,fcf_yield,engine_growth,derating_drag,fair_multiple,
