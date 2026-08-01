@@ -18,12 +18,20 @@ delete from nav_snapshots a
  where a.d = b.d
    and (a.computed_at, a.id) < (b.computed_at, b.id);
 
-alter table nav_snapshots
-  add constraint nav_snapshots_d_key unique (d);
+-- §4.2: every job is idempotent and safe to re-run, migrations included. ADD CONSTRAINT is not,
+-- so each is guarded — a second `migrate` must be a no-op, not a red run.
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'nav_snapshots_d_key') then
+    alter table nav_snapshots add constraint nav_snapshots_d_key unique (d);
+  end if;
+end $$;
 
 -- ---------- queue: the legislated states, and nothing else ----------
 update queue set state = 'WAIT' where state = 'WATCH';
 
-alter table queue
-  add constraint queue_state_legislated
-  check (state in ('BUY', 'WAIT', 'HOLD'));
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'queue_state_legislated') then
+    alter table queue add constraint queue_state_legislated
+      check (state in ('BUY', 'WAIT', 'HOLD'));
+  end if;
+end $$;
