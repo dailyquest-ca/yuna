@@ -3,13 +3,42 @@
 Five sessions, specified in plan §4.4 and §5. Each runbook here is the session's code: same
 review, same care as a formula. A session that did not write its `briefs` row did not happen.
 
-| Session | When (PT) | How it starts | Runbook |
-|---|---|---|---|
-| Evening stop sheet | ~20:30 Mon–Fri | scheduled Routine | `R2_stopsheet.md` |
-| Pre-open brief | ~06:00 Mon–Fri | scheduled Routine | `R1_preopen.md` |
-| Saturday deep-dive | ~08:00 Sat | scheduled Routine | `R3_deepdive.md` |
-| Sunday reconciliation | Sun morning | Zak opens it | `R4_reconcile.md` |
-| Monthly approval | 1st weekend | Zak opens it | `R5_approval.md` |
+| Session | When (PT) | Runbook | Routine | Cron (UTC) |
+|---|---|---|---|---|
+| Pre-open brief | ~06:00 Mon–Fri | `R1_preopen.md` | `trig_01W7BGqssY4sCztZp4L4H5ND` | `0 13 * * 1-5` |
+| Evening stop sheet | ~20:30 Mon–Fri | `R2_stopsheet.md` | `trig_012LkXUzXqXwj2xD7Fqwqxxy` | `0 4 * * 2-6` |
+| Saturday deep-dive | ~08:00 Sat | `R3_deepdive.md` | `trig_01RKq8cdVHsnFvCUQY287KT6` | `0 16 * * 6` |
+| Sunday reconciliation | Sun morning | `R4_reconcile.md` | `trig_014bPbo18uPXJTWncvduwKTT` | `0 16 * * 0` |
+| Monthly approval | 1st weekend | `R5_approval.md` | `trig_01WSDzax7TCUeZrGPqWSurMs` | `0 17 * * 0` + guard |
+
+## The Routines are part of the system — keep them in sync
+
+Each session is started by a scheduled Routine whose prompt points at `docs/yuna_plan.md` and the
+runbook beside it. The prompt is deliberately a **pointer, not a copy**: the runbook is the code, and
+a prompt that restates it drifts from it. That drift is not hypothetical — until 2026-08-01 both
+scheduled Routines still ran the superseded Airtable system, read `claude/strategy.md` as law, and
+spoke a vocabulary (campaigns, ladder marks, the regime dial) that appears nowhere in this plan. They
+were rewritten and the old ones deleted.
+
+**So: any change to a runbook, to §4.4, or to §5 is not finished until the Routine prompt agrees
+with it.** Review it the way you review a migration.
+
+Cron is UTC and does not shift with daylight saving, so each pick is stated against both regimes and
+chosen to sit after the jobs it depends on. R2 fires at 04:00 UTC — after `nightly-retry` at 03:00 —
+so it can act as §4.7's nightly receipt for a night that has actually finished. R3 fires at 16:00
+UTC, after `weekly-rank` at 12:00 and `monthly-funnel` at 10:00. R5 fires weekly and exits silently
+outside the first seven days of the month, because cron cannot express "first Sunday" (its day-of-
+month and day-of-week fields are OR-ed, not AND-ed).
+
+R4 and R5 are **interactive** by §4.4: the Routine opens the session and prepares everything it can,
+then waits for Zak. It is a start, not an autopilot.
+
+> ⚠️ **Open dependency:** Routines created through the MCP tool store no connector grants — this
+> organization does not permit passing them — so a fired session has no `mcp__Supabase__*` tools and
+> cannot reach state. Until either (a) the connectors are attached to each Routine in the claude.ai
+> Routines UI, or (b) `DATABASE_URL` and `EODHD_API_KEY` are set on the CCR environment so the
+> sessions can connect directly, these Routines will fire and produce nothing. Neither credential is
+> currently present in the environment.
 
 ## The write boundary — read this before touching anything
 
