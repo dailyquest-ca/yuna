@@ -83,9 +83,16 @@ them, `size_score` leaves the CCN entirely.
   date when the vendor gives none), stored on the filing row. The hurdle stops decaying nightly.
 - **C1's debt tripwire floors at 1.0×** net debt/EBITDA; below that it is a C2 flag, never a kill.
 
-**Measured consequence, before the fact:** C1 pass goes from 623 to roughly 1,487 (+864 names killed
-today only by the tripwire below 1.0× leverage) · ~2,089 names become growth-derived · the top-15
-dropped-engine bench (FVRR 97.6 … FIGS 84.5) ceases to exist as a category. Every CCN moves, so the
+**Predicted, before the fact:** C1 pass 623 → roughly 1,487 · ~2,089 growth-derived · the top-15
+dropped-engine bench gone as a category.
+
+**What actually happened — the C1 prediction was wrong, and the error was mine.** C1 pass went
+623 → **754**, not ~1,487. I had counted every name whose failure string *mentioned* the debt
+tripwire and assumed the tripwire was its only cause. It rarely was: of the 864, most also fail on
+issuance or on the 2.5× leverage ceiling, and 729 are levered above 1.0× so the tripwire still bites
+them correctly. **V4b spares exactly 75 names.** It is a precise correction, not a floodgate — which
+is what the ruling actually claimed, and I inflated it. The other two predictions held: 1,940 names
+carry the growth-derived flag, and no dropped-engine name survives as a bench concept. Every CCN moves, so the
 70/85 cutoffs are re-observed on the first production score and Zak re-rules if the distribution
 moved. The R5 approvals stay void until then.
 
