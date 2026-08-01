@@ -201,6 +201,22 @@ def main():
             for i, o in enumerate(bench):
                 o["rank"] = i + 1
 
+            # §3.1's rank seatbelt keeps a name's ROW alive for two consecutive months outside the
+            # top 60 — but the row has to carry that name's CURRENT numbers, not the ones it held
+            # the month it was last ranked. Writing only the top 60 left 43 rows from the previous
+            # scoring sitting in the table with their old CCNs and old ranks, so the bench displayed
+            # two different laws at once and `v_bench` sorted them together. A re-score that leaves
+            # half the table behind is not a re-score.
+            #
+            # So every still-scored name that already has a row is refreshed too — unranked, because
+            # rank belongs to bench membership. Duplicate ranks become impossible by construction.
+            ranked = {o["ticker"] for o in bench}
+            with conn.cursor() as cur:
+                cur.execute("select ticker from bench where ticker <> all(%s)", (sorted(ranked),))
+                lingering = {r[0] for r in cur.fetchall()}
+            unranked = [dict(o, rank=None) for o in out if o["ticker"] in lingering]
+            writes = bench + unranked
+
             if not dry():
                 with conn.cursor() as cur:
                     # §3.1: gate failure evicts immediately — no two-month seatbelt. Without
@@ -211,7 +227,9 @@ def main():
                                    and ticker not in (select ticker from universe where is_holding)""",
                                 (failed,))
                     cur.execute("""update bench set months_outside_top60 = months_outside_top60 + 1
-                                   where ticker <> all(%s)""", ([o["ticker"] for o in bench],))
+                                   where ticker <> all(%s)""", (sorted(ranked),))
+                    cur.execute("""update bench set months_outside_top60 = 0
+                                   where ticker = any(%s)""", (sorted(ranked),))
                     cur.execute("""delete from bench where months_outside_top60 >= 2
                                    and not approved and ticker not in
                                      (select ticker from universe where is_holding)""")
@@ -244,7 +262,7 @@ def main():
                             derating_drag=excluded.derating_drag, fair_multiple=excluded.fair_multiple,
                             last_close=excluded.last_close, gap_to_hurdle=excluded.gap_to_hurdle,
                             data_confidence=excluded.data_confidence, serial_acquirer=excluded.serial_acquirer,
-                            months_outside_top60=0, computed_at=now()""", bench)
+                            computed_at=now()""", writes)
                 conn.commit()
 
             buyable = [o["ticker"] for o in bench if o["gap_to_hurdle"] is not None and o["gap_to_hurdle"] <= 0]
