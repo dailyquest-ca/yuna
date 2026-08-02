@@ -7,7 +7,8 @@ the model's output against an independent computation on the raw data.
 
 What it checks, per §3.1 and §3.0:
 
-  1. every stored hurdle reproduces the 15% floor from its own stored components
+  1. every stored hurdle re-derives from its own stored components — the 15%-floor solve
+     capped at the fair multiple
   2. gap_to_hurdle agrees with the last_close and hurdle_price beside it
   3. the CCN equals the mean of the component percentiles actually stored on the row
   4. what carries each top score — reported, so a bench topped by names with no measurable
@@ -21,14 +22,16 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 from db import connect, config, dry, jsonb, observe, Heartbeat
 import signals as sg
 
-ER_TOLERANCE = 0.005          # half a point of expected return
+HURDLE_TOLERANCE = 0.005      # half a percent of price between stored and re-derived hurdle
 GAP_TOLERANCE = 1e-4
 CCN_TOLERANCE = 0.05
 
 
 def check_hurdles(cur, floor):
-    """§3.1: the hurdle is the highest price where expected return still clears the floor. Evaluated
-    at that price, from the row's own numbers, it must come back to the floor.
+    """§3.1: the hurdle is min(the highest price whose expected return clears the floor,
+    fair multiple x FCF/share). Re-run the one solver on the row's own numbers; the stored
+    hurdle must come back. When the fair-multiple cap binds, the ER at the stored hurdle sits
+    lawfully ABOVE the floor — cheaper than required is never a defect, dearer always is.
 
     The market cap cancels out of the arithmetic — only FCF per share, growth and the fair multiple
     matter — which is what makes this independent of whichever cap the vendor served."""
@@ -42,11 +45,11 @@ def check_hurdles(cur, floor):
         growth, fair = float(growth or 0), float(fair)
         if px <= 0 or yield_ <= 0 or fair <= 0:
             continue
-        er = sg.expected_return(hurdle, fcf_ttm=yield_ * px, shares=1.0, growth=growth,
-                                fair_multiple=fair)
-        if er is None or abs(er - floor) > ER_TOLERANCE:
-            implied = sg.hurdle_price(fcf_ttm=yield_ * px, shares=1.0, growth=growth,
-                                      fair_multiple=fair, floor=floor)
+        implied = sg.hurdle_price(fcf_ttm=yield_ * px, shares=1.0, growth=growth,
+                                  fair_multiple=fair, floor=floor)
+        if implied is None or implied <= 0 or abs(hurdle / implied - 1) > HURDLE_TOLERANCE:
+            er = sg.expected_return(hurdle, fcf_ttm=yield_ * px, shares=1.0, growth=growth,
+                                    fair_multiple=fair)
             bad.append(dict(ticker=ticker, stored_hurdle=round(hurdle, 2),
                             er_at_stored=round(er, 4) if er is not None else None,
                             hurdle_that_clears_the_floor=round(implied, 2) if implied else None,
@@ -209,8 +212,8 @@ def main():
                 # wrong" without an investigation.
                 checks = [
                     dict(check="hurdle_reproduces_floor", failures=len(hurdles),
-                         detail=f"stored hurdle does not re-derive the {floor:.0%} floor from its "
-                                f"own components (§3.1)",
+                         detail=f"stored hurdle does not re-derive from its own components — the "
+                                f"{floor:.0%}-floor solve capped at the fair multiple (§3.1)",
                          names=[b["ticker"] for b in hurdles][:20]),
                     dict(check="gap_matches_close_and_hurdle", failures=len(gaps),
                          detail="gap_to_hurdle disagrees with the last_close and hurdle beside it",
@@ -254,9 +257,8 @@ def main():
                 if not dry():
                     for b in hurdles:
                         observe(cur, "breach",
-                                f"{b['ticker']}: stored hurdle {b['stored_hurdle']} implies an "
-                                f"expected return of {b['er_at_stored']:.1%} against the "
-                                f"{floor:.0%} floor — the price that actually clears it is "
+                                f"{b['ticker']}: stored hurdle {b['stored_hurdle']} does not "
+                                f"re-derive from its own row — the solver says "
                                 f"{b['hurdle_that_clears_the_floor']}. A hurdle that cannot be "
                                 f"rebuilt from its own row must not be traded on.",
                                 ticker=b["ticker"], detail=b, once=True)
@@ -274,8 +276,8 @@ def main():
             print(f"verify: {len(hurdles)} hurdle mismatches · {len(gaps)} gap · {len(ccns)} CCN · "
                   f"{engineless} of {len(top)} top-bench names have no measurable engine")
             for b in hurdles:
-                print(f"  HURDLE {b['ticker']}: stored {b['stored_hurdle']} → ER "
-                      f"{b['er_at_stored']:.1%}; clears at {b['hurdle_that_clears_the_floor']}")
+                print(f"  HURDLE {b['ticker']}: stored {b['stored_hurdle']} vs re-derived "
+                      f"{b['hurdle_that_clears_the_floor']}")
             for row in top:
                 print(f"  TOP {row['ticker']:<9} CCN {row['ccn']:>5} · engine "
                       f"{row['engine_pct'] if row['engine_pct'] is not None else 'DROPPED':>7} "

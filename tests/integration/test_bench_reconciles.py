@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "src"))
 import signals as sg                                                      # noqa: E402
 
-TOLERANCE = 0.005          # half a point of expected return; the solver is exact to the cent
+TOLERANCE = 0.005          # half a percent of price; the solver is exact to the cent
 
 
 def bench_rows(conn):
@@ -32,9 +32,11 @@ def bench_rows(conn):
 
 
 def test_every_stored_hurdle_reproduces_the_fifteen_percent_floor(db):
-    """§3.1 defines the hurdle as the highest price where expected return still clears 15%. So
-    evaluating expected return *at* the stored hurdle, using the row's own stored components, must
-    come back to 15%. Anything else means the row and the number disagree about the same company."""
+    """§3.1 defines the hurdle as min(the highest price where expected return still clears 15%,
+    fair multiple x FCF/share). So re-running the one solver on the row's own stored components
+    must give back the stored hurdle. When the fair cap binds, ER at the hurdle sits lawfully
+    above the floor — cheaper than required is never a defect; a hurdle the solver won't rebuild
+    always is."""
     rows = bench_rows(db)
     if not rows:
         pytest.skip("no scored bench rows in this database")
@@ -49,10 +51,11 @@ def test_every_stored_hurdle_reproduces_the_fifteen_percent_floor(db):
         # the hurdle depends only on FCF per share, growth and the fair multiple — the market cap
         # cancels out, which is what makes this reconstruction independent of the vendor's cap
         fcf_per_share = yield_ * px
-        er = sg.expected_return(hurdle, fcf_ttm=fcf_per_share, shares=1.0, growth=growth,
-                                fair_multiple=fair)
-        if er is None or abs(er - floor) > TOLERANCE:
-            broken.append(f"{ticker}: hurdle {hurdle:.2f} implies ER {er:.1%}, not {floor:.0%}")
+        implied = sg.hurdle_price(fcf_ttm=fcf_per_share, shares=1.0, growth=growth,
+                                  fair_multiple=fair, floor=floor)
+        if implied is None or implied <= 0 or abs(hurdle / implied - 1) > TOLERANCE:
+            broken.append(f"{ticker}: stored hurdle {hurdle:.2f}, solver says "
+                          f"{implied if implied is None else round(implied, 2)}")
 
     assert not broken, ("stored hurdles that cannot be rebuilt from their own row:\n  "
                         + "\n  ".join(broken))
