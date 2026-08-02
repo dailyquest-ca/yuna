@@ -82,6 +82,12 @@ Two character notes the screen cannot make for itself, and both belong in the pr
   inflation or a collapsing currency clears it mechanically without the earnings having accelerated
   in any real sense. Name the currency context; judgment stays human. Flag, never block.
 
+**The company we keep (§3.1).** Two lists, every Saturday, from `bench.corroborated_by` and the
+weekly rank's reverse sweep: every at-or-below-hurdle name with its corroboration mark (⚠️ on any
+buyable name no reference investor holds — say why we see what they don't), and every name ≥2
+reference investors hold that our bench lacks, with the exact reason it missed and your read on
+whether the miss is ours or theirs.
+
 Displacement is **within-sleeve only** and needs **+10 over the weakest incumbent** (§3.3). If a
 challenger clears it, the swap ticket is auto-drafted — both legs, and Zak executes both. A
 momentum 85 never displaces a compounder 72, no matter how good it looks.

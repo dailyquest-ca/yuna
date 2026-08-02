@@ -53,6 +53,12 @@ Write one memo per new bench candidate, target ~200 words:
 >
 > **PASS / FAIL + confidence.**
 
+**The blind test comes first (§5.5).** Present every memo business-only: no hurdle, no gap, no CCN,
+no price anywhere in it. Zak records PASS or FAIL on the business. Only after his ruling is recorded
+do you reveal the price block and judge the entry. A name marked **uncorroborated — review** by the
+company-we-keep check (§3.1) cannot be approved until he has read your findings on why we see what
+none of the reference investors see.
+
 Write the memo into `bench.c2_memo` with `c2_status` and `c2_confidence`. If Zak approves, set
 `approved = true, approved_at = now()`. A rejection writes an observation with **the CCN at
 rejection** — the 12-month cooldown escape needs both a new filing and CCN(now) ≥ CCN(then) + 10,

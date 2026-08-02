@@ -1,6 +1,6 @@
 # Yuna — Zak's Trading Agent
 
-*Updated: 2026-08-02 8:23 AM (UTC−6)*
+*Updated: 2026-08-02 8:52 AM (UTC−6)*
 **Opened:** 2026-07-29 · **Owner:** Zak (decisions, execution) · Yuna (research, ranking, tickets)
 **Rule:** This document is law. Changes only by announced edit — exact section, exact old line, exact new line, Zak's approval — and every edit bumps the Updated stamp.
 **Plain-language law:** every rule in this document must be explainable to Zak in one plain sentence. A rule that fails that test is defective — the rule gets rewritten or deleted, never the standard.
@@ -252,6 +252,12 @@ Every memo and every decision logged as an observation.
 
 **Bench eviction seatbelts:** gate failure evicts immediately. Rank eviction requires **two consecutive months** outside the top 60 — and never applies to current holdings or names within 10% of their hurdle. All evictions listed in the monthly digest.
 
+**The company we keep** *(weekly)*: Config names the **reference investors** — quality-compounder shops whose public holdings we respect. Seven to start: **Fundsmith · Akre Capital · Polen Capital · TCI Fund Management · Pershing Square · WCM Investment Management · Giverny Capital** — Zak may add or strike names; each change is a config row, logged. Computed by the weekly rank from the top-holder records already stored with every filing — no new data source:
+- **Our picks, checked:** every bench name at or below its hurdle, and every name proposed for approval, is marked **corroborated** when **at least 1** reference investor appears among its holders — otherwise **uncorroborated — review**, and it cannot be approved until Zak has read Yuna's findings on why we see what none of them see.
+- **Their picks, checked:** any L0 name held by **2 or more** reference investors that is not on our bench is listed weekly with the exact reason it missed — the C1 failure by name, the eligibility rule, or the rank — with Yuna's read on whether the miss is ours or theirs, for Zak's review.
+
+A mirror, never a source: corroboration adds no points and absence subtracts none — it routes attention. Honest limit, stated: this reads top-holder lists, where boutique funds surface mostly in small and mid caps; a fund absent from a mega-cap's top twenty is not evidence it doesn't own it. Full filings coverage (EDGAR 13F) is TODO.
+
 **Rejected names:** 12-month cooldown before re-proposal. Early escape requires both a **new filing** since rejection and current CCN ≥ the CCN recorded at rejection + 10 — measured against today's field; every rejection row records its CCN at rejection.
 
 ---
@@ -424,7 +430,7 @@ One Supabase Postgres project. **Everything lives here, including L0**; the repo
 | Table | Holds | Mode |
 |---|---|---|
 | universe (L0) | ~1,500 names + filters | overwrite |
-| bench | 60 names · CCN + components · hurdle · owner-FCF disclosure (reported FCF, SBC share, ΔWC share) · C2 status · approval | overwrite |
+| bench | 60 names · CCN + components · hurdle · owner-FCF disclosure (reported FCF, SBC share, ΔWC share) · corroboration (which reference investors hold it) · C2 status · approval | overwrite |
 | candidates | 150 momentum · MCN · BUY/WAIT · pivot/stop | overwrite |
 | queue | ~20 pre-written triggers | overwrite |
 | armed | The night's arming decisions — every trigger the job proposed, stamped with its run id | append |
@@ -548,7 +554,7 @@ The daily line doubles as the pipeline's nightly receipt.
 
 ### 5.3 R3 — Saturday deep-dive (~8:00 PT)
 
-Heartbeat → gate status **and margin to the flip** → top/bottom-5 industry groups with week-over-week deltas → L1-M turnover (names in/out) → **top-3 workups** — each: MCN, state, pivot/stop pair, earnings date, what would make it a BUY → queue changes → displacement checks against the +10 rule → **performance line: NAV week-over-week and YTD vs the 30% bar**. Snapshot first, context after, + the queue table. Written to briefs.
+Heartbeat → gate status **and margin to the flip** → top/bottom-5 industry groups with week-over-week deltas → L1-M turnover (names in/out) → **top-3 workups** — each: MCN, state, pivot/stop pair, earnings date, what would make it a BUY → queue changes → **the company we keep: corroboration marks on every buyable name + the reverse sweep of reference-investor holdings we lack, each miss with its reason and Yuna's read** → displacement checks against the +10 rule → **performance line: NAV week-over-week and YTD vs the 30% bar**. Snapshot first, context after, + the queue table. Written to briefs.
 
 ### 5.4 R4 — Sunday reconciliation (interactive)
 
@@ -560,7 +566,9 @@ Funnel output → new bench candidates, each with a **C2 memo**:
 
 > **C2 memo template (target ~200 words):** company + one-line what-it-does · the three Gate C2 questions, two sentences each (does scale strengthen it? gains shared to widen the moat? where does the next dollar go and what does it earn?) · proxy metrics table · serial-acquirer flag if goodwill jumped · owner-FCF note for float and credit-book businesses (reported FCF can be customer float in costume) — **cites the three figures stored on the bench row: reported FCF, the SBC share of it, and the working-capital share of it**; a "materially float" conclusion triggers the §3.1 owner-cash quarantine · **PASS / FAIL + confidence**.
 
-→ **annual re-underwrites** for any holding at its purchase anniversary this month (Gate C2 from scratch, invalidators re-set) → evictions list (rule-driven, reported) → audit snapshot: return vs the 30% bar · sleeve observations · breaches · learnings due for **promotion or expiry** → Zak rules → approvals join the bench, rejections get 12-month cooldown rows.
+**The blind test:** memos are presented and ruled business-first — Zak records PASS or FAIL on the business **before** the hurdle, the gap, or the CCN is revealed. Only a name whose business passes gets its price judged. The number never gets to argue with the judgment.
+
+→ **annual re-underwrites** for any holding at its purchase anniversary this month (Gate C2 from scratch, invalidators re-set) → evictions list (rule-driven, reported) → audit snapshot: return vs the 30% bar · sleeve observations · breaches · **calibration gauges — the correlation between how far a name has fallen and how rich a multiple the system permits (near zero is healthy; positive means the screen is paying up for falling knives), and the share of the bench called buyable (a value screen calling most of its own bench cheap is describing itself, not the market)** · learnings due for **promotion or expiry** → Zak rules → approvals join the bench, rejections get 12-month cooldown rows.
 
 ### 5.6 Shared session laws
 
@@ -636,6 +644,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 
 | Date | Entry |
 |---|---|
+| 2026-08-02 | **Process rulings — the blind test, the company we keep, the calibration gauges.** R5 rules business-first: PASS/FAIL recorded before price, gap or CCN is revealed — the number never argues with the judgment. Seven reference investors named in config (Fundsmith · Akre · Polen · TCI · Pershing Square · WCM · Giverny); weekly, from holder records already stored: buyable and proposed names marked corroborated at ≥1 holder-match, uncorroborated names cannot be approved until Zak reads the findings; the reverse sweep lists any L0 name held by ≥2 reference investors that our bench lacks, with the exact reason it missed. A mirror, never a source. Two calibration gauges join the audit and `verify`: drawdown-vs-permitted-multiple correlation and the share of the bench called buyable — the falling-knife failure becomes a standing alarm. Proposed and **rejected**: a ten-memo cap per approval session ("approving as many as needed is part of doing the work") and a throttle diversity preference (the entry-only theme cap already blocks the case that matters). |
 | 2026-08-02 | **Plain-cash rulings — SBC is a cost · price never exceeds history · float quarantined · plain-language law.** Four-school adversarial vetting of the entry hurdle, two claims re-verified against the live solver and our own stored filings. The working diagnosis was corrected first: the drag floor was NOT the mechanism (at a 25%-growth hurdle the drag is 11.8%/yr — fully active); the mechanism is the growth cap asserting more growth than the fair multiple can support (a 30× exit at a 15% requirement is a statement the business grows 11.67%, by h = 1/M + g). Fix introduces no constants: growth capped additionally at (0.15 − 1/fair), so the hurdle provably never exceeds the fair multiple and collapses to closed form. FCF redefined net of stock-based compensation everywhere (measured on our own filings: SBC is 78% of TTD's reported FCF, 92% of MELI's — added back inside CFO, deducted nowhere, while the share count stays frozen and C1 polices issuance). Short-history fair multiple → flat 25× (lower-of-current was algebraically the filing-date close). Owner-cash quarantine: float/credit-book names scored but never ticketed until the balance-sheet treatment lands; §5.5's owner-FCF note becomes computable from three stored figures. Plain-language law added to the header. TODO gains the float balance-sheet treatment and the reinvestment-measurement fix as authorized design work. Registered predictions: no hurdle rises · cap-pinned names fall 47–55% · at-or-below-hurdle 48/65 → 34–42 before SBC compounds it · falsifier: if it stays ≥ 45, stop — the remaining generosity is elsewhere. |
 | 2026-08-01 | **Version labels retired until release.** Incrementing minors pre-release implied a shipping history that doesn't exist — this is still development. Labels stripped from every header, table, and checklist; the §3.3 Versioning paragraph is now their only home and says one thing: every formula is v1 until cutover, and counting starts when the system is live. The plan text is the spec; the changelog is the lineage. History rows keep their old labels — the record stays the record. |
 | 2026-08-01 | **Implementation-feedback batch (9 edits).** Durability sub-scores unified on 0–100 and the blend percentiled across L0 (the growth term was numerically inert as written) · five YoY comparisons / six fiscal years made explicit · effective shares pinned to the cap's vendor `as_of` date · RRSP preference defined: trailing-12M dividend yield ≥ 1% at ticket time · bar retention 3 → 10 years (5-yr median P/FCF computes from source; sized to Pro tier) · raw filing JSON moves into the database as `jsonb` · derived multiples demoted from dependency to convenience · both free-tier pause clauses removed (no longer true) · `armed` legislated as an append ledger with run ids |
