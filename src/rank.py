@@ -105,8 +105,9 @@ def company_we_keep(conn, dry_run):
                                 for s in sweep[:15]),
                     detail=dict(sweep=sweep), once=True)
     conn.commit()
-    return dict(corroborated=len(matches), reverse_sweep=sweep[:25],
-                investors=list(pats))
+    return dict(corroborated_on_bench=len(matches.keys() & on_bench),
+                held_anywhere_in_l0=len(matches),
+                reverse_sweep=sweep[:25], investors=list(pats))
 
 
 def main():
