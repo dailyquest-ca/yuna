@@ -78,7 +78,14 @@ def main():
                 data = load_bars(cur)
 
             feats = features(data, meta)
-            ranked = [t for t, f in feats.items() if f["eff"] and f["scoreable"]]
+            # §3.0: "Holdings are always scored, by both pipelines — membership lists never drop a
+            # name the book owns." The L0 bar filters decide MEMBERSHIP, not scoreability, so a
+            # holding that sits outside L0 still gets an MCN. CNQ.TO is the case in the book: a TSX
+            # listing, `in_l0=false` by the US-exchange rule, 754 bars of perfectly good history —
+            # and it carried a null MCN into every queue and every brief because this line dropped
+            # it before a single component was computed.
+            ranked = [t for t, f in feats.items()
+                      if f["scoreable"] and (f["eff"] or meta[t]["hold"])]
 
             # ---- MCN components, all windows ending t-10 (§3.2) ----
             quality, atr_pct, dryup, near_high, group_returns = {}, {}, {}, {}, {}
@@ -121,7 +128,9 @@ def main():
             # §3.2: L1-M membership = M2 and M4 pass, ranked by MCN, top 150. A name we have never
             # swept cannot pass M4, so it is not a member — the previous build treated an unknown
             # M4 as a pass, which is a gate the plan does not grant.
-            l1m = sorted([r for r in rows if r["m2"] and r["m4"] is True],
+            # Scored is not the same as a member: L1-M is still an L0 population, so a holding that
+            # is scored but outside L0 gets its MCN and no candidacy.
+            l1m = sorted([r for r in rows if r["m2"] and r["m4"] is True and feats[r["t"]]["eff"]],
                          key=lambda r: -(r["mcn"] or 0))[:L1M_SIZE]
             for i, r in enumerate(l1m):
                 r["rank"] = i + 1

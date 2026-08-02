@@ -916,3 +916,30 @@ def test_a_below_seventy_name_never_arms_an_entry(db, fx):
     db.commit()
     run()
     assert armed(db, "entry", "WEAK.US") == []
+
+
+def test_a_holding_outside_l0_is_still_scored(db, fx):
+    """§3.0: 'Holdings are always scored, by both pipelines — membership lists never drop a name the
+    book owns.' The L0 bar filters decide membership, not scoreability.
+
+    CNQ.TO is the live case: a TSX listing, in_l0=false by the US-exchange rule, 754 bars of good
+    history — and it carried a NULL MCN into every queue and every brief because the ranker dropped
+    it before computing a single component. A dev-fix item confirmed at source and then missed.
+    """
+    import rank
+    with db.cursor() as cur:
+        world.add_name(cur, "FOREIGN.TO")
+        cur.execute("update universe set in_l0=false, is_holding=true where ticker='FOREIGN.TO'")
+        world.flat_then_base(cur, "FOREIGN.TO")
+        world.position(cur, "FOREIGN.TO", sleeve="levered", account="NONREG", qty=100)
+        world.gate(cur)
+    db.commit()
+
+    meta = {"FOREIGN.TO": dict(industry="Oil & Gas E&P", hold=True, l0=False)}
+    with db.cursor() as cur:
+        data = rank.load_bars(cur)
+    feats = rank.features({k: v for k, v in data.items() if k == "FOREIGN.TO"}, meta)
+    assert feats["FOREIGN.TO"]["eff"] is False, "fixture must be outside L0 for this test to mean anything"
+
+    scored = [t for t, f in feats.items() if f["scoreable"] and (f["eff"] or meta[t]["hold"])]
+    assert "FOREIGN.TO" in scored, "a holding outside L0 must still be scored (§3.0)"
