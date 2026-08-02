@@ -1,8 +1,9 @@
 # Yuna — Zak's Trading Agent
 
-*Updated: 2026-08-01 10:22 AM (UTC−6)*
+*Updated: 2026-08-02 8:23 AM (UTC−6)*
 **Opened:** 2026-07-29 · **Owner:** Zak (decisions, execution) · Yuna (research, ranking, tickets)
 **Rule:** This document is law. Changes only by announced edit — exact section, exact old line, exact new line, Zak's approval — and every edit bumps the Updated stamp.
+**Plain-language law:** every rule in this document must be explainable to Zak in one plain sentence. A rule that fails that test is defective — the rule gets rewritten or deleted, never the standard.
 
 ---
 
@@ -229,14 +230,16 @@ Every memo and every decision logged as an observation.
 
 > **Expected return at price P = FCF yield + engine growth − derating drag**
 > - FCF yield = TTM free cash flow ÷ market cap at P — **market cap is the vendor's USD figure** (it resolves ADR ratios, listing currency, and share class); cap at price P uses **effective shares = vendor cap ÷ the close on the cap's `as_of` date — the date the vendor stamps the cap, the fetch date when no statement date is given — frozen with the filing** — the hurdle moves when a filing changes FCF, growth, or the fair multiple, never because the quote moved; `gap_to_hurdle` carries price · corporate actions that change the count between filings (splits, large buybacks) re-derive shares under the per-ticker call exception · vendor cap missing → data-confidence path (§3.3)
-> - Engine growth capped at **25%**
-> - Derating drag = annualized 5-yr slide from current P/FCF down to the **fair multiple** = lower of the stock's own 5-yr median P/FCF or **30×**. Names with < 3 yrs of history: fair = lower of current or 25×
-> - The drag is **never a credit** — cheapness earns no bonus. The margin of safety lives here
+> - Engine growth capped at **25%, and at (0.15 − 1 ÷ fair multiple)** — the growth rate consistent with the fair multiple and the 15% floor; one number read off two already in this section, nothing chosen. Consequence, provable rather than ruled: **the hurdle price can never exceed the fair multiple × FCF per share** — the system never instructs paying a richer multiple of real cash than the stock's own history (ceiling 30×). The hurdle collapses to closed form: hurdle = FCF per share ÷ (0.15 − capped growth). Applies to every name, measured and growth-derived alike — the number we trust least never sets the price we pay
+> - Derating drag = annualized 5-yr slide from current P/FCF down to the **fair multiple** = lower of the stock's own 5-yr median P/FCF or **30×**. Names with < 3 yrs of history: fair = **flat 25×** (the lower-of-current form is circular — with shares frozen at the filing it reproduces the filing-date price exactly)
+> - The drag is **never a credit** — cheapness earns no bonus. Under the growth cap above it is zero at the hurdle price by construction; it prices expected return at quotes *above* fair, for the gap display. **The margin of safety lives in the fair multiple** — the refusal to underwrite any multiple richer than the stock's own history
 > - **Hurdle price = highest P where expected return ≥ 15%/yr**
 
 15% is an underwriting floor, not the expectation — growth is capped and rerating earns nothing, so what underwrites at 15% has historically realized above it. Analyst target prices are never an input (documented optimism bias); they serve only as a data-sanity flag when our hurdle diverges wildly from the street.
 
 **Sizing:** CCN 70–84 → **12%** of NAV · CCN 85+ → **15%** · flat 12% for at least the first two full calendar quarters after cutover (Phase 0, §6, complete) — at a monthly approval (R5) thereafter, the shadow-book cohort comparison (85+ vs 70–84) is presented and Zak rules whether 15% sizing unlocks; absent a ruling, flat 12% continues · capped by the sleeve ceiling — the last name entered sizes to the remaining room. Full position in a single order at or below the hurdle — a **GTC buy limit at the hurdle price**: it fills immediately anywhere at/below the hurdle, waits above it, and is cancelled and replaced when a filing moves the hurdle.
+
+**Owner-cash quarantine:** a name whose C2 memo concludes that reported FCF is materially customer float or credit-book funding (the §5.5 owner-FCF note, ruled by judgment and logged like a theme call) is marked on its bench row and is **not entry-eligible** — scored, ranked, watched, never ticketed — until the balance-sheet treatment (TODO) prices it on cash the owners actually keep. Current exhibits: MELI-class marketplaces with wallets, anything with a lending arm.
 
 **Adding / averaging down — permitted.** CCN ≥ 70, price below hurdle, **and price below the entry fill** — add bands measure from the fill, so entry day arms nothing however deep the discount: 5–15% below the fill → add **50%** of original size · beyond 15% below the fill → add **100%** · max 2 adds per name per 12 months (crash-protocol tactical adds exempt) · the 25% single-name entry ceiling still applies.
 
@@ -421,7 +424,7 @@ One Supabase Postgres project. **Everything lives here, including L0**; the repo
 | Table | Holds | Mode |
 |---|---|---|
 | universe (L0) | ~1,500 names + filters | overwrite |
-| bench | 60 names · CCN + components · hurdle · C2 status · approval | overwrite |
+| bench | 60 names · CCN + components · hurdle · owner-FCF disclosure (reported FCF, SBC share, ΔWC share) · C2 status · approval | overwrite |
 | candidates | 150 momentum · MCN · BUY/WAIT · pivot/stop | overwrite |
 | queue | ~20 pre-written triggers | overwrite |
 | armed | The night's arming decisions — every trigger the job proposed, stamped with its run id | append |
@@ -555,7 +558,7 @@ Zak provides settled Wealthsimple activity **plus per-account cash balances and 
 
 Funnel output → new bench candidates, each with a **C2 memo**:
 
-> **C2 memo template (target ~200 words):** company + one-line what-it-does · the three Gate C2 questions, two sentences each (does scale strengthen it? gains shared to widen the moat? where does the next dollar go and what does it earn?) · proxy metrics table · serial-acquirer flag if goodwill jumped · owner-FCF note for float and credit-book businesses (reported FCF can be customer float in costume) · **PASS / FAIL + confidence**.
+> **C2 memo template (target ~200 words):** company + one-line what-it-does · the three Gate C2 questions, two sentences each (does scale strengthen it? gains shared to widen the moat? where does the next dollar go and what does it earn?) · proxy metrics table · serial-acquirer flag if goodwill jumped · owner-FCF note for float and credit-book businesses (reported FCF can be customer float in costume) — **cites the three figures stored on the bench row: reported FCF, the SBC share of it, and the working-capital share of it**; a "materially float" conclusion triggers the §3.1 owner-cash quarantine · **PASS / FAIL + confidence**.
 
 → **annual re-underwrites** for any holding at its purchase anniversary this month (Gate C2 from scratch, invalidators re-set) → evictions list (rule-driven, reported) → audit snapshot: return vs the 30% bar · sleeve observations · breaches · learnings due for **promotion or expiry** → Zak rules → approvals join the bench, rejections get 12-month cooldown rows.
 
@@ -597,6 +600,8 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 - **D8 — options & shorting gate.** The vision keeps these behind an unwritten gate. Not blocking; write the criteria only if and when the capability is wanted.
 
 **Spec still to write**
+- **Float, priced on the balance sheet.** The owner-cash quarantine is the interim rule; the real treatment subtracts customer funds from the value rather than adjusting cash flow (the quick cash-flow clamp was tested and rejected — it punished the wrong companies). Design first, then its own announced edit.
+- **Reinvestment measurement.** Today's formula reads the best asset-light compounders as "unmeasurable" — D&A above capex plus negative working capital computes reinvestment of exactly zero — which is why 93 of 108 bench names fall back to revenue growth. Fixing what we measure is worth more than anything tuned downstream of it. Design first, then its own announced edit.
 - **Learnings promotion & expiry.** The vision says observations become learnings through repetition and expire unless re-earned — the thresholds aren't written. Best written once real observations accumulate, rather than invented now.
 
 **Remaining work**
@@ -631,6 +636,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 
 | Date | Entry |
 |---|---|
+| 2026-08-02 | **Plain-cash rulings — SBC is a cost · price never exceeds history · float quarantined · plain-language law.** Four-school adversarial vetting of the entry hurdle, two claims re-verified against the live solver and our own stored filings. The working diagnosis was corrected first: the drag floor was NOT the mechanism (at a 25%-growth hurdle the drag is 11.8%/yr — fully active); the mechanism is the growth cap asserting more growth than the fair multiple can support (a 30× exit at a 15% requirement is a statement the business grows 11.67%, by h = 1/M + g). Fix introduces no constants: growth capped additionally at (0.15 − 1/fair), so the hurdle provably never exceeds the fair multiple and collapses to closed form. FCF redefined net of stock-based compensation everywhere (measured on our own filings: SBC is 78% of TTD's reported FCF, 92% of MELI's — added back inside CFO, deducted nowhere, while the share count stays frozen and C1 polices issuance). Short-history fair multiple → flat 25× (lower-of-current was algebraically the filing-date close). Owner-cash quarantine: float/credit-book names scored but never ticketed until the balance-sheet treatment lands; §5.5's owner-FCF note becomes computable from three stored figures. Plain-language law added to the header. TODO gains the float balance-sheet treatment and the reinvestment-measurement fix as authorized design work. Registered predictions: no hurdle rises · cap-pinned names fall 47–55% · at-or-below-hurdle 48/65 → 34–42 before SBC compounds it · falsifier: if it stays ≥ 45, stop — the remaining generosity is elsewhere. |
 | 2026-08-01 | **Version labels retired until release.** Incrementing minors pre-release implied a shipping history that doesn't exist — this is still development. Labels stripped from every header, table, and checklist; the §3.3 Versioning paragraph is now their only home and says one thing: every formula is v1 until cutover, and counting starts when the system is live. The plan text is the spec; the changelog is the lineage. History rows keep their old labels — the record stays the record. |
 | 2026-08-01 | **Implementation-feedback batch (9 edits).** Durability sub-scores unified on 0–100 and the blend percentiled across L0 (the growth term was numerically inert as written) · five YoY comparisons / six fiscal years made explicit · effective shares pinned to the cap's vendor `as_of` date · RRSP preference defined: trailing-12M dividend yield ≥ 1% at ticket time · bar retention 3 → 10 years (5-yr median P/FCF computes from source; sized to Pro tier) · raw filing JSON moves into the database as `jsonb` · derived multiples demoted from dependency to convenience · both free-tier pause clauses removed (no longer true) · `armed` legislated as an append ledger with run ids |
 | 2026-08-01 | **Audit batch — trial-run teardown (8 edits).** Nightly-ingest gains the book-valuation canary (every holding's price = its latest bar, or the run fails) · compounder entry order legislated as a GTC buy limit at the hurdle · averaging-down bands measure from the entry fill — entry day arms nothing · MCN < 70 never tickets · M4 EM-ADR currency note · one-position-one-account funding rule (§2.6) · R1 tickets name account / currency-FX / theme / risk in C$ and % NAV · every R1 snapshot restates the full blackout wall, holdings included |
@@ -688,7 +694,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | Effective bets | 1 ÷ Σ wᵢwⱼρᵢⱼ — how many truly independent positions the book holds once correlation is counted (§2.2) |
 | Effective shares | Vendor USD market cap ÷ the close on the cap's `as_of` date (the vendor's stamp; fetch date when none given), frozen with the filing — the hurdle's share count (§3.1) |
 | EOD | End-of-day — one price record per stock per day, after the close |
-| FCF | Free cash flow — cash from operations minus capital spending |
+| FCF | Free cash flow — cash from operations minus capital spending **minus stock-based compensation**. Pay handed out as shares is pay; and because the hurdle's share count is frozen at the filing, the dilution that funds it appears nowhere else — un-deducted, it is free money. Applied everywhere the plan says FCF: Gate C1's positive-FCF test, cash conversion, TTM FCF, and the historical quarterly P/FCF series (same basis throughout, or the median is a units error). A quarter with no reported SBC falls back to reported FCF and stamps the row (§3.3) |
 | Final-contraction low | The lowest low of a base's last 10 sessions — the natural stop shelf under a breakout (§3.2) |
 | Growth-derived | Engine scored as observed 3-yr revenue growth, capped at 25%, when the cash-flow engine is unmeasurable or fails the cross-check; carries §3.3's guardrails (§3.1) |
 | GTC | Good-til-cancelled — an order that stands until filled, cancelled, or expired (90 days at Wealthsimple) |
