@@ -111,3 +111,37 @@ def test_debt_growth_is_only_a_kill_above_one_turn_of_leverage():
     assert row["debt_grows_faster"] is True                       # observed, and reported
     assert "growing faster" not in (row["c1_fail_reason"] or "")  # but never a kill down here
     assert row["c1_pass"] is True
+
+
+# --------------------------------------------------- glossary 2026-08-02 · FCF is net of SBC
+
+def doc_with_sbc(sbc=50.0):
+    d = doc()
+    for row in d["Financials"]["Cash_Flow"]["yearly"].values():
+        row["stockBasedCompensation"] = sbc
+    return d
+
+
+def test_free_cash_flow_deducts_stock_based_compensation():
+    """Pay handed out as shares is pay. With shares frozen at the filing, un-deducted SBC is free
+    money — measured on our own filings it was 78% of TTD's reported FCF and 92% of MELI's."""
+    r = fu.extract("TEST.US", doc_with_sbc(50.0), "USD")
+    assert r["fcf_3y"] == pytest.approx((700.0 - 50.0) * 3)
+    assert r["fcf_ttm"] == pytest.approx(650.0)
+    assert r["fcf_ttm_reported"] == pytest.approx(700.0)
+    assert r["sbc_ttm"] == pytest.approx(50.0)
+    assert r["sbc_missing"] is False
+
+
+def test_missing_sbc_falls_back_to_reported_and_stamps_the_row():
+    """§3.3: never assume a missing value — the period keeps its reported figure, the row says so."""
+    r = fu.extract("TEST.US", doc(), "USD")          # fixture has no SBC field at all
+    assert r["fcf_ttm"] == pytest.approx(700.0)      # reported, not silently reduced
+    assert r["sbc_missing"] is True
+
+
+def test_sbc_can_fail_c1_and_that_is_the_test_working():
+    """A company whose 'free cash' is entirely stock comp is not cash-generative."""
+    r = fu.extract("TEST.US", doc_with_sbc(800.0), "USD")
+    assert r["fcf_ttm"] < 0
+    assert r["c1_pass"] is False and "FCF" in r["c1_fail_reason"]

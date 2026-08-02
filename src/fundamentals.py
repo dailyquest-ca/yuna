@@ -201,13 +201,34 @@ def extract(ticker, r, quote_ccy=None):
         agrees = abs(engine - rev_cagr) <= max(TOLERANCE, 0.5 * abs(rev_cagr))
 
     # ---- cash conversion
-    def fcf_of(row):
+    def fcf_reported_of(row):
+        """The industry-standard figure: CFO minus capex, SBC still inside it."""
         v = num(row.get("freeCashFlow"))
         if v is not None:
             return v
         cfo = num(row.get("totalCashFromOperatingActivities"))
         cx = num(row.get("capitalExpenditures"))
         return (cfo - abs(cx)) if cfo is not None and cx is not None else None
+
+    def fcf_of(row):
+        """FCF per the glossary, 2026-08-02: reported minus stock-based compensation.
+
+        Pay handed out as shares is pay, and with the hurdle's share count frozen at the filing the
+        dilution that funds it appears nowhere else — un-deducted it is free money. Measured before
+        this change on our own stored filings: SBC was 78% of TTD's reported FCF and 92% of MELI's.
+        A period with no reported SBC falls back to reported and the row is stamped (§3.3) —
+        `sbc_missing` tracks it via the nonlocal below.
+        """
+        base = fcf_reported_of(row)
+        if base is None:
+            return None
+        sbc = num(row.get("stockBasedCompensation"))
+        if sbc is None:
+            nonlocal_sbc_missing[0] = True
+            return base
+        return base - abs(sbc)
+
+    nonlocal_sbc_missing = [False]
 
     fcf_3y = s([fcf_of(cf_y[k]) for k in y3 if k in cf_y])
     ni_3y = s([num(is_y[k].get("netIncome")) for k in y3])
@@ -216,6 +237,18 @@ def extract(ticker, r, quote_ccy=None):
     qs = desc(cf_q)
     fcf_ttm = s([fcf_of(cf_q[k]) for k in qs[:4]]) if len(qs) >= 4 else \
               (fcf_of(cf_y[ys[0]]) if ys[0] in cf_y else None)
+
+    # ---- owner-FCF disclosure (§3.1 quarantine, §5.5 note): the three figures every bench row
+    # carries so "customer float in costume" is a number Zak reads, not a suspicion.
+    if len(qs) >= 4:
+        fcf_ttm_reported = s([fcf_reported_of(cf_q[k]) for k in qs[:4]])
+        sbc_ttm = s([num(cf_q[k].get("stockBasedCompensation")) for k in qs[:4]])
+        dwc_ttm = s([num(cf_q[k].get("changeInWorkingCapital")) for k in qs[:4]])
+    else:
+        fcf_ttm_reported = fcf_reported_of(cf_y[ys[0]]) if ys[0] in cf_y else None
+        sbc_ttm = num((cf_y.get(ys[0]) or {}).get("stockBasedCompensation"))
+        dwc_ttm = num((cf_y.get(ys[0]) or {}).get("changeInWorkingCapital"))
+    sbc_ttm = abs(sbc_ttm) if sbc_ttm is not None else None
 
     # a quarterly TTM-FCF / shares series, so the funnel can build P/FCF history from our bars
     qseries = []
@@ -327,6 +360,8 @@ def extract(ticker, r, quote_ccy=None):
         cap_as_of=cap_as_of, cap_close=None, effective_shares=None,
         growth_consistency=growth_consistency, roic_worst_year=roic_worst,
         roic_years_reported=roic_years,
+        fcf_ttm_reported=fcf_ttm_reported, sbc_ttm=sbc_ttm, dwc_ttm=dwc_ttm,
+        sbc_missing=nonlocal_sbc_missing[0],
         # §4.1: the raw filing document lives in the database now, not compressed in the repo — the
         # point-in-time asset §4.8 calls the honest backtest is only honest if it is queryable.
         raw_doc=json.dumps(r, default=str),
@@ -373,7 +408,8 @@ COLS = ["ticker", "filing_date", "period_end", "currency", "sector", "industry",
         "c1_fail_reason", "pfcf_current", "pfcf_median", "pfcf_obs", "eps_yoy_latest",
         "eps_yoy_prev", "m4_pass", "data_confidence", "primary_ticker", "statement_currency",
         "quote_ok", "cap_as_of", "cap_close", "effective_shares",
-        "growth_consistency", "roic_worst_year", "roic_years_reported", "raw", "raw_doc"]
+        "growth_consistency", "roic_worst_year", "roic_years_reported",
+        "fcf_ttm_reported", "sbc_ttm", "dwc_ttm", "sbc_missing", "raw", "raw_doc"]
 JSON_COLS = {"raw", "raw_doc"}
 
 
@@ -453,7 +489,53 @@ def flush(conn, rows, errors):
         return ok
 
 
+def reextract(conn, hb):
+    """Re-derive every stored row from the raw filing document already in the database.
+
+    Zero vendor calls. This is the entire payoff of §4.1 moving `raw_doc` into the store: a law
+    change to the extraction (SBC net of FCF, new disclosure fields) re-prices 2,700 filings from
+    what the vendor already served, instead of burning a 27,000-unit sweep to learn the same facts.
+    """
+    with conn.cursor() as cur:
+        cur.execute("select ticker, currency from universe where kind='stock'")
+        quote = {r[0]: r[1] for r in cur.fetchall()}
+    done, fail, errors, last = 0, 0, {}, ""
+    while True:
+        with conn.cursor() as cur:
+            cur.execute("""select ticker, raw_doc from v_fundamentals_latest
+                           where raw_doc is not null and ticker > %s
+                           order by ticker limit 50""", (last,))
+            page = cur.fetchall()
+        if not page:
+            break
+        buf = []
+        for tk, doc in page:
+            last = tk
+            try:
+                row = extract(tk, doc, quote.get(tk))
+            except Exception as e:
+                fail += 1
+                if len(errors) < 40:
+                    errors[tk] = f"reextract {type(e).__name__}: {e}"
+                continue
+            if row is not None:
+                buf.append(row)
+        done += flush(conn, buf, errors)
+    frozen = freeze_effective_shares(conn, list(quote))
+    hb.rows = done
+    hb.detail.update(mode="reextract", written=done, failed=fail, errors=errors,
+                     effective_shares_frozen=frozen, api_units=0)
+    if fail:
+        hb.amber(f"{fail} stored documents failed to re-extract")
+    print(f"fundamentals: re-extracted {done} rows from stored filings, {fail} failed, 0 API calls")
+
+
 def main():
+    if os.environ.get("REEXTRACT", "false").lower() in ("1", "true", "yes"):
+        with connect() as conn:
+            with Heartbeat(conn, "fundamentals") as hb:
+                reextract(conn, hb)
+        return 0
     only = [t.strip() for t in os.environ.get("TICKERS", "").split(",") if t.strip()]
     stale_only = os.environ.get("STALE_ONLY", "false").lower() in ("1", "true", "yes")
     with connect() as conn:

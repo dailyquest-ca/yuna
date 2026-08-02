@@ -5,8 +5,8 @@ at run time, exactly as §3.0 says, so scores move when the field moves.
 
 Deviation, announced and awaiting ratification (roadmap Part 4): the hurdle's "fair multiple"
 wants the stock's own 5-year median P/FCF. We hold a 3-year bar window, so the median is taken
-over the quarters we can price; under 8 such quarters the name falls back to the plan's
-short-history rule (fair = lower of current or 25x). The 8 is a builder's threshold.
+over the quarters we can price; under 8 such quarters the name uses the plan's short-history
+rule (fair = flat 25x, never the stock's own current multiple). The 8 is a builder's threshold.
 """
 import os, sys, json, math, statistics as st, datetime as dt
 import psycopg
@@ -73,7 +73,8 @@ def main():
                                       f.pfcf_current, f.data_confidence, f.goodwill_jump,
                                       f.engine_agrees, f.revenue_cagr_3y, f.quote_ok, f.raw, u.is_holding,
                                       f.growth_consistency, f.roic_worst_year, f.roic_years_reported,
-                                      f.effective_shares, f.cap_as_of
+                                      f.effective_shares, f.cap_as_of,
+                                      f.fcf_ttm_reported, f.sbc_ttm, f.dwc_ttm
                                from v_fundamentals_latest f
                                join universe u on u.ticker=f.ticker
                                where u.kind='stock' and u.status='active' and (u.in_l0 or u.is_holding)""")
@@ -118,7 +119,8 @@ def main():
             out, unscored = [], []
             for (tk, engine, cc, mcap, shares, fcf, c1, c1why, roic, reinv,
                  pfcf_cur, conf, gw_jump, agrees, rev_cagr, quote_ok, raw, is_hold,
-                 growth_cons, roic_worst, roic_years, eff_shares, cap_as_of) in rows:
+                 growth_cons, roic_worst, roic_years, eff_shares, cap_as_of,
+                 fcf_rep, sbc_ttm, dwc_ttm) in rows:
                 px = last.get(tk)
                 agrees = sg.engine_agrees(engine, rev_cagr, tolerance=tol)
                 how = provenance[tk]
@@ -140,14 +142,26 @@ def main():
                 pfcf_med, obs = pfcf_history(raw_d, closes.get(tk, {}))
                 if obs >= 8 and pfcf_med:
                     fair = min(pfcf_med, fair_cap)
-                elif pfcf_cur and quote_ok is not False:
-                    fair = min(pfcf_cur, fair_cap_short)
+                elif quote_ok is not False:
+                    # §3.1 (2026-08-02): short-history fair is a FLAT 25x. The lower-of-current
+                    # form was circular — with shares frozen at the filing it reproduced the
+                    # filing-date close exactly, so "is it cheap" degenerated into "has it fallen
+                    # since it last filed".
+                    fair = fair_cap_short
                 else:
                     fair = None
                 # The hurdle underwrites the same engine the CCN scores — the waterfall's value,
                 # capped, whichever side of the identity it came from. Growth-derived names carry
                 # §3.3's guardrails instead of a silent zero.
+                # §3.1 (2026-08-02): growth is additionally capped at the rate the fair multiple
+                # can support (0.15 − 1/fair). signals.hurdle_price applies the same clamp
+                # internally; g is clamped here too so the STORED engine_growth is the growth the
+                # hurdle actually used — verify re-derives the floor from the row's own numbers,
+                # and a stored growth the solve ignored would flag every capped name.
                 g = final_engine[tk] if final_engine[tk] is not None else 0.0
+                ceil_g = sg.hurdle_growth_ceiling(fair) if fair else None
+                if ceil_g is not None:
+                    g = min(g, ceil_g)
                 # §3.1: effective shares are FROZEN at the filing — cap / the close on the cap's
                 # `as_of` date, stored by the sweep. Re-deriving them from tonight's close made the
                 # hurdle a function of the quote and it decayed every night.
@@ -164,6 +178,12 @@ def main():
                     growth_consistency=float(growth_cons) if growth_cons is not None else None,
                     roic_floor_pct=floor_p.get(tk), roic_years=roic_years,
                     engine_used=final_engine[tk],
+                    # §5.5 owner-FCF disclosure: the three figures the memo must cite, on the row
+                    fcf_ttm_reported=float(fcf_rep) if fcf_rep is not None else None,
+                    sbc_share=(float(sbc_ttm) / float(fcf_rep)
+                               if sbc_ttm is not None and fcf_rep and float(fcf_rep) > 0 else None),
+                    dwc_share=(float(dwc_ttm) / float(fcf_rep)
+                               if dwc_ttm is not None and fcf_rep and float(fcf_rep) > 0 else None),
                     engine_raw=engine, cash_conv_raw=cc, roic=roic, reinvest_rate=reinv,
                     c1_pass=(c1 and quote_ok is True),
                     # the reason belongs on the row that FAILED. The previous form kept it when the
@@ -241,11 +261,13 @@ def main():
                     cur.execute("delete from queue where source='compounder'")
                     cur.executemany("""insert into bench(ticker,rank,cohort,ccn,engine,cash_conv,durability,
                             engine_provenance,growth_consistency,roic_floor_pct,roic_years,engine_used,
+                            fcf_ttm_reported,sbc_share,dwc_share,
                             engine_raw,cash_conv_raw,roic,reinvest_rate,c1_pass,c1_fail_reason,
                             hurdle_price,fcf_yield,engine_growth,derating_drag,fair_multiple,
                             last_close,gap_to_hurdle,data_confidence,serial_acquirer,computed_at)
                           values (%(ticker)s,%(rank)s,%(cohort)s,%(ccn)s,%(engine)s,%(cash_conv)s,%(durability)s,
                             %(engine_provenance)s,%(growth_consistency)s,%(roic_floor_pct)s,%(roic_years)s,%(engine_used)s,
+                            %(fcf_ttm_reported)s,%(sbc_share)s,%(dwc_share)s,
                             %(engine_raw)s,%(cash_conv_raw)s,%(roic)s,%(reinvest_rate)s,%(c1_pass)s,%(c1_fail_reason)s,
                             %(hurdle_price)s,%(fcf_yield)s,%(engine_growth)s,%(derating_drag)s,%(fair_multiple)s,
                             %(last_close)s,%(gap_to_hurdle)s,%(data_confidence)s,%(serial_acquirer)s,now())
@@ -254,7 +276,10 @@ def main():
                             durability=excluded.durability, engine_provenance=excluded.engine_provenance,
                             growth_consistency=excluded.growth_consistency,
                             roic_floor_pct=excluded.roic_floor_pct, roic_years=excluded.roic_years,
-                            engine_used=excluded.engine_used, engine_raw=excluded.engine_raw,
+                            engine_used=excluded.engine_used,
+                            fcf_ttm_reported=excluded.fcf_ttm_reported,
+                            sbc_share=excluded.sbc_share, dwc_share=excluded.dwc_share,
+                            engine_raw=excluded.engine_raw,
                             cash_conv_raw=excluded.cash_conv_raw, roic=excluded.roic,
                             reinvest_rate=excluded.reinvest_rate, c1_pass=excluded.c1_pass,
                             c1_fail_reason=excluded.c1_fail_reason, hurdle_price=excluded.hurdle_price,

@@ -44,22 +44,12 @@ def pct_rank(d):
 
 
 def hurdle_price(fcf, shares, growth, fair):
-    if not fcf or fcf <= 0 or not shares or shares <= 0 or not fair or fair <= 0:
-        return None
-
-    def er(mcap):
-        return fcf / mcap + growth - max(0.0, 1.0 - (fair * fcf / mcap) ** 0.2)
-
-    lo, hi = fcf * 0.01, fcf * 5000.0
-    if er(hi) >= FLOOR:
-        return hi / shares
-    if er(lo) < FLOOR:
-        return None
-    for _ in range(70):
-        mid = (lo + hi) / 2
-        lo, hi = (mid, hi) if er(mid) >= FLOOR else (lo, mid)
-    return lo / shares
-
+    """One solver in the system: signals.hurdle_price. This wrapper exists only to preserve the
+    backtest's historical call shape. The previous body was a private copy with its own constants,
+    which meant the backtest silently measured a different formula than production priced — the
+    exact failure mode a backtest exists to rule out."""
+    return sg.hurdle_price(fcf_ttm=fcf, shares=shares, growth=growth,
+                           fair_multiple=fair, floor=FLOOR)
 
 def as_of(ticker_raw, T):
     """Everything §3.1 needs, rebuilt from only the filings that existed on date T."""

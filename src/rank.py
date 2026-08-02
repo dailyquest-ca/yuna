@@ -48,6 +48,67 @@ def features(data, meta):
     return feats
 
 
+def company_we_keep(conn, dry_run):
+    """§3.1, 2026-08-02 — the weekly two-way check against the reference investors.
+
+    Both directions read the top-holder records already stored with every filing; no vendor call.
+    (a) bench rows get `corroborated_by` — which reference investors appear among the holders;
+    (b) the reverse sweep lists every L0 name held by two or more of them that our bench lacks,
+    with the exact reason it missed. A mirror, never a source: nothing here moves a score.
+    """
+    with conn.cursor() as cur:
+        pats = config(cur, "named_investors",
+                      ["Fundsmith", "Akre", "Polen", "TCI Fund", "Pershing",
+                       "WCM Invest", "Giverny"])
+        cur.execute("""
+            select f.ticker, array_agg(distinct p.pat order by p.pat)
+              from v_fundamentals_latest f
+              join universe u on u.ticker = f.ticker
+               and u.kind='stock' and u.status='active' and (u.in_l0 or u.is_holding)
+             cross join lateral (
+                   select value->>'name' as nm
+                     from jsonb_each(coalesce(f.raw_doc->'Holders'->'Institutions','{}'::jsonb))
+                   union all
+                   select value->>'name'
+                     from jsonb_each(coalesce(f.raw_doc->'Holders'->'Funds','{}'::jsonb))
+             ) h
+              join unnest(%s::text[]) p(pat) on h.nm ilike '%%' || p.pat || '%%'
+             group by f.ticker""", (list(pats),))
+        matches = {r[0]: r[1] for r in cur.fetchall()}
+
+        if not dry_run:
+            cur.execute("update bench set corroborated_by = null")
+            for tk, who in matches.items():
+                cur.execute("update bench set corroborated_by = %s where ticker = %s", (who, tk))
+
+        # the reverse sweep: >=2 reference investors hold it, our bench does not
+        cur.execute("select ticker from bench")
+        on_bench = {r[0] for r in cur.fetchall()}
+        sweep = []
+        for tk, who in sorted(matches.items()):
+            if len(who) < 2 or tk in on_bench:
+                continue
+            cur.execute("""select c1_pass, c1_fail_reason from v_fundamentals_latest
+                           where ticker = %s""", (tk,))
+            row = cur.fetchone()
+            if row is None:
+                why = "never swept — no fundamentals row"
+            elif row[0] is False:
+                why = f"C1: {row[1] or 'failed, reason not stored'}"
+            else:
+                why = "eligible but outside the top-60 by CCN, or not bench-eligible (engine/durability)"
+            sweep.append(dict(ticker=tk, held_by=who, missed_because=why))
+        if sweep and not dry_run:
+            observe(cur, "note",
+                    "The company we keep — reverse sweep: "
+                    + "; ".join(f"{s['ticker']} ({', '.join(s['held_by'])}) — {s['missed_because']}"
+                                for s in sweep[:15]),
+                    detail=dict(sweep=sweep), once=True)
+    conn.commit()
+    return dict(corroborated=len(matches), reverse_sweep=sweep[:25],
+                investors=list(pats))
+
+
 def main():
     with connect() as conn:
         with Heartbeat(conn, "weekly-rank", scheduled_utc="12:00") as hb:
@@ -218,6 +279,9 @@ def main():
                                             sma_4w=gate["sma_lookback"]),
                                 once=True)
                 conn.commit()
+
+            keep = company_we_keep(conn, dry())
+            hb.detail["company_we_keep"] = keep
 
             hb.rows = 0 if dry() else len(l1m) + len(seats) + len(groups)
             hb.detail.update(gate=gate["state"], gate_flipped=gate["flipped"],

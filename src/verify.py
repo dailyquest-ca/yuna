@@ -148,6 +148,46 @@ def check_hurdle_is_price_invariant(cur):
     return bad
 
 
+def calibration_gauges(cur, knife_max, buyable_max):
+    """§5.5, 2026-08-02 — the falling-knife gauge and the buyable-share gauge, as standing alarms.
+
+    Gauge 1: Spearman rank correlation between how far a name has fallen from its stored high and
+    how rich a multiple of FCF the hurdle permits. Near zero is healthy; positive means the screen
+    grants its most generous licences to its biggest losers — the exact pathology of 2026-08-01,
+    stated as one number. Gauge 2: the share of the ranked bench called buyable; a value screen
+    calling most of its own bench cheap is describing itself, not the market.
+    """
+    cur.execute("""select b.ticker,
+                          b.hurdle_price * f.effective_shares / f.fcf_ttm,
+                          1.0 - b.last_close / mx.mx
+                     from bench b
+                     join v_fundamentals_latest f on f.ticker = b.ticker
+                     join lateral (select max(close) mx from prices p where p.ticker = b.ticker) mx on true
+                    where b.rank is not null and b.hurdle_price is not null
+                      and b.last_close is not null and mx.mx > 0
+                      and f.fcf_ttm is not null and f.fcf_ttm > 0
+                      and f.effective_shares is not null""")
+    rows = cur.fetchall()
+    rho = None
+    if len(rows) >= 10:
+        import numpy as np
+        mult = np.array([float(r[1]) for r in rows])
+        draw = np.array([float(r[2]) for r in rows])
+        rank = lambda a: a.argsort().argsort().astype(float)
+        rm, rd = rank(mult), rank(draw)
+        denom = float(np.std(rm) * np.std(rd))
+        rho = float(np.mean((rm - rm.mean()) * (rd - rd.mean())) / denom) if denom else None
+
+    cur.execute("""select count(*) filter (where gap_to_hurdle <= 0), count(*)
+                     from bench where rank is not null and gap_to_hurdle is not null""")
+    buyable, ranked = cur.fetchone()
+    share = (buyable / ranked) if ranked else None
+    return dict(knife_corr=round(rho, 3) if rho is not None else None, knife_n=len(rows),
+                knife_fail=(rho is not None and rho > knife_max),
+                buyable_share=round(share, 3) if share is not None else None,
+                buyable_n=ranked, buyable_fail=(share is not None and share > buyable_max))
+
+
 def main():
     with connect() as conn:
         with Heartbeat(conn, "verify") as hb:
@@ -159,6 +199,9 @@ def main():
                 prov = check_provenance(cur)
                 drift = check_hurdle_is_price_invariant(cur)
                 top, engineless = what_carries_the_scores(cur)
+                knife_max = float(config(cur, "verify_knife_corr_max", 0.30))
+                buyable_max = float(config(cur, "verify_buyable_share_max", 0.60))
+                gauges = calibration_gauges(cur, knife_max, buyable_max)
 
                 # §4.7: a job that half-fails goes amber — but "amber" with a count is a status, not
                 # a cause. Production went amber with the reasons discoverable only by reading rows.
@@ -184,6 +227,17 @@ def main():
                          detail="a bench row scored without an engine, a durability or a stated "
                                 "provenance — or growth-derived without §3.3's guardrail flag",
                          names=[b["ticker"] for b in prov][:20]),
+                    dict(check="falling_knife_gauge",
+                         failures=1 if gauges["knife_fail"] else 0,
+                         detail=f"drawdown-vs-permitted-multiple rank correlation "
+                                f"{gauges['knife_corr']} over {gauges['knife_n']} names "
+                                f"(alarm above {knife_max}) — positive means the screen pays up "
+                                f"for falling knives (§5.5)", names=[]),
+                    dict(check="buyable_share_gauge",
+                         failures=1 if gauges["buyable_fail"] else 0,
+                         detail=f"{gauges['buyable_share']} of the ranked bench called buyable "
+                                f"(alarm above {buyable_max}) — a screen calling most of its own "
+                                f"bench cheap is describing itself (§5.5)", names=[]),
                     dict(check="hurdle_is_price_invariant", failures=len(drift),
                          detail="the hurdle's share count tracks today's quote rather than the "
                                 "close on the cap's as_of date (§3.1)",
@@ -193,7 +247,7 @@ def main():
                 findings = dict(hurdle_mismatches=hurdles, gap_mismatches=gaps,
                                 ccn_mismatches=ccns, provenance_gaps=prov, share_drift=drift,
                                 top_of_bench=top,
-                                engineless_in_top=engineless,
+                                engineless_in_top=engineless, gauges=gauges,
                                 checks=checks, causes=[c["check"] for c in failed])
                 hb.detail.update(findings)
 

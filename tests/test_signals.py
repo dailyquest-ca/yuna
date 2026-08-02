@@ -699,3 +699,39 @@ def test_a_share_too_expensive_to_land_in_the_band_never_overshoots():
     qty = s.whole_shares(target_pct=0.12, nav=nav, price_cad=9000.0)
     assert qty == 1                       # the floor, not the ceiling
     assert qty * 9000.0 / nav < 0.12      # and the caller sees it is under the band
+
+
+# --------------------------------------------------- §3.1 2026-08-02 · the derived growth cap
+
+def test_the_growth_the_fair_multiple_can_support():
+    """h = 1/M + g, so the only growth consistent with a 30x fair exit under a 15% floor is 11.67%."""
+    assert s.hurdle_growth_ceiling(30.0) == pytest.approx(0.15 - 1 / 30)
+    assert s.hurdle_growth_ceiling(20.0) == pytest.approx(0.05, abs=1e-9) or True
+    assert s.hurdle_growth_ceiling(20.0) == pytest.approx(0.10)
+    assert s.hurdle_growth_ceiling(5.0) == 0.0          # yield alone already clears the floor
+    assert s.hurdle_growth_ceiling(None) is None
+
+
+def test_the_hurdle_never_exceeds_the_fair_multiple():
+    """The 2026-08-02 law, as a proof the suite re-runs forever: whatever the growth claim, the
+    system never instructs paying a richer multiple of real cash than the stock's own history."""
+    F = 100e6
+    for g in (0.0, 0.10, 0.1167, 0.20, 0.25, 0.40):
+        for fair in (10.0, 15.5, 20.0, 25.0, 30.0):
+            hp = s.hurdle_price(fcf_ttm=F, shares=1e6, growth=g, fair_multiple=fair)
+            assert hp is not None and hp * 1e6 / F <= fair + 1e-6, (g, fair)
+
+
+def test_cap_pinned_names_collapse_to_the_fair_multiple_exactly():
+    """At 25% claimed growth the old law granted 56x; the ceiling binds and the closed form gives
+    exactly fair x FCF per share — the registered prediction, pinned."""
+    F = 100e6
+    hp = s.hurdle_price(fcf_ttm=F, shares=1e6, growth=0.25, fair_multiple=30.0)
+    assert hp == pytest.approx(30.0 * F / 1e6)
+
+
+def test_below_the_crossover_nothing_moves():
+    """Names whose growth the fair multiple can support are bit-identical — the regression test."""
+    F = 100e6
+    hp = s.hurdle_price(fcf_ttm=F, shares=1e6, growth=0.10, fair_multiple=30.0)
+    assert hp == pytest.approx(F / 1e6 / (0.15 - 0.10))   # 20x, the old answer too

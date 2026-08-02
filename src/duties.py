@@ -678,6 +678,7 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
         cur.execute("""select b.ticker, b.ccn, b.hurdle_price, b.last_close, b.gap_to_hurdle,
                               b.data_confidence, u.industry, e.report_date, k.id, k.qty,
                               k.avg_cost, b.engine_provenance, d.dps_ttm, k.entry_fill,
+                              b.owner_fcf_suspect,
                               (select count(*) from transactions t
                                  where t.ticker = b.ticker and t.side='buy'
                                    and t.trade_date > current_date - interval '12 months'
@@ -694,7 +695,7 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                          and b.last_close is not null and b.last_close <= b.hurdle_price
                        order by b.ccn desc""")
         for (tk, ccn_score, hurdle, px, gap, confidence, industry, report, held, hqty, hcost,
-             provenance, dps_ttm, entry_fill, adds, hacct) in cur.fetchall():
+             provenance, dps_ttm, entry_fill, owner_suspect, adds, hacct) in cur.fetchall():
             ccn_score = float(ccn_score) if ccn_score is not None else None
             px, hurdle = float(px), float(hurdle)
             in_bo = sg.in_blackout(dt.date.today(), report, holidays=holidays)
@@ -750,6 +751,13 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                 blocked = f"§3.3 — earnings blackout ({report})"
             elif confidence not in ("full", None):
                 blocked = f"§3.3 — scored {confidence}: manual sign-off before sizing"
+            if owner_suspect and not blocked:
+                # §3.1 owner-cash quarantine (2026-08-02): scored, ranked, watched — never
+                # ticketed. Reported FCF here is materially customer money, and no growth cap
+                # repairs a numerator.
+                blocked = ("§3.1 — owner-cash quarantine: reported FCF is materially customer "
+                           "float or credit-book funding; not entry-eligible until the "
+                           "balance-sheet treatment prices it on owner cash")
 
             # §3.1 sizing: whole shares that CEIL into the band — flooring lands the position below
             # its own target weight, which is outside the 12-15 band the plan sets.

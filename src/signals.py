@@ -449,32 +449,61 @@ def expected_return(price, *, fcf_ttm, shares, growth, fair_multiple, years=5):
     return fcf_ttm / cap + growth - drag
 
 
+def hurdle_growth_ceiling(fair_multiple, *, floor=0.15):
+    """§3.1: the growth rate consistent with the fair multiple and the return floor.
+
+    A fair exit at M times FCF under an h requirement IS a growth claim — h = 1/M + g, so the only
+    growth consistent with both numbers is h − 1/M (11.67% at 30x, 10% at 20x). Letting the formula
+    assert 25% growth AND a 30x fair exit at the same instant was the falling-knife licence: above
+    the crossover, growth alone cleared the floor and the hurdle floated free of the fair multiple
+    entirely — all twelve cap-pinned names drew the identical 56x permission regardless of business
+    or drawdown. Nothing here is chosen: both inputs already stand in §3.1.
+    """
+    if not fair_multiple or fair_multiple <= 0:
+        return None
+    return max(0.0, floor - 1.0 / fair_multiple)
+
+
 def hurdle_price(*, fcf_ttm, shares, growth, fair_multiple, floor=0.15, years=5):
     """The highest price at which expected return still clears the floor (§3.1).
 
-    Monotone in price, so a bisection is exact to the cent. Returns None when the name cannot
-    clear the floor at any price, which is the common case and not an error.
+    Two clamps carry the 2026-08-02 law, and both live HERE so every caller — production scoring
+    and the backtest alike — prices under the same rules:
+
+      * growth is additionally capped at `hurdle_growth_ceiling(fair)`, and
+      * the result never exceeds fair_multiple x FCF per share — the system never instructs paying
+        a richer multiple of real cash than the stock's own history (ceiling 30x).
+
+    With the ceiling binding, the solve collapses to closed form (FCF/share ÷ (floor − g)); the
+    bisection is kept because it is exact, tested, and also prices the below-crossover names where
+    the yield term still has to contribute. Returns None when the name cannot clear the floor at
+    any price, which is the common case and not an error.
     """
     if not fcf_ttm or fcf_ttm <= 0 or not shares or shares <= 0 \
        or not fair_multiple or fair_multiple <= 0:
         return None
 
+    ceiling = hurdle_growth_ceiling(fair_multiple, floor=floor)
+    g = min(float(growth or 0.0), ceiling)
+
     def er(px):
-        return expected_return(px, fcf_ttm=fcf_ttm, shares=shares, growth=growth,
+        return expected_return(px, fcf_ttm=fcf_ttm, shares=shares, growth=g,
                                fair_multiple=fair_multiple, years=years)
 
     lo, hi = 0.01, max(1e4, fcf_ttm / shares * 5000.0)
     if (er(lo) or -1) < floor:
         return None
     if (er(hi) or -1) >= floor:
-        return hi
-    for _ in range(200):
-        mid = (lo + hi) / 2
-        if (er(mid) or -1) >= floor:
-            lo = mid
-        else:
-            hi = mid
-    return lo
+        hi = hi
+    else:
+        for _ in range(200):
+            mid = (lo + hi) / 2
+            if (er(mid) or -1) >= floor:
+                lo = mid
+            else:
+                hi = mid
+        hi = lo
+    return min(hi, fair_multiple * fcf_ttm / shares)
 
 
 def displaceable(challenger_score, incumbents, *, margin=10.0):
