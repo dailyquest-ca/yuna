@@ -1,6 +1,6 @@
 # Yuna — Zak's Trading Agent
 
-*Updated: 2026-08-02 8:52 AM (UTC−6)*
+*Updated: 2026-08-02 6:12 PM (UTC−6)*
 **Opened:** 2026-07-29 · **Owner:** Zak (decisions, execution) · Yuna (research, ranking, tickets)
 **Rule:** This document is law. Changes only by announced edit — exact section, exact old line, exact new line, Zak's approval — and every edit bumps the Updated stamp.
 **Plain-language law:** every rule in this document must be explainable to Zak in one plain sentence. A rule that fails that test is defective — the rule gets rewritten or deleted, never the standard.
@@ -146,7 +146,7 @@ Two pipelines. They share only the raw universe.
 
 | Layer | What | Size | Rebuild |
 |---|---|---|---|
-| **L0** | Investable universe | ~1,500 | Monthly |
+| **L0** | Investable universe | low thousands | Monthly |
 | **L1-C** | Compounder bench | 40–60 | Monthly |
 | **L1-M** | Momentum candidates | 100–150 | Weekly |
 | **L2** | Active queue, triggers pre-written | 15–20 | Weekly |
@@ -226,12 +226,12 @@ Every memo and every decision logged as an observation.
 
 **Engine waterfall:** growth = ROIC × reinvestment is an identity, and the cross-check exploits it. Compute the engine from cash-flow components and compare it to observed 3-yr revenue growth — agreement within **5 percentage points** → trustworthy, score it. Unmeasurable (insufficient or undefined cash-flow inputs — < 3 fiscal years, NOPAT ≤ 0) **or** divergence beyond 5pp → the engine becomes **observed 3-yr revenue growth, capped at 25%**, marked **growth-derived** on the bench row and every memo that cites it — the observed side of the identity is the honest substitute, and the cross-check doesn't apply to it (it would check the number against itself). Growth-derived names carry §3.3's guardrails: bottom of the size band, manual sign-off. Revenue history also < 3 years → no engine by either method → **not bench-eligible** · never silently score. *A floored-to-zero engine on a growing business needs no special clause — it fails the cross-check arithmetically and falls back on its own. Second recorded limit: the fallback is pro-cyclical — a trough year reads as decay (an Old Dominion at the bottom of a freight cycle scores like a melting business); the formula stays honest about what it sees, and R5 judgment shops troughs.*
 
-**Entry hurdle** — separate from the CCN, computed daily per bench name:
+**Entry hurdle** — separate from the CCN, computed daily per bench name. The rule in one sentence: **never pay a richer multiple of real cash than the stock's own 5-yr median (30× ceiling) — and when the growth we credit can't deliver 15%/yr even at that multiple, pay less still.** The machinery below computes exactly that:
 
 > **Expected return at price P = FCF yield + engine growth − derating drag**
 > - FCF yield = TTM free cash flow ÷ market cap at P — **market cap is the vendor's USD figure** (it resolves ADR ratios, listing currency, and share class); cap at price P uses **effective shares = vendor cap ÷ the close on the cap's `as_of` date — the date the vendor stamps the cap, the fetch date when no statement date is given — frozen with the filing** — the hurdle moves when a filing changes FCF, growth, or the fair multiple, never because the quote moved; `gap_to_hurdle` carries price · corporate actions that change the count between filings (splits, large buybacks) re-derive shares under the per-ticker call exception · vendor cap missing → data-confidence path (§3.3)
-> - Engine growth capped at **25%, and at (0.15 − 1 ÷ fair multiple)** — the growth rate consistent with the fair multiple and the 15% floor; one number read off two already in this section, nothing chosen. Consequence, provable rather than ruled: **the hurdle price can never exceed the fair multiple × FCF per share** — the system never instructs paying a richer multiple of real cash than the stock's own history (ceiling 30×). The hurdle collapses to closed form: hurdle = FCF per share ÷ (0.15 − capped growth). Applies to every name, measured and growth-derived alike — the number we trust least never sets the price we pay
-> - Derating drag = annualized 5-yr slide from current P/FCF down to the **fair multiple** = lower of the stock's own 5-yr median P/FCF or **30×**. Names with < 3 yrs of history: fair = **flat 25×** (the lower-of-current form is circular — with shares frozen at the filing it reproduces the filing-date price exactly)
+> - Engine growth capped at **(0.15 − 1 ÷ fair multiple)** — the growth rate consistent with the fair multiple and the 15% floor; one number read off two already in this section, nothing chosen. Consequence, provable rather than ruled: **the hurdle price can never exceed the fair multiple × FCF per share** — the system never instructs paying a richer multiple of real cash than the stock's own history (ceiling 30×). The hurdle collapses to closed form: hurdle = FCF per share ÷ (0.15 − capped growth). Applies to every name, measured and growth-derived alike — the number we trust least never sets the price we pay
+> - Derating drag = annualized 5-yr slide from current P/FCF down to the **fair multiple** = lower of the stock's own 5-yr median P/FCF or **30×**. Names with **fewer than 12 priced quarters**: fair = **flat 25×** (the lower-of-current form is circular — with shares frozen at the filing it reproduces the filing-date price exactly)
 > - The drag is **never a credit** — cheapness earns no bonus. Under the growth cap above it is zero at the hurdle price by construction; it prices expected return at quotes *above* fair, for the gap display. **The margin of safety lives in the fair multiple** — the refusal to underwrite any multiple richer than the stock's own history
 > - **Hurdle price = highest P where expected return ≥ 15%/yr**
 
@@ -370,7 +370,7 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 | Box | In one line | Full detail |
 |---|---|---|
 | **Data** | EODHD All-In-One: bulk prices nightly · FX · fundamentals on filing · earnings calendar. Bars kept 3 years, fundamentals forever | → §4.1 |
-| **Compute** | Five scheduled jobs — `nightly-ingest` · `nightly-retry` · `weekly-rank` · `monthly-funnel` · `monthly-backup` — plus dispatch-only tooling | → §4.2 |
+| **Compute** | One sentence — **ingest → score → check → speak**. Six scheduled jobs (`ingest-daily` ×2 · `ingest-filings` · `ingest-universe` · `score` · `check` · `backup`) plus dispatch-only tooling | → §4.2 |
 | **Store** | One Supabase Postgres project — 11 tables (universe → book → briefs) + human views for browsing | → §4.3 |
 | **Judge** | Five Yuna sessions: evening stop sheet · pre-open brief · Sat deep-dive · Sun reconciliation · monthly approval. Prompts live in Section 5 | → §4.4 |
 | **Execute** | Zak places every order: entry pairs · stop moves · gap exits · fill confirmations · monthly approvals | → §4.5 |
@@ -401,6 +401,7 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 
 **Residency & retention** — the store is the system of record; the API is a feed:
 - Daily bars raw + adjusted, **10-year rolling window** — sized so §3.1's 5-yr median P/FCF computes directly from stored bars, with headroom for honest backtests (~1 GB across the US market; the Pro tier holds 8). Older bars archived (compressed) to the repo before pruning.
+- **Raw vs adjusted — pinned:** signal and return computations (gates, templates, bases, ranking windows, correlations, momentum returns) run on **adjusted** closes — dividends and splits are baked in; valuation (book, NAV extrapolation) uses **raw** closes — market value is the raw print. The latest bar is identical either way; the split only matters for history.
 - **Corporate-action refresh:** a split rewrites a stock's entire adjusted history — any split/dividend event triggers a one-call re-pull of that name. Without it, a 4:1 split reads as a −75% crash and fires false alarms.
 - Bars stored for L0 members + holdings + retained delisted names only; a name entering L0 is backfilled on arrival (1 call).
 - **Fundamentals kept forever — split by weight:** the ~20 extracted fields the formulas need live in the database (~1 KB per filing); the raw filing JSON lives beside them as `jsonb` — one queryable point-in-time asset, stamped with filing dates; the repo holds code and migrations, not data. The compounder side becomes honestly backtestable as a side effect of running.
@@ -411,17 +412,20 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 
 ### 4.2 Compute — the jobs
 
-Five **scheduled** jobs form the operating cadence — the canonical set every freshness line covers. Dispatch-only workflows (migrations, backtests, repairs) are tooling under the same heartbeat discipline; **nothing new joins the schedule without a plan edit.** All idempotent (upserts — safe to re-run), all carry `DRY_RUN`, all write a heartbeat row (§4.7).
+The compute layer is one sentence: **each night the machine writes the world down, recomputes everything it derives, proves it's safe to speak — and only then speaks.** Three verbs — **ingest → score → check** — then the sessions (§5). The schedule below is canonical; **nothing joins it without a plan edit.** All jobs idempotent (upserts — safe to re-run), all carry `DRY_RUN`, all write a heartbeat row (§4.7). Dispatch-only tooling (migrations, backtests, repairs) runs under the same heartbeat discipline, is named for what it does, and **never writes to scoring tables.**
 
-| Job | When | What it does |
+| Job | When | What it does — one responsibility each |
 |---|---|---|
-| **`nightly-ingest`** | Mon–Fri **02:00 UTC** (≈ 6–7 PM PT) | Pull the day's bars (bulk) + FX + corporate actions → quarantine → recompute stops, trails, hurdles, market gate → update queue states → book revalued from the night's bars — **every holding's valuation price must equal its latest bar; any mismatch fails the run** → event scan (earnings ≤ 5 days, gaps ± 7%) |
-| **`nightly-retry`** | Mon–Fri **03:00 UTC** | First step reads the runs table — exits if the night is already green, re-runs the ingest if not |
-| **`weekly-rank`** | Sat **12:00 UTC** | Group RS → rebuild L1-M → MCN → re-rank the queue → rewrite triggers |
-| **`monthly-funnel`** | 1st Sat **10:00 UTC** | Rebuild L0 → Gate C1 → CCN → funnel output for the approval session |
-| **`monthly-backup`** | 1st Sat **14:00 UTC** | Dump of everything **except daily bars** (bars are a vendor-re-pullable cache), compressed and committed to the repo — the backup **and** GitHub's 60-day keep-alive in one |
+| **`ingest-daily`** | Mon–Fri **02:00 UTC** (≈ 6–7 PM PT), scheduled again **03:00 UTC** — the second run reads the runs table and exits if the night is already green | Write the world down: the day's bars (bulk) + FX + corporate actions → quarantine. Touches only source-of-truth tables; derives nothing |
+| **`ingest-filings`** | With the weekly sweep, and on filing detection | New filings → fundamentals fields re-extracted → effective shares frozen (§3.1) |
+| **`ingest-universe`** | 1st Sat **10:00 UTC** | Rebuild L0 from listings + liquidity filters |
+| **`score`** | After every ingest · Sat **12:00 UTC** runs the full weekly rank | Every derived number, one writer: Gate C1 → CCN → hurdles → stops & trails → book revalued from the latest bars — **every holding's valuation price must equal its latest bar; any mismatch fails the run** → NAV snapshot → market gate → event scan (earnings ≤ 5 days, gaps ± 7%) → group RS → L1-M → MCN → queue re-rank → triggers → arming (writes `armed`). **A pure function of the database — every number a session reads was written here** |
+| **`check`** | After every `score` · at every session dispatch | Every integrity assertion + the pre-flight: gate state, offerable count under caps and throttle, start-low status, protective orders, §4.5-confirmation coverage of the book. **Writes nothing but its own report.** Ambers print at the top of the brief; **a red blocks the dispatch** |
+| **`backup`** | 1st Sat **14:00 UTC** | Dump of everything **except daily bars** (a vendor-re-pullable cache), compressed and committed to the repo — the backup **and** GitHub's 60-day keep-alive in one |
 
-**Clock convention:** stored and scheduled in **UTC** · planned around market time (**ET**) · quoted to Zak in **PT**. GitHub's cron ignores daylight saving while ET and PT shift together, so these UTC picks carry slack and are verified against **both** clock regimes — the ordering `nightly-ingest` → `nightly-retry` → 8:30 PM PT stop sheet → 6:00 AM PT brief holds year-round, with the reasoning commented in the workflow files. On the 1st Saturday the funnel runs before the weekly rank, so the week's rankings use the fresh universe.
+**Dispatch is a sequence, not a moment:** a session runs `score` → `check` → then speaks — briefs always read freshly derived numbers and never ship past a red.
+
+**Clock convention:** stored and scheduled in **UTC** · planned around market time (**ET**) · quoted to Zak in **PT**. GitHub's cron ignores daylight saving while ET and PT shift together, so these UTC picks carry slack and are verified against **both** clock regimes — the ordering `ingest-daily` → `score` → `check` → 8:30 PM PT stop sheet → 6:00 AM PT brief holds year-round, with the reasoning commented in the workflow files. On the 1st Saturday `ingest-universe` runs before the weekly rank, so the week's rankings use the fresh universe.
 
 ### 4.3 Store — the database
 
@@ -429,8 +433,8 @@ One Supabase Postgres project. **Everything lives here, including L0**; the repo
 
 | Table | Holds | Mode |
 |---|---|---|
-| universe (L0) | ~1,500 names + filters | overwrite |
-| bench | 60 names · CCN + components · hurdle · owner-FCF disclosure (reported FCF, SBC share, ΔWC share) · corroboration (which reference investors hold it) · C2 status · approval | overwrite |
+| universe (L0) | a few thousand names + filters | overwrite |
+| bench | top-60 ranked + holdings + unranked residents · CCN + components · hurdle · owner-FCF disclosure (reported FCF, SBC share, ΔWC share) · corroboration (which reference investors hold it) · C2 status · approval | overwrite |
 | candidates | 150 momentum · MCN · BUY/WAIT · pivot/stop | overwrite |
 | queue | ~20 pre-written triggers | overwrite |
 | armed | The night's arming decisions — every trigger the job proposed, stamped with its run id | append |
@@ -468,7 +472,7 @@ Everything Zak ever does, in one list:
 2. **Move stops** per the evening sheet — both prices given.
 3. **Gap mornings** — check the position; still in the account → market sell at open (§4.6).
 4. **Confirm fills** — say it in chat or flip the ticket; either writes the provisional row.
-5. **Sundays** — provide settled Wealthsimple activity, per-account cash balances, and available credit on each facility (chat or ticket, whichever's easier).
+5. **Sundays** — provide settled Wealthsimple activity, per-account cash balances, available credit on each facility, **and current position quantities per account** (chat or ticket, whichever's easier).
 6. **Monthly** — rule on C2 memos, bench changes, re-underwrites.
 
 **Fill loop:** chat or flip → tickets row **provisional** → book updates that night → Sunday confirms against the broker's settled record (price / qty / FX). Weekday NAV runs on provisionals — drift is basis points, accepted and labeled. When Wealthsimple ships an MCP, step 4 automates and nothing else changes.
@@ -609,7 +613,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 
 **Spec still to write**
 - **Float, priced on the balance sheet.** The owner-cash quarantine is the interim rule; the real treatment subtracts customer funds from the value rather than adjusting cash flow (the quick cash-flow clamp was tested and rejected — it punished the wrong companies). Design first, then its own announced edit.
-- **Reinvestment measurement.** Today's formula reads the best asset-light compounders as "unmeasurable" — D&A above capex plus negative working capital computes reinvestment of exactly zero — which is why 93 of 108 bench names fall back to revenue growth. Fixing what we measure is worth more than anything tuned downstream of it. Design first, then its own announced edit.
+- **Reinvestment measurement.** Today's formula reads the best asset-light compounders as "unmeasurable" — D&A above capex plus negative working capital computes reinvestment of exactly zero — which is why nearly the whole bench falls back to revenue growth. Fixing what we measure is worth more than anything tuned downstream of it. Design first, then its own announced edit.
 - **Learnings promotion & expiry.** The vision says observations become learnings through repetition and expire unless re-earned — the thresholds aren't written. Best written once real observations accumulate, rather than invented now.
 
 **Remaining work**
@@ -644,6 +648,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 
 | Date | Entry |
 |---|---|
+| 2026-08-02 | **QA batch — seven rulings after the go-live review.** Glossary Bar → ten years or more · short-history fair multiple pinned at **fewer than 12 priced quarters** (code follows, 8 → 12) · §3.1 now leads with the honest sentence — never above the stock's own median multiple, cheaper still when credited growth can't deliver 15% — and the provably inert 25% clause struck from the hurdle bullet (the waterfall's 25% engine cap untouched) · **§4.2 rewritten to the verb architecture: ingest → score → check → speak** — six jobs, one responsibility each; retry = the same ingest scheduled twice, exits-if-green; score is a pure function of the database; check writes nothing but its own report; **a red pre-flight blocks dispatch**; dispatch = score → check → speak · §4.5 step 5 gains current position quantities per account · stale magnitudes made durable (L0 "low thousands"; bench described by composition, not count) · TODO's phantom 93/108 → "nearly the whole bench" · **raw vs adjusted pinned**: signals on adjusted closes, valuation on raw. Dev change set issued separately. |
 | 2026-08-02 | **Process rulings — the blind test, the company we keep, the calibration gauges.** R5 rules business-first: PASS/FAIL recorded before price, gap or CCN is revealed — the number never argues with the judgment. Seven reference investors named in config (Fundsmith · Akre · Polen · TCI · Pershing Square · WCM · Giverny); weekly, from holder records already stored: buyable and proposed names marked corroborated at ≥1 holder-match, uncorroborated names cannot be approved until Zak reads the findings; the reverse sweep lists any L0 name held by ≥2 reference investors that our bench lacks, with the exact reason it missed. A mirror, never a source. Two calibration gauges join the audit and `verify`: drawdown-vs-permitted-multiple correlation and the share of the bench called buyable — the falling-knife failure becomes a standing alarm. Proposed and **rejected**: a ten-memo cap per approval session ("approving as many as needed is part of doing the work") and a throttle diversity preference (the entry-only theme cap already blocks the case that matters). |
 | 2026-08-02 | **Plain-cash rulings — SBC is a cost · price never exceeds history · float quarantined · plain-language law.** Four-school adversarial vetting of the entry hurdle, two claims re-verified against the live solver and our own stored filings. The working diagnosis was corrected first: the drag floor was NOT the mechanism (at a 25%-growth hurdle the drag is 11.8%/yr — fully active); the mechanism is the growth cap asserting more growth than the fair multiple can support (a 30× exit at a 15% requirement is a statement the business grows 11.67%, by h = 1/M + g). Fix introduces no constants: growth capped additionally at (0.15 − 1/fair), so the hurdle provably never exceeds the fair multiple and collapses to closed form. FCF redefined net of stock-based compensation everywhere (measured on our own filings: SBC is 78% of TTD's reported FCF, 92% of MELI's — added back inside CFO, deducted nowhere, while the share count stays frozen and C1 polices issuance). Short-history fair multiple → flat 25× (lower-of-current was algebraically the filing-date close). Owner-cash quarantine: float/credit-book names scored but never ticketed until the balance-sheet treatment lands; §5.5's owner-FCF note becomes computable from three stored figures. Plain-language law added to the header. TODO gains the float balance-sheet treatment and the reinvestment-measurement fix as authorized design work. Registered predictions: no hurdle rises · cap-pinned names fall 47–55% · at-or-below-hurdle 48/65 → 34–42 before SBC compounds it · falsifier: if it stays ≥ 45, stop — the remaining generosity is elsewhere. |
 | 2026-08-01 | **Version labels retired until release.** Incrementing minors pre-release implied a shipping history that doesn't exist — this is still development. Labels stripped from every header, table, and checklist; the §3.3 Versioning paragraph is now their only home and says one thing: every formula is v1 until cutover, and counting starts when the system is live. The plan text is the spec; the changelog is the lineage. History rows keep their old labels — the record stays the record. |
@@ -688,7 +693,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | ADDV | Average daily dollar volume — shares × price; how much money trades in a name each day |
 | `as_of` | The timestamp on every stored figure, always UTC — what moment this number describes |
 | ATR | Average true range — a stock's typical daily swing; used to measure whether it's coiling |
-| Bar | One day's price record for one stock — open, high, low, close, volume (OHLCV), plus adjusted close. Three years per name live in the database |
+| Bar | One day's price record for one stock — open, high, low, close, volume (OHLCV), plus adjusted close. Ten years or more per name live in the database |
 | Base | A consolidation — a stretch where a stock rests sideways instead of trending; found by the base-detection rule (§3.2) |
 | Blackout | The 5 trading days before a scheduled earnings report, the report session included; no entries, no adds; lifts the first session after the report session — pre-open and post-close prints alike |
 | CAGR | Compound annual growth rate — the smoothed yearly rate that gets you from A to B |
