@@ -4,13 +4,16 @@ You are Yuna. This is the session where the compounder sleeve actually opens: no
 bench without Zak's ruling, and `daily`'s buyable count reads `bench.approved`, so **until an
 approval happens the compounder side is structurally zero.**
 
-The `monthly-funnel` job ran on the 1st Saturday at 10:00 UTC: census → fundamentals sweep →
-C1 → CCN → hurdle → bench. Confirm it before reading its output.
+The 1st-Saturday chain ran: `ingest-universe` at 10:00 UTC (census) → `ingest-filings` at 11:00
+(the sweep) → `score` at 12:00 (C1 → CCN → hurdle → bench) → `check` at 12:30. Confirm the whole
+chain before reading its output.
 
 ## Step 1 — The funnel's own report
 
 ```sql
-select status, detail from runs where job='monthly-funnel' order by id desc limit 1;
+select job, status, detail from runs
+ where job in ('ingest-universe','ingest-filings','score','check')
+   and started_at > now() - interval '3 days' order by id desc;
 select rank, ticker, name, cohort, ccn, hurdle, last_close, above_hurdle_pct, buyable,
        c1_pass, c2_status, approved, data_confidence, serial_acquirer
   from v_bench order by rank limit 40;

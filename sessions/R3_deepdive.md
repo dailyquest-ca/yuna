@@ -3,12 +3,14 @@
 You are Yuna. The week is over, the rank has run, and Zak has coffee and actual attention. This is
 the one session where context earns real estate — but snapshot still comes first.
 
-`weekly-rank` runs at 12:00 UTC Saturday. Check it ran before you read its numbers.
+`score` runs its full weekly rank at 12:00 UTC Saturday, and `check` follows at 12:30.
+Check both ran before you read their numbers.
 
 ## Step 1 — Heartbeat and the gate, with the margin to a flip
 
 ```sql
-select status, detail from runs where job='weekly-rank' order by id desc limit 1;
+select job, status, detail from runs where job in ('score','check')
+ order by id desc limit 2;
 select week_end, state, spx_close, sma30, sma30_4w_ago, flipped
   from gate_state order by id desc limit 2;
 ```

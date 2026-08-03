@@ -27,11 +27,19 @@ else a session is pointed at — another store, another document, another connec
 this system, and the session says so in its output instead of using it.
 
 Cron is UTC and does not shift with daylight saving, so each pick is stated against both regimes and
-chosen to sit after the jobs it depends on. R2 fires at 04:00 UTC — after `nightly-retry` at 03:00 —
-so it can act as §4.7's nightly receipt for a night that has actually finished. R3 fires at 16:00
-UTC, after `weekly-rank` at 12:00 and `monthly-funnel` at 10:00. R5 fires weekly and exits silently
-outside the first seven days of the month, because cron cannot express "first Sunday" (its day-of-
-month and day-of-week fields are OR-ed, not AND-ed).
+chosen to sit after the jobs it depends on. §4.2 makes the dependency a sequence — **ingest → score
+→ check → speak** — so every session fires after a `check` has cleared the numbers it will read.
+R2 fires at 04:00 UTC, after `ingest-daily` (02:00, again at 03:00), `score` (03:30) and `check`
+(03:50), so it can act as §4.7's nightly receipt for a night that has actually finished. R3 fires
+at 16:00 UTC, after the Saturday chain: `ingest-universe` 10:00, `ingest-filings` 11:00, `score`
+12:00, `check` 12:30. R5 fires weekly and exits silently outside the first seven days of the month,
+because cron cannot express "first Sunday" (its day-of-month and day-of-week fields are OR-ed, not
+AND-ed).
+
+**A red check blocks the brief.** §4.2: ambers print at the top of what you write; a red means a
+published number cannot be rebuilt from its own row, so nothing derived from it may be spoken. Read
+`detail->'blocks_dispatch'` on the latest `check` row before anything else. Protective instructions
+are the one exception the plan keeps — §4.6 says protection survives everything.
 
 R4 and R5 are **interactive** by §4.4: the Routine opens the session and prepares everything it can,
 then waits for Zak. It is a start, not an autopilot.
@@ -63,7 +71,7 @@ a guess.
 
 ## Reading the night's work
 
-`duties.py` writes one `armed` row per conclusion, already priced and cap-checked:
+`score` writes one `armed` row per conclusion, already priced and cap-checked:
 
 ```sql
 select kind, ticker, reason, urgency, order_type, trigger_price, limit_price,
