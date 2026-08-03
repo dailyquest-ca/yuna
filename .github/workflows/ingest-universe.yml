@@ -14,6 +14,15 @@ on:
       force:
         description: 'run census regardless of date'
         default: 'false'
+
+# §4.2, added 2026-08-03: every job that writes shares ONE concurrency group, so Actions serialises
+# them. `ingest-daily` and `backfill` overlapped once and deadlocked on the prices index — Postgres
+# caught it and killed a transaction, which is the good outcome, but two writers on one table is a
+# race the schedule should make impossible rather than one the database has to survive.
+concurrency:
+  group: yuna-writes
+  cancel-in-progress: false
+
 jobs:
   universe:
     runs-on: ubuntu-latest
