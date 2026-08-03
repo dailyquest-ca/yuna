@@ -1,11 +1,7 @@
 name: backup
 on:
-  # PAUSED 2026-08-03 — the database is down on a full disk (see
-  # docs/incident-2026-08-03.md). Every job here writes to it, so the whole
-  # schedule is commented out rather than left to fail nightly. Restore the
-  # block below verbatim once the disk is resized and the pipeline is green.
-  # schedule:
-  #   - cron: '0 14 * * 6'   # weekly Sat 14:00 UTC; in-job guard keeps real runs to the 1st Saturday
+  schedule:
+    - cron: '0 14 * * 6'   # weekly Sat 14:00 UTC; in-job guard keeps real runs to the 1st Saturday
   workflow_dispatch:
     inputs:
       force:

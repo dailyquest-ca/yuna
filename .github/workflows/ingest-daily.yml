@@ -7,13 +7,9 @@ name: ingest-daily
 # is already green". That is the retry, and it is the same job with the same name rather than a
 # separate one, so `runs` reads as one job with two appointments.
 on:
-  # PAUSED 2026-08-03 — the database is down on a full disk (see
-  # docs/incident-2026-08-03.md). Every job here writes to it, so the whole
-  # schedule is commented out rather than left to fail nightly. Restore the
-  # block below verbatim once the disk is resized and the pipeline is green.
-  # schedule:
-  #   - cron: '0 2 * * 2-6'   # 02:00 UTC Tue-Sat = Mon-Fri evenings PT
-  #   - cron: '0 3 * * 2-6'   # one hour later; exits immediately if 02:00 went green
+  schedule:
+    - cron: '0 2 * * 2-6'   # 02:00 UTC Tue-Sat = Mon-Fri evenings PT
+    - cron: '0 3 * * 2-6'   # one hour later; exits immediately if 02:00 went green
   workflow_dispatch:
     inputs:
       dry_run:
