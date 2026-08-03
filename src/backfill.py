@@ -25,7 +25,7 @@ import os, sys, json, datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-from db import connect, dry, get, Heartbeat
+from db import connect, dry, get, wal_bytes, wait_for_wal, Heartbeat
 import fundamentals as fu
 
 WORKERS = int(os.environ.get("WORKERS", "8"))
@@ -34,9 +34,22 @@ RESERVE = int(os.environ.get("QUOTA_RESERVE", "3000"))
 SWEEP_LIMIT = int(os.environ.get("SWEEP_LIMIT", "0"))
 WHAT = {w.strip() for w in os.environ.get("WHAT", "bars,dividends,fundamentals").split(",") if w.strip()}
 BATCH = 500
+# §4.1 tooling discipline, added after the 2026-08-03 outage: a bulk writer must pace itself.
+# The database was under 1 GB when it died; what filled the volume was pg_wal, generated faster
+# than checkpoints could recycle it. Pause when the WAL directory passes this, and stop cleanly
+# rather than run the disk to zero — a truncated backfill is resumable, a dead database is not.
+WAL_CEILING = int(os.environ.get("WAL_CEILING_MB", "1500")) * 1024 * 1024
+WAL_MAX_WAIT = int(os.environ.get("WAL_MAX_WAIT_S", "180"))
+RESWEEP = os.environ.get("RESWEEP", "false").lower() in ("1", "true", "yes")
 
 
-def targets(cur):
+def targets(cur, since=None):
+    """The names to deepen, largest first — minus the ones already deep enough.
+
+    Resumability matters more than it looks. The 2026-08-03 run died two thirds of the way in and
+    a naive re-run would have rewritten the 923 names it had finished, generating the same WAL
+    burst that killed it. Skipping them makes the retry strictly smaller than the attempt.
+    """
     only = [t.strip() for t in os.environ.get("TICKERS", "").split(",") if t.strip()]
     if only:
         return only
@@ -44,6 +57,11 @@ def targets(cur):
                    where kind='stock' and (in_l0 or is_holding)
                    order by market_cap_usd desc nulls last""")
     got = [r[0] for r in cur.fetchall()]
+    if since is not None and not RESWEEP:
+        cur.execute("""select ticker from prices where d <= %s group by ticker""",
+                    (since + dt.timedelta(days=40),))
+        deep = {r[0] for r in cur.fetchall()}
+        got = [t for t in got if t not in deep]
     return got[:SWEEP_LIMIT] if SWEEP_LIMIT else got
 
 
@@ -88,6 +106,15 @@ def backfill_bars(conn, hb, names, since):
                             b.get("close"), b.get("adjusted_close"), b.get("volume")))
             if len(buf) >= BATCH * 20:
                 written += _flush_bars(conn, buf); buf = []
+                if not wait_for_wal(conn, ceiling_bytes=WAL_CEILING, max_wait_s=WAL_MAX_WAIT):
+                    with conn.cursor() as cur:
+                        stuck = wal_bytes(cur)
+                    hb.amber(f"stopped early: pg_wal held {stuck / 1e9:.1f} GB after waiting "
+                             f"{WAL_MAX_WAIT}s for checkpoints. {written} bars written and "
+                             f"committed; re-run to continue from here.")
+                    hb.detail["stopped_on_wal_pressure"] = dict(
+                        wal_bytes=stuck, ceiling=WAL_CEILING, written=written)
+                    break
     written += _flush_bars(conn, buf)
     hb.detail["bar_errors"] = errors
     return written
@@ -193,7 +220,7 @@ def main():
     with connect() as conn:
         with Heartbeat(conn, "backfill") as hb:
             with conn.cursor() as cur:
-                names = targets(cur)
+                names = targets(cur, since_bars if "bars" in WHAT else None)
 
             # units per name: bars 1, dividends 1, fundamentals 10 (§4.1 — the vendor bills a
             # fundamentals request at ten)

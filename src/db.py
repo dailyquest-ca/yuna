@@ -215,6 +215,41 @@ def quantity_canary(cur, *, stale_days=9):
     return stale
 
 
+def wal_bytes(cur):
+    """Bytes currently sitting in pg_wal, or None where the role cannot look.
+
+    This is the number that took production down on 2026-08-03. The database was under 1 GB and
+    the fatal error was `could not write to file "pg_wal/xlogtemp...": No space left on device` —
+    a sustained bulk upsert generated write-ahead log faster than checkpoints could recycle it,
+    and the WAL directory, not the data, filled the volume. `max_wal_size` is 4 GB here, so
+    Postgres is *permitted* to let that happen; nothing but the writer can pace itself.
+    """
+    try:
+        cur.execute("select coalesce(sum(size), 0) from pg_ls_waldir()")
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None                      # never let a diagnostic break the job it protects
+
+
+def wait_for_wal(conn, *, ceiling_bytes, max_wait_s=180, poll_s=10):
+    """Let the checkpointer catch up before writing more. Returns True if it is safe to continue.
+
+    A bulk writer that never pauses will out-run checkpointing on any disk; the only question is
+    how long it takes. Pausing costs minutes. Not pausing cost a night.
+    """
+    waited = 0
+    while True:
+        with conn.cursor() as cur:
+            now = wal_bytes(cur)
+        if now is None or now < ceiling_bytes:
+            return True
+        if waited >= max_wait_s:
+            return False
+        time.sleep(poll_s)
+        waited += poll_s
+
+
 def load_bars(cur, tickers):
     """{ticker: [{d, open, high, low, close, adj, vol}, ...]} in date order, for the names asked.
 
