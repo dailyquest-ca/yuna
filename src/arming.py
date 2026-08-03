@@ -1,9 +1,13 @@
-"""duties — the nightly half of the machine (§3.0 daily row, §4.2 nightly-ingest duties).
+"""arming — everything `score` derives about the book, and the night's conclusions (§3.0, §4.2).
 
 Runs after the bars land, and does everything that must be true before the open:
 
-  fills applied -> earnings synced -> bases re-scanned -> breakouts classified -> stops ratcheted
-  -> exits armed -> entries and adds armed -> caps applied -> NAV -> brief.
+  fills applied -> bases re-scanned -> breakouts classified -> stops ratcheted -> the book revalued
+  against the latest bars -> NAV -> exits, adds and entries armed -> caps applied -> shadow book.
+
+**A library, not a job.** §4.2 gives every derived number one writer and names it `score`, which
+calls `run()` below. Two of these numbers used to have two writers between them, which is the
+whole reason the architecture was rewritten.
 
 It writes no tickets. §2.2 and §4.3 both say jobs arm and only sessions write tickets, because a
 ticket carries a theme and a theme is judgment. So every conclusion lands in `armed`, priced and
@@ -11,20 +15,16 @@ cap-checked, and R1/R2 turn those into tickets. Protective conclusions are marke
 'protective': they survive a stale-data night, and nothing else does.
 """
 import datetime as dt
-import sys
 
 import numpy as np
 
-from db import (connect, config, dry, get, jsonb, nav_cad, observe, Heartbeat,
+from db import (config, dry, freshness, jsonb, load_bars, nav_cad, observe,
                 valuation_canary, quantity_canary)
+import signals as sg
 
 
 class ValuationMismatch(RuntimeError):
     """§4.2: a holding priced off anything but its latest bar fails the run, red."""
-import signals as sg
-
-CAL_DAYS = 45
-CAL_BACK = 400          # a full reporting year behind, so "already reported" is a fact, not a guess
 
 
 # --------------------------------------------------------------------------- fills (§4.5)
@@ -138,51 +138,7 @@ def rebase_for_splits(conn, hb):
     return done
 
 
-# --------------------------------------------------------------------------- earnings (§4.1)
-def sync_earnings(conn, hb):
-    today = dt.date.today()
-    # Forward-only left the system unable to tell "already reported, next print is beyond the window"
-    # from "the calendar has a hole" — MEDP, a July reporter, simply had no row at all. The window now
-    # reaches back a full reporting year, so `v_earnings_state` can answer both questions from the
-    # ledger: last_reported_date and next_report_date, per ticker, with no denormalized column to
-    # drift. One extra call on a job that already spends 46.
-    data = get("calendar/earnings", hb.calls,
-               **{"from": (today - dt.timedelta(days=CAL_BACK)).isoformat(),
-                  "to": (today + dt.timedelta(days=CAL_DAYS)).isoformat()})
-    rows = (data or {}).get("earnings", []) if isinstance(data, dict) else (data or [])
-    with conn.cursor() as cur:
-        cur.execute("select ticker from universe where status='active'")
-        ours = {r[0] for r in cur.fetchall()}
-    keep = []
-    for e in rows:                      # pull broad, filter locally — the vendor's filter lies
-        code, rd = e.get("code"), (e.get("report_date") or e.get("date"))
-        if code in ours and rd:
-            keep.append((code, rd, e.get("before_after_market"), e.get("estimate"),
-                         e.get("actual"), None, None))
-    if keep and not dry():
-        with conn.cursor() as cur:
-            cur.executemany("""insert into earnings(ticker,report_date,report_when,eps_est,
-                                 eps_actual,revenue_est,revenue_actual)
-                               values (%s,%s,%s,%s,%s,%s,%s)
-                               on conflict (ticker,report_date) do update set
-                                 report_when=excluded.report_when, eps_est=excluded.eps_est,
-                                 eps_actual=excluded.eps_actual, updated_at=now()""", keep)
-        conn.commit()
-    hb.detail["earnings_rows"] = len(keep)
-    return len(keep)
-
-
 # --------------------------------------------------------------------------- bars in memory
-def load_bars(cur, tickers):
-    cur.execute("""select ticker, d, open, high, low, close, adj_close, volume
-                   from prices where ticker = any(%s) order by ticker, d""", (list(tickers),))
-    out = {}
-    for t, d, op, hi, lo, cl, ac, vol in cur.fetchall():
-        out.setdefault(t, []).append(dict(d=d, open=op, high=hi, low=lo, close=cl,
-                                          adj=ac if ac is not None else cl, vol=vol or 0))
-    return out
-
-
 def series(bars, field):
     return np.array([b[field] if b[field] is not None else np.nan for b in bars], dtype=float)
 
@@ -221,86 +177,6 @@ def rescan_bases(conn, hb, bars, max_stop, limit_over):
     conn.commit()
     hb.detail["bases_restated"] = moved
     return moved
-
-
-# --------------------------------------------------------------------------- quarantine (§4.1)
-def quarantine_pass(conn, hb, bars, threshold, tolerance, watched_exits):
-    """Hold suspicious prints out of use until two sources agree (§4.1).
-
-    Two triggers: a print moving more than 40% with no corporate action logged for that session,
-    and any print that would fire a sell-side action. The second source is a live vendor quote —
-    the job's own re-fetch is the first. Neither source alone may sell a position.
-    """
-    raised, resolved = [], []
-    with conn.cursor() as cur:
-        cur.execute("""select ticker, d from corporate_actions
-                       where d > current_date - interval '10 days'""")
-        actions = {(t_, d_) for t_, d_ in cur.fetchall()}
-
-        for tk, b in bars.items():
-            if len(b) < 2:
-                continue
-            last, prev = b[-1], b[-2]
-            why = None
-            if sg.suspicious_move(last["close"], prev["close"], threshold=threshold) \
-                    and (tk, last["d"]) not in actions:
-                why = "move"
-            elif tk in watched_exits:
-                why = "sell_side"
-            if not why:
-                continue
-            move = ((float(last["close"]) / float(prev["close"]) - 1.0)
-                    if prev["close"] else None)
-            if not dry():
-                cur.execute("""insert into quarantine(ticker,d,close,prev_close,move_pct,reason)
-                               values (%s,%s,%s,%s,%s,%s)
-                               on conflict (ticker,d) where status='held' do nothing""",
-                            (tk, last["d"], last["close"], prev["close"], move, why))
-            raised.append(dict(ticker=tk, d=str(last["d"]), reason=why, move_pct=move))
-
-        # verify everything still held, against a live quote
-        cur.execute("select id, ticker, d, close from quarantine where status='held'")
-        for qid, tk, d, close in cur.fetchall():
-            try:
-                quote = get(f"real-time/{tk}", hb.calls)
-                second = float((quote or {}).get("close") or 0) or None
-            except Exception as e:
-                hb.detail.setdefault("quarantine_quote_failed", []).append(f"{tk}: {e}")
-                continue
-            agrees = sg.sources_agree(close, second, tolerance=tolerance)
-            status = "confirmed" if agrees else "cleared"
-            if not dry():
-                cur.execute("""update quarantine set status=%s, second_source=%s, checked_at=now(),
-                                 resolved_at=now(),
-                                 note = case when %s then 'two sources agree — the move is real'
-                                        else 'sources disagree — the print is not to be trusted' end
-                               where id=%s""", (status, second, agrees, qid))
-            resolved.append(dict(ticker=tk, d=str(d), status=status, ours=close, theirs=second))
-    conn.commit()
-    hb.detail.update(quarantine_raised=raised, quarantine_resolved=resolved)
-    # a name whose print could not be verified stays held, and stays out of sell-side action
-    with conn.cursor() as cur:
-        cur.execute("select ticker from quarantine where status='held'")
-        held = {r[0] for r in cur.fetchall()}
-    # What still blocks a sell, and what does not:
-    #   * a print that LOOKS WRONG (>40% with no corporate action) blocks until verified — acting on
-    #     garbage is the risk §4.1 was written for;
-    #   * a print that merely happens to fire a stop does NOT block when the second source is
-    #     unreachable. Taken literally the rule would let a vendor outage disarm every stop in the
-    #     book, and §4.6 is explicit that protection is the thing that survives everything.
-    #   * either kind blocks when the second source actively DISAGREES.
-    with conn.cursor() as cur:
-        cur.execute("""select ticker from quarantine
-                       where (status='held' and reason='move')
-                          or (status='cleared' and resolved_at::date = current_date)""")
-        blocking = {r[0] for r in cur.fetchall()}
-        cur.execute("""select count(*) from quarantine where status='held' and reason='sell_side'""")
-        unverified_ordinary = cur.fetchone()[0]
-    if blocking:
-        hb.amber(f"{len(blocking)} print(s) quarantined — sell-side action held on {sorted(blocking)}")
-    if unverified_ordinary:
-        hb.detail["quarantine_unverified_ordinary"] = unverified_ordinary
-    return blocking
 
 
 # --------------------------------------------------------------------------- the book, nightly
@@ -928,213 +804,170 @@ def book_effective_bets(conn, bars, fx):
     return sg.effective_bets(weights, returns)
 
 
-def freshness(conn):
+def run(conn, hb, *, held=frozenset()):
+    """Everything `score` derives about the book and the night's conclusions.
+
+    Fills applied -> bases re-scanned -> breakouts classified -> stops ratcheted -> the book
+    revalued against the latest bars -> NAV -> exits, adds and entries armed -> shadow book.
+
+    It writes no tickets. §2.2 and §4.3 both say jobs arm and only sessions write tickets,
+    because a ticket carries a theme and a theme is judgment. So every conclusion lands in
+    `armed`, priced and cap-checked, and R1/R2 turn those into tickets. Protective conclusions
+    are marked urgency 'protective': they survive a stale-data night, and nothing else does.
+
+    `held` is the quarantine set `ingest` resolved tonight (§4.1) — prints no second source
+    would confirm, which must not drive a sell.
+    """
     with conn.cursor() as cur:
-        # stock bars only. FX and the index come from the same nightly pull, so in a clean run this
-        # is the same date — but a half-failed ingest that landed USDCAD and no equities would
-        # otherwise read as fresh, and "stale data ⇒ no new tickets" would quietly not apply.
-        cur.execute("""select max(p.d) from prices p join universe u on u.ticker = p.ticker
-                       where u.kind = 'stock'""")
-        last_bar = cur.fetchone()[0]
-        cur.execute("""select distinct on (job) job, status from runs
-                       where started_at > now() - interval '36 hours' order by job, id desc""")
-        recent = cur.fetchall()
-    bad = [f"{j} {s}" for j, s in recent if s in ("red", "amber")]
-    price_bad = [x for x in bad if x.split()[0] in ("nightly-ingest", "nightly-retry", "duties")]
-    stale = (dt.date.today() - last_bar).days if last_bar else 999
-    if stale > 4:
-        return f"⚠️ bars stale — last close {last_bar} ({stale}d)", False
-    if price_bad:
-        return f"⚠️ {', '.join(sorted(set(price_bad)))} — data {last_bar}, tickets held", False
-    if bad:
-        return f"data {last_bar} close ✓ · {', '.join(sorted(set(bad)))} (that domain only)", True
-    return f"data {last_bar} close ✓ all green", True
+        caps = dict(
+            buffer=float(config(cur, "stop_limit_buffer", 0.03)),
+            max_stop=float(config(cur, "momentum_max_stop", 0.08)),
+            flat=float(config(cur, "ccn_flat_size", 0.12)),
+            per_group=int(config(cur, "max_names_per_group", 2)),
+            single_cap=float(config(cur, "single_name_entry_cap", 0.25)),
+            floor_pct=float(config(cur, "position_floor_nav", 0.04)),
+            displace_margin=float((config(cur, "score_thresholds", {}) or {})
+                                  .get("displace_margin", 10)),
+            # §2.2's theme entry cap is deliberately NOT read here. A theme is judgment
+            # assigned when a ticket is written (§2.2), so the job cannot know a new name's
+            # theme — it ships the current theme weights on every armed row and R1 enforces
+            # the 35% cap. Reading the config here would look like enforcement and be none.
+            max_adds=int(config(cur, "max_adds_per_year", 2)),
+            # §3.2: BUY-state names under 70 stay queued and never ticket.
+            min_mcn=float((config(cur, "score_thresholds", {}) or {}).get("enterable", 70)),
+            # §2.6: a US compounder with a trailing-12-month yield at or above this prefers
+            # the RRSP — US dividend withholding is treaty-exempt there and leaks 15% in the
+            # TFSA. Below it, placement follows the TFSA-first default.
+            rrsp_yield=float(config(cur, "rrsp_yield_preference", 0.01)),
+            band=tuple(config(cur, "compounder_band", [0.12, 0.15])),
+            ceilings=config(cur, "sleeve_ceiling", {"compounders": 0.6, "momentum": 0.4}),
+            max_positions=int((config(cur, "max_positions", {"max": 9}) or {}).get("max", 9)),
+            limit_over=float(config(cur, "entry_limit_over_pivot", 0.02)),
+            ceiling=float(config(cur, "pyramid_ceiling", 1.05)),
+            confirm_mult=float(config(cur, "confirmation_volume", 1.4)),
+            confirm_sessions=int(config(cur, "confirmation_sessions", 3)),
+            cushion=float(config(cur, "holdthrough_cushion", 1.08)),
+            warn_bets=float(config(cur, "effective_bets_warn", 4)),
+        )
+        cur.execute("select state from gate_state order by id desc limit 1")
+        gate = (cur.fetchone() or ["OFF"])[0]
+        cur.execute("""select min(trade_date) from transactions t join tickets k
+                         on k.id=t.ticket_id where k.sleeve='momentum' and t.side='buy'""")
+        first_fill = cur.fetchone()[0]
+    caps["start_low"] = not first_fill or (dt.date.today() - first_fill).days <= 90
 
+    apply_fills(conn, hb)
+    rebase_for_splits(conn, hb)
 
-def main():
-    with connect() as conn:
-        with Heartbeat(conn, "duties") as hb:
-            with conn.cursor() as cur:
-                caps = dict(
-                    buffer=float(config(cur, "stop_limit_buffer", 0.03)),
-                    max_stop=float(config(cur, "momentum_max_stop", 0.08)),
-                    flat=float(config(cur, "ccn_flat_size", 0.12)),
-                    per_group=int(config(cur, "max_names_per_group", 2)),
-                    single_cap=float(config(cur, "single_name_entry_cap", 0.25)),
-                    floor_pct=float(config(cur, "position_floor_nav", 0.04)),
-                    displace_margin=float((config(cur, "score_thresholds", {}) or {})
-                                          .get("displace_margin", 10)),
-                    # §2.2's theme entry cap is deliberately NOT read here. A theme is judgment
-                    # assigned when a ticket is written (§2.2), so the job cannot know a new name's
-                    # theme — it ships the current theme weights on every armed row and R1 enforces
-                    # the 35% cap. Reading the config here would look like enforcement and be none.
-                    max_adds=int(config(cur, "max_adds_per_year", 2)),
-                    # §3.2: BUY-state names under 70 stay queued and never ticket.
-                    min_mcn=float((config(cur, "score_thresholds", {}) or {}).get("enterable", 70)),
-                    # §2.6: a US compounder with a trailing-12-month yield at or above this prefers
-                    # the RRSP — US dividend withholding is treaty-exempt there and leaks 15% in the
-                    # TFSA. Below it, placement follows the TFSA-first default.
-                    rrsp_yield=float(config(cur, "rrsp_yield_preference", 0.01)),
-                    band=tuple(config(cur, "compounder_band", [0.12, 0.15])),
-                    ceilings=config(cur, "sleeve_ceiling", {"compounders": 0.6, "momentum": 0.4}),
-                    max_positions=int((config(cur, "max_positions", {"max": 9}) or {}).get("max", 9)),
-                    limit_over=float(config(cur, "entry_limit_over_pivot", 0.02)),
-                    ceiling=float(config(cur, "pyramid_ceiling", 1.05)),
-                    confirm_mult=float(config(cur, "confirmation_volume", 1.4)),
-                    confirm_sessions=int(config(cur, "confirmation_sessions", 3)),
-                    cushion=float(config(cur, "holdthrough_cushion", 1.08)),
-                    warn_bets=float(config(cur, "effective_bets_warn", 4)),
-                    quarantine_move=float(config(cur, "quarantine_move_threshold", 0.40)),
-                    quarantine_tolerance=float(config(cur, "quarantine_source_tolerance", 0.02)),
-                    quota_alarm=float(config(cur, "api_alarm_fraction", 0.70)),
-                )
-                cur.execute("select state from gate_state order by id desc limit 1")
-                gate = (cur.fetchone() or ["OFF"])[0]
-                cur.execute("""select min(trade_date) from transactions t join tickets k
-                                 on k.id=t.ticket_id where k.sleeve='momentum' and t.side='buy'""")
-                first_fill = cur.fetchone()[0]
-            caps["start_low"] = not first_fill or (dt.date.today() - first_fill).days <= 90
+    with conn.cursor() as cur:
+        cur.execute("""select ticker from universe
+                       where is_holding or ticker in (select ticker from queue)
+                          or ticker in (select ticker from candidates)
+                          or ticker in (select ticker from bench)
+                          or ticker in (select ticker from book where status='open')""")
+        watched = [r[0] for r in cur.fetchall()]
+        bars = load_bars(cur, watched)
 
-            apply_fills(conn, hb)
-            rebase_for_splits(conn, hb)
-            sync_earnings(conn, hb)
+    rescan_bases(conn, hb, bars, caps["max_stop"], caps["limit_over"])
+    breakouts = classify_breakouts(conn, hb, bars, caps["confirm_sessions"],
+                                   caps["confirm_mult"])
+    moves = ratchet(conn, hb, bars, caps["buffer"])
 
-            with conn.cursor() as cur:
-                cur.execute("""select ticker from universe
-                               where is_holding or ticker in (select ticker from queue)
-                                  or ticker in (select ticker from candidates)
-                                  or ticker in (select ticker from bench)
-                                  or ticker in (select ticker from book where status='open')""")
-                watched = [r[0] for r in cur.fetchall()]
-                bars = load_bars(cur, watched)
+    with conn.cursor() as cur:
+        n = nav_cad(cur)
+        # §4.2: the book is revalued from the night's bars, and "every holding's valuation
+        # price must equal its latest bar; any mismatch fails the run". Red, not amber —
+        # a wrong NAV is not a degraded number, and everything downstream inherits it.
+        mispriced = valuation_canary(cur)
+        unconfirmed = quantity_canary(cur)
+    if mispriced:
+        raise ValuationMismatch(
+            "book valuation disagrees with the latest bars (§4.2): "
+            + "; ".join(f"{m['ticker']} valued {m['valued_at']} vs bar "
+                        f"{m['latest_bar']} on {m['bar_date']}" for m in mispriced))
+    if unconfirmed:
+        hb.amber("unconfirmed book quantities (§4.5 step 5): "
+                 + ", ".join(f"{u['ticker']}/{u['account']} {u['qty']:g} — last confirmed "
+                             f"{u['last_confirmed'] or 'never'}" for u in unconfirmed))
+        hb.detail["unconfirmed_quantities"] = unconfirmed
+    nav, fx = n["nav"], n["fx"]
+    bets = book_effective_bets(conn, bars, fx)
 
-            rescan_bases(conn, hb, bars, caps["max_stop"], caps["limit_over"])
-            breakouts = classify_breakouts(conn, hb, bars, caps["confirm_sessions"],
-                                           caps["confirm_mult"])
-            moves = ratchet(conn, hb, bars, caps["buffer"])
+    arm = Arm()
+    for m in moves:
+        was = f" (was {m['was']})" if m["was"] else ""
+        euphoria = " · euphoria" if m["euphoric"] else ""
+        arm.add("stop_move", m["ticker"], "trail", urgency="protective",
+                stop=m["stop"], stop_limit_price=m["limit"],
+                note=f"{m['mode']}{euphoria}{was}")
+    arm_exits(conn, arm, bars, gate, breakouts, caps["cushion"], (), held=held)
+    arm_pyramid(conn, arm, bars, caps["ceiling"])
+    arm_entries(conn, arm, bars, nav, fx, gate, caps, ())
+    arm_housekeeping(conn, arm, ())
+    armed_n = arm.flush(conn, hb.id)
 
-            with conn.cursor() as cur:
-                n = nav_cad(cur)
-                # §4.2: the book is revalued from the night's bars, and "every holding's valuation
-                # price must equal its latest bar; any mismatch fails the run". Red, not amber —
-                # a wrong NAV is not a degraded number, and everything downstream inherits it.
-                mispriced = valuation_canary(cur)
-                unconfirmed = quantity_canary(cur)
-            if mispriced:
-                raise ValuationMismatch(
-                    "book valuation disagrees with the latest bars (§4.2): "
-                    + "; ".join(f"{m['ticker']} valued {m['valued_at']} vs bar "
-                                f"{m['latest_bar']} on {m['bar_date']}" for m in mispriced))
-            if unconfirmed:
-                hb.amber("unconfirmed book quantities (§4.5 step 5): "
-                         + ", ".join(f"{u['ticker']}/{u['account']} {u['qty']:g} — last confirmed "
-                                     f"{u['last_confirmed'] or 'never'}" for u in unconfirmed))
-                hb.detail["unconfirmed_quantities"] = unconfirmed
-            nav, fx = n["nav"], n["fx"]
-            bets = book_effective_bets(conn, bars, fx)
+    shadow_book(conn, hb, bars)
 
-            # who *would* be sold tonight — those prints need a second source before they act
-            with conn.cursor() as cur:
-                cur.execute("""select b.ticker from book b
-                               where b.status='open' and b.stop is not null""")
-                watched_exits = set()
-                for (tk,) in cur.fetchall():
-                    bb = bars.get(tk)
-                    if bb and bb[-1]["low"] is not None:
-                        cur.execute("select stop from book where ticker=%s and status='open'", (tk,))
-                        stop = cur.fetchone()[0]
-                        if stop is not None and float(bb[-1]["low"]) <= float(stop):
-                            watched_exits.add(tk)
-            held = quarantine_pass(conn, hb, bars, caps["quarantine_move"],
-                                   caps["quarantine_tolerance"], watched_exits)
+    # The API-quota reading moved to `check` with the rest of the pre-flight: §4.2 makes `score`
+    # a pure function of the database, and a job that phones the vendor is not that.
+    approved, any_hurdle = refresh_marks(conn, hb)
+    if not dry():
+        with conn.cursor() as cur:
+            # the grain is the day, not the run (migration 025). Two runs on one date used
+            # to leave two NAVs and no rule for choosing; the last computation of a date now
+            # replaces the earlier one, which is what "daily NAV" meant all along.
+            cur.execute("""insert into nav_snapshots(d,nav_cad,equities_cad,cash_cad,
+                             debt_cad,usdcad,provisional,detail)
+                           values (current_date,%s,%s,%s,%s,%s,true,%s)
+                           on conflict (d) do update set
+                             nav_cad=excluded.nav_cad, equities_cad=excluded.equities_cad,
+                             cash_cad=excluded.cash_cad, debt_cad=excluded.debt_cad,
+                             usdcad=excluded.usdcad, provisional=excluded.provisional,
+                             detail=excluded.detail, computed_at=now()""",
+                        (nav, n["book_equities"], n["cash"], n["debt"], fx,
+                         jsonb(dict(accounts=n["accounts"], per_ticker=n["per_ticker"],
+                                    effective_bets=bets,
+                                    balances_as_of=n["anchored"]))))
+        conn.commit()
 
-            arm = Arm()
-            for m in moves:
-                was = f" (was {m['was']})" if m["was"] else ""
-                euphoria = " · euphoria" if m["euphoric"] else ""
-                arm.add("stop_move", m["ticker"], "trail", urgency="protective",
-                        stop=m["stop"], stop_limit_price=m["limit"],
-                        note=f"{m['mode']}{euphoria}{was}")
-            arm_exits(conn, arm, bars, gate, breakouts, caps["cushion"], (), held=held)
-            arm_pyramid(conn, arm, bars, caps["ceiling"])
-            arm_entries(conn, arm, bars, nav, fx, gate, caps, ())
-            arm_housekeeping(conn, arm, ())
-            armed_n = arm.flush(conn, hb.id)
+    fresh, ok = freshness(conn)
+    if not ok:
+        hb.amber(fresh)
 
-            shadow_book(conn, hb, bars)
+    protective = [r for r in arm.rows if r.get("urgency") == "protective"]
+    offerable = [r for r in arm.rows if not r.get("blocked_by")
+                 and r.get("urgency") != "protective"]
+    bits = []
+    for kind, label in (("exit", "exit"), ("entry", "entry"), ("add", "add"),
+                        ("stop_move", "stop move"), ("cancel", "cancel"), ("check", "check")):
+        k = [r for r in arm.rows if r["kind"] == kind]
+        if k:
+            bits.append(f"{len(k)} {label}{'s' if len(k) > 1 else ''}")
+    summary = "; ".join(bits) if bits else "nothing needs you"
+    detail = dict(gate=gate, nav_cad=round(nav, 2), effective_bets=bets,
+                  quarantined=sorted(held),
+                  effective_bets_warn=bets is not None and bets < caps["warn_bets"],
+                  armed=arm.rows, protective=len(protective), offerable=len(offerable),
+                  bench_at_hurdle=dict(approved=approved, total=any_hurdle),
+                  tickets_allowed=ok, start_low=caps["start_low"],
+                  balances_as_of=str(n["anchored"]) if n["anchored"] else None)
+    if not dry():
+        with conn.cursor() as cur:
+            cur.execute("""insert into briefs(kind,session_date,freshness,summary,detail)
+                           values ('nightly',current_date,%s,%s,%s)""",
+                        (fresh, summary, jsonb(detail)))
+            if bets is not None and bets < caps["warn_bets"]:
+                observe(cur, "breach",
+                        f"Effective bets {bets:.2f} — below the §2.2 band of 4. "
+                        f"Guardrail only: the hard caps are the blockers.",
+                        detail=dict(effective_bets=bets), once=True)
+        conn.commit()
 
-            # §4.1: "the brief alarms past ~70% of daily quota". The check itself costs one call.
-            quota = None
-            try:
-                usage = get("user", hb.calls)
-                used, limit = float(usage.get("apiRequests") or 0), float(usage.get("dailyRateLimit") or 1)
-                quota = dict(used=used, limit=limit, fraction=round(used / limit, 3) if limit else None)
-                if quota["fraction"] and quota["fraction"] >= caps["quota_alarm"]:
-                    hb.amber(f"API quota at {quota['fraction']:.0%} of the daily budget")
-            except Exception as e:
-                hb.detail["quota_check_failed"] = f"{type(e).__name__}: {e}"
+    hb.detail.update(armed=armed_n, protective=len(protective), offerable=len(offerable),
+                     effective_bets=bets, gate=gate, start_low=caps["start_low"])
+    print(f"score/arming: {fresh} | {summary} | armed {armed_n} "
+          f"({len(protective)} protective) | bets "
+          f"{f'{bets:.2f}' if bets else 'n/a'}")
+    return dict(armed=armed_n, protective=len(protective), offerable=len(offerable),
+                nav_cad=nav, effective_bets=bets, gate=gate, start_low=caps["start_low"])
 
-            approved, any_hurdle = refresh_marks(conn, hb)
-            if not dry():
-                with conn.cursor() as cur:
-                    # the grain is the day, not the run (migration 025). Two runs on one date used
-                    # to leave two NAVs and no rule for choosing; the last computation of a date now
-                    # replaces the earlier one, which is what "daily NAV" meant all along.
-                    cur.execute("""insert into nav_snapshots(d,nav_cad,equities_cad,cash_cad,
-                                     debt_cad,usdcad,provisional,detail)
-                                   values (current_date,%s,%s,%s,%s,%s,true,%s)
-                                   on conflict (d) do update set
-                                     nav_cad=excluded.nav_cad, equities_cad=excluded.equities_cad,
-                                     cash_cad=excluded.cash_cad, debt_cad=excluded.debt_cad,
-                                     usdcad=excluded.usdcad, provisional=excluded.provisional,
-                                     detail=excluded.detail, computed_at=now()""",
-                                (nav, n["book_equities"], n["cash"], n["debt"], fx,
-                                 jsonb(dict(accounts=n["accounts"], per_ticker=n["per_ticker"],
-                                            effective_bets=bets,
-                                            balances_as_of=n["anchored"]))))
-                conn.commit()
-
-            fresh, ok = freshness(conn)
-            if not ok:
-                hb.amber(fresh)
-
-            protective = [r for r in arm.rows if r.get("urgency") == "protective"]
-            offerable = [r for r in arm.rows if not r.get("blocked_by")
-                         and r.get("urgency") != "protective"]
-            bits = []
-            for kind, label in (("exit", "exit"), ("entry", "entry"), ("add", "add"),
-                                ("stop_move", "stop move"), ("cancel", "cancel"), ("check", "check")):
-                k = [r for r in arm.rows if r["kind"] == kind]
-                if k:
-                    bits.append(f"{len(k)} {label}{'s' if len(k) > 1 else ''}")
-            summary = "; ".join(bits) if bits else "nothing needs you"
-            detail = dict(gate=gate, nav_cad=round(nav, 2), effective_bets=bets,
-                          quarantined=sorted(held), api_quota=quota,
-                          effective_bets_warn=bets is not None and bets < caps["warn_bets"],
-                          armed=arm.rows, protective=len(protective), offerable=len(offerable),
-                          bench_at_hurdle=dict(approved=approved, total=any_hurdle),
-                          tickets_allowed=ok, start_low=caps["start_low"],
-                          balances_as_of=str(n["anchored"]) if n["anchored"] else None)
-            if not dry():
-                with conn.cursor() as cur:
-                    cur.execute("""insert into briefs(kind,session_date,freshness,summary,detail)
-                                   values ('nightly',current_date,%s,%s,%s)""",
-                                (fresh, summary, jsonb(detail)))
-                    if bets is not None and bets < caps["warn_bets"]:
-                        observe(cur, "breach",
-                                f"Effective bets {bets:.2f} — below the §2.2 band of 4. "
-                                f"Guardrail only: the hard caps are the blockers.",
-                                detail=dict(effective_bets=bets), once=True)
-                conn.commit()
-
-            hb.rows = armed_n
-            hb.detail.update(armed=armed_n, protective=len(protective), offerable=len(offerable),
-                             effective_bets=bets, gate=gate, start_low=caps["start_low"])
-            print(f"duties: {fresh} | {summary} | armed {armed_n} "
-                  f"({len(protective)} protective) | bets "
-                  f"{f'{bets:.2f}' if bets else 'n/a'}")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -215,6 +215,98 @@ def quantity_canary(cur, *, stale_days=9):
     return stale
 
 
+def load_bars(cur, tickers):
+    """{ticker: [{d, open, high, low, close, adj, vol}, ...]} in date order, for the names asked.
+
+    `adj` falls back to the raw close when the vendor gives no adjusted figure. §4.1 pins which
+    one a caller wants: signals read `adj`, valuation reads `close`.
+    """
+    cur.execute("""select ticker, d, open, high, low, close, adj_close, volume
+                   from prices where ticker = any(%s) order by ticker, d""", (list(tickers),))
+    out = {}
+    for t, d, op, hi, lo, cl, ac, vol in cur.fetchall():
+        out.setdefault(t, []).append(dict(d=d, open=op, high=hi, low=lo, close=cl,
+                                          adj=ac if ac is not None else cl, vol=vol or 0))
+    return out
+
+
+def stops_breached(cur, bars):
+    """Names whose standing stop was touched by tonight's bar (§4.1 sell-side quarantine trigger).
+
+    Read from the stops already in the book, which is the right grain: the quarantine asks whether
+    tonight's PRINT can be trusted to sell, and the print is judged against the protection that was
+    standing when it arrived.
+    """
+    cur.execute("select ticker, stop from book where status='open' and stop is not null")
+    hit = set()
+    for tk, stop in cur.fetchall():
+        b = bars.get(tk)
+        if b and b[-1]["low"] is not None and stop is not None \
+           and float(b[-1]["low"]) <= float(stop):
+            hit.add(tk)
+    return hit
+
+
+# §4.2's three verbs, newest names first. The `runs` ledger keeps the old job names on purpose —
+# the record stays the record — so freshness has to recognise both vocabularies or every brief
+# written after the migration would read as a system with no history.
+VERBS = {
+    "ingest": ("ingest-daily", "ingest-filings", "ingest-universe",
+               "nightly-ingest", "nightly-retry", "fundamentals", "monthly-funnel"),
+    "score":  ("score", "weekly-rank", "duties"),
+    "check":  ("check", "verify"),
+}
+# a red or amber in these domains means the prices themselves are suspect, so §4.4's
+# "stale data ⇒ no new tickets, protective moves only" applies
+PRICE_CRITICAL = VERBS["ingest"] + VERBS["score"]
+
+
+def freshness(conn, *, stale_days=4):
+    """The one-line answer to "is it safe to speak" (§4.2): `ingest ✓ score ✓ check ✓`.
+
+    Returns (line, tickets_allowed). Tickets are held when the bars are stale or when anything in
+    the price-critical domains ran red or amber; a failure confined to one other domain is named
+    but does not gag the desk.
+    """
+    with conn.cursor() as cur:
+        # stock bars only. FX and the index come from the same nightly pull, so in a clean run this
+        # is the same date — but a half-failed ingest that landed USDCAD and no equities would
+        # otherwise read as fresh, and "stale data ⇒ no new tickets" would quietly not apply.
+        cur.execute("""select max(p.d) from prices p join universe u on u.ticker = p.ticker
+                       where u.kind = 'stock'""")
+        last_bar = cur.fetchone()[0]
+        cur.execute("""select distinct on (job) job, status from runs
+                       where started_at > now() - interval '36 hours' order by job, id desc""")
+        recent = cur.fetchall()
+
+    status = {j: s for j, s in recent}
+    marks = []
+    for verb, jobs in VERBS.items():
+        seen = [status[j] for j in jobs if j in status]
+        if not seen:
+            marks.append(f"{verb} —")
+        elif any(s == "red" for s in seen):
+            marks.append(f"{verb} ✗")
+        elif any(s == "amber" for s in seen):
+            marks.append(f"{verb} ⚠")
+        else:
+            marks.append(f"{verb} ✓")
+    line = " · ".join(marks)
+
+    bad = [f"{j} {s}" for j, s in recent if s in ("red", "amber")]
+    price_bad = [x for x in bad if x.split()[0] in PRICE_CRITICAL]
+    stale = (dt.date.today() - last_bar).days if last_bar else 999
+    if stale > stale_days:
+        return f"⚠️ bars stale — last close {last_bar} ({stale}d) · {line}", False
+    if price_bad:
+        return (f"⚠️ {', '.join(sorted(set(price_bad)))} — data {last_bar}, tickets held · {line}",
+                False)
+    if bad:
+        return (f"data {last_bar} close · {line} · {', '.join(sorted(set(bad)))} "
+                f"(that domain only)", True)
+    return f"data {last_bar} close · {line}", True
+
+
 class Heartbeat:
     """with Heartbeat(conn, 'daily') as hb: ...  — opens a running row, closes it green,
     or red with the traceback if the body raises. hb.detail / hb.calls / hb.rows are yours."""
@@ -266,8 +358,19 @@ class Heartbeat:
         return self
 
     def amber(self, why):
-        self.status = "amber"
+        if self.status != "red":
+            self.status = "amber"
         self.detail.setdefault("amber", []).append(why)
+
+    def red(self, why):
+        """A finding severe enough to stop the desk, without pretending the job crashed.
+
+        §4.2 (2026-08-02) gives `check` the power to block a dispatch. A blocking finding is a
+        RESULT — the job ran perfectly and the answer was "do not speak" — so it must not be
+        reported as a traceback. Red always wins; a later amber cannot downgrade it.
+        """
+        self.status = "red"
+        self.detail.setdefault("red", []).append(why)
 
     def __exit__(self, et, ev, tb):
         if et is None:

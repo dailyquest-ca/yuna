@@ -1,0 +1,28 @@
+name: check
+# §4.2, verb three: prove it is safe to speak. Runs after every score and at every session
+# dispatch. Writes nothing but its own report row — a checker that can edit what it checks is a
+# participant, not a witness. Ambers print at the top of the brief; a red blocks the dispatch.
+on:
+  schedule:
+    - cron: '0 4 * * 2-6'   # after score
+    - cron: '30 12 * * 6'   # after the Saturday full rank
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/check.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py check /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

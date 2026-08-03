@@ -1,6 +1,6 @@
 """Tests for the arming layer's own plumbing — no database, no vendor.
 
-These exist because the first live run of `duties.py` died on a NOT NULL column that every caller
+These exist because the first live run of the arming layer died on a NOT NULL column that every caller
 had left to a default that did not exist. The formula tests would never have caught it; a
 ten-line test on the collector would have.
 """
@@ -11,13 +11,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 
 
 def _arm():
-    """Import Arm without pulling in psycopg — duties imports db, which imports psycopg."""
-    import importlib.util
-    src = (pathlib.Path(__file__).resolve().parent.parent / "src" / "duties.py").read_text()
+    """Import Arm without pulling in psycopg — arming imports db, which imports psycopg."""
+    src = (pathlib.Path(__file__).resolve().parent.parent / "src" / "arming.py").read_text()
     start = src.index("class Arm:")
     end = src.index("def arm_exits")
     ns = {"dry": lambda: True, "jsonb": lambda o: o}
-    exec(compile(src[start:end], "duties_arm", "exec"), ns)
+    exec(compile(src[start:end], "arming_arm", "exec"), ns)
     return ns["Arm"]
 
 

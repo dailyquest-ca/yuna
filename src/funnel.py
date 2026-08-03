@@ -1,8 +1,8 @@
-"""monthly-funnel — Stage 1 (L0 census). Cron runs weekly Sat; in-job guard keeps it to the 1st Sat.
+"""ingest-universe — the L0 census. Cron runs weekly Sat; an in-job guard keeps it to the 1st Sat.
 Census: US exchange symbol list (common stock, NYSE/NASDAQ/AMEX) x screener (cap >= $300M, +industry).
 Bar-dependent filters (price >= $5, ADDV >= $10M, listed >= 6 mo) are re-applied from our own bars
-inside weekly-rank, so L0 stays honest between censuses. Stages 1.5 and 2 of the same workflow are
-fundamentals.py (the sweep) and score.py (Gate C1 -> CCN -> hurdle -> bench).
+inside `score`, so L0 stays honest between censuses. §4.2 gives this job membership and nothing
+else: the filings sweep is `ingest-filings`, and C1 -> CCN -> hurdle -> bench is `score`.
 FORCE=true skips the 1st-Saturday guard (manual runs)."""
 import os, sys, json, time, traceback, datetime as dt, urllib.request, urllib.error
 import psycopg
@@ -32,7 +32,7 @@ def main():
     calls=[0]
     with psycopg.connect(db_url()) as conn:
         with conn.cursor() as cur:
-            cur.execute("insert into runs(job,status,dry_run) values ('monthly-funnel','running',%s) returning id",(DRY,))
+            cur.execute("insert into runs(job,status,dry_run) values ('ingest-universe','running',%s) returning id",(DRY,))
             run_id=cur.fetchone()[0]; conn.commit()
         try:
             # 1) listing census: common stocks on NYSE / NASDAQ / AMEX only
@@ -115,7 +115,7 @@ def main():
                 cur.execute("update runs set finished_at=now(), status='green', calls_used=%s, rows_written=%s, detail=%s where id=%s",
                             (calls[0], 0 if DRY else len(rows), json.dumps({"stage":"census","listing":len(common),"cap_pass":len(rows)}), run_id))
             conn.commit()
-            print(f"monthly-funnel: green — {len(rows)} coarse-L0 names, {calls[0]} calls")
+            print(f"ingest-universe: green — {len(rows)} coarse-L0 names, {calls[0]} calls")
             return 0
         except Exception as e:
             with conn.cursor() as cur:

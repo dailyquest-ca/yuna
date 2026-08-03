@@ -1,4 +1,4 @@
-"""monthly-backup — dump everything except daily bars, compressed, into the repo (plan §4.2).
+"""backup — dump everything except daily bars, compressed, into the repo (plan §4.2).
 
 Bars are a vendor-re-pullable cache; the decisions are not. The commit doubles as GitHub's
 60-day schedule keep-alive, so the crons never fall asleep.
@@ -14,7 +14,7 @@ OUT = "backups"
 def main():
     stamp = dt.date.today().isoformat()
     with connect() as conn:
-        with Heartbeat(conn, "monthly-backup", scheduled_utc="14:00") as hb:
+        with Heartbeat(conn, "backup", scheduled_utc="14:00") as hb:
             with conn.cursor() as cur:
                 cur.execute("""select table_name from information_schema.tables
                                where table_schema='public' and table_type='BASE TABLE'

@@ -1,9 +1,14 @@
-"""verify — re-derive the machine's own published numbers from its own stored inputs.
+"""check — §4.2's third verb: prove it is safe to speak, then say so and write nothing else.
 
-Dispatch-only tooling (§4.2), and the most useful job in the repo for the same reason the heartbeat
-is: it answers "is this number real" rather than "did the job run". Green is not a result — every
-serious defect in this build shipped green — and the habit that actually worked was cross-checking
-the model's output against an independent computation on the raw data.
+Runs after every `score` and at every session dispatch. It answers "is this number real" rather
+than "did the job run" — green is not a result, every serious defect in this build shipped green,
+and the habit that actually worked was cross-checking the model's output against an independent
+computation on the raw data.
+
+**It writes nothing but its own report row.** That is the law (§4.2, 2026-08-02) and it is also
+what makes the answer trustworthy: a checker that can edit the thing it checks is a participant,
+not a witness. Every finding lands in the `runs` row, where the sessions read it — ambers print at
+the top of the brief, and a red blocks the dispatch entirely.
 
 What it checks, per §3.1 and §3.0:
 
@@ -13,18 +18,27 @@ What it checks, per §3.1 and §3.0:
   3. the CCN equals the mean of the component percentiles actually stored on the row
   4. what carries each top score — reported, so a bench topped by names with no measurable
      compounding engine cannot pass unnoticed
-
-Every failure becomes an observation, so the finding survives the session that found it.
+  5. every bench name resolves to exactly one fundamentals row
+  6. the pre-flight: gate, offerable count against the caps, start-low, protective orders
+     outstanding, and how much of the book carries a confirmed share count (§4.5 step 5)
 """
+import datetime as dt
 import sys
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-from db import connect, config, dry, jsonb, observe, Heartbeat
+from db import connect, config, dry, freshness, get, Heartbeat
 import signals as sg
 
 HURDLE_TOLERANCE = 0.005      # half a percent of price between stored and re-derived hurdle
 GAP_TOLERANCE = 1e-4
 CCN_TOLERANCE = 0.05
+
+# The checks whose failure means a session must not speak (§4.2). Deliberately short: each one
+# says a published number cannot be rebuilt from the row it sits on, which makes every conclusion
+# drawn from it unsafe. Everything else is reported loudly and lets the desk open.
+BLOCKING = {"hurdle_reproduces_floor", "gap_matches_close_and_hurdle",
+            "ccn_is_mean_of_components", "hurdle_is_price_invariant",
+            "one_fundamentals_row_per_bench_name"}
 
 
 def check_hurdles(cur, floor):
@@ -151,6 +165,63 @@ def check_hurdle_is_price_invariant(cur):
     return bad
 
 
+def check_one_row_per_name(cur):
+    """§4.3: every bench name must resolve to exactly one fundamentals row.
+
+    `fundamentals` is a point-in-time asset keyed (ticker, filing_date), so a name that has filed
+    twice legitimately holds two rows and any join that forgets `v_fundamentals_latest` counts it
+    twice. That is how CI.US came to sit at rank 10 twice in one listing. The uniqueness this
+    system actually needs is not a constraint on the table — it would destroy the history — it is
+    this assertion on the resolution.
+    """
+    cur.execute("""select b.ticker, count(*) from bench b
+                     join v_fundamentals_latest f on f.ticker = b.ticker
+                    group by b.ticker having count(*) <> 1""")
+    doubled = [dict(ticker=t, rows=n) for t, n in cur.fetchall()]
+    cur.execute("""select b.ticker from bench b
+                    where not exists (select 1 from v_fundamentals_latest f
+                                       where f.ticker = b.ticker)""")
+    orphans = [dict(ticker=r[0], rows=0) for r in cur.fetchall()]
+    return doubled + orphans
+
+
+def preflight(cur, quota):
+    """Everything a session must know before it speaks (§4.2, 2026-08-02).
+
+    Not integrity — readiness. The gate, how many entries are actually offerable under the caps,
+    whether the momentum sleeve is still in its start-low window, what protection is outstanding,
+    and how much of the book carries a share count anybody has confirmed. `score` computed these
+    on its way past; reading them back from the database is the point, because that is the copy
+    the sessions will read.
+    """
+    cur.execute("select state from gate_state order by id desc limit 1")
+    gate = (cur.fetchone() or ["OFF"])[0]
+
+    cur.execute("""select count(*) filter (where blocked_by is null and urgency <> 'protective'),
+                          count(*) filter (where urgency = 'protective'),
+                          count(*)
+                     from v_armed_latest""")
+    offerable, protective, armed_total = cur.fetchone()
+
+    cur.execute("""select count(*) filter (where confirmed is not null), count(*) from (
+                     select b.ticker, b.account,
+                            (select max(t.trade_date) from transactions t
+                              where t.ticker = b.ticker and t.account = b.account) as confirmed
+                       from book b where b.status = 'open') s""")
+    confirmed, positions = cur.fetchone()
+    coverage = (confirmed / positions) if positions else None
+
+    cur.execute("""select min(trade_date) from transactions t join tickets k
+                     on k.id = t.ticket_id where k.sleeve='momentum' and t.side='buy'""")
+    first_fill = cur.fetchone()[0]
+    start_low = not first_fill or (dt.date.today() - first_fill).days <= 90
+
+    return dict(gate=gate, offerable=offerable, protective=protective, armed=armed_total,
+                start_low=start_low, positions=positions, quantities_confirmed=confirmed,
+                confirmation_coverage=round(coverage, 3) if coverage is not None else None,
+                api_quota=quota)
+
+
 def calibration_gauges(cur, knife_max, buyable_max):
     """§5.5, 2026-08-02 — the falling-knife gauge and the buyable-share gauge, as standing alarms.
 
@@ -193,9 +264,10 @@ def calibration_gauges(cur, knife_max, buyable_max):
 
 def main():
     with connect() as conn:
-        with Heartbeat(conn, "verify") as hb:
+        with Heartbeat(conn, "check") as hb:
             with conn.cursor() as cur:
                 floor = float(config(cur, "hurdle_min_return", 0.15))
+                quota_alarm = float(config(cur, "api_alarm_fraction", 0.70))
                 hurdles = check_hurdles(cur, floor)
                 gaps = check_gaps(cur)
                 ccns = check_ccn(cur)
@@ -205,6 +277,23 @@ def main():
                 knife_max = float(config(cur, "verify_knife_corr_max", 0.30))
                 buyable_max = float(config(cur, "verify_buyable_share_max", 0.60))
                 gauges = calibration_gauges(cur, knife_max, buyable_max)
+                doubled = check_one_row_per_name(cur)
+
+                # §4.1: "the brief alarms past ~70% of daily quota". The reading lives here rather
+                # than in `score`, which §4.2 keeps a pure function of the database.
+                quota = None
+                try:
+                    usage = get("user", hb.calls)
+                    used = float(usage.get("apiRequests") or 0)
+                    limit = float(usage.get("dailyRateLimit") or 1)
+                    quota = dict(used=used, limit=limit,
+                                 fraction=round(used / limit, 3) if limit else None)
+                    if quota["fraction"] and quota["fraction"] >= quota_alarm:
+                        hb.amber(f"API quota at {quota['fraction']:.0%} of the daily budget")
+                except Exception as e:
+                    hb.detail["quota_check_failed"] = f"{type(e).__name__}: {e}"
+                flight = preflight(cur, quota)
+                line, tickets_allowed = freshness(conn)
 
                 # §4.7: a job that half-fails goes amber — but "amber" with a count is a status, not
                 # a cause. Production went amber with the reasons discoverable only by reading rows.
@@ -245,35 +334,43 @@ def main():
                          detail="the hurdle's share count tracks today's quote rather than the "
                                 "close on the cap's as_of date (§3.1)",
                          names=[b["ticker"] for b in drift][:20]),
+                    dict(check="one_fundamentals_row_per_bench_name", failures=len(doubled),
+                         detail="a bench name resolves to more or fewer than one fundamentals "
+                                "row — any join written against the history table instead of "
+                                "v_fundamentals_latest counts it that many times (§4.3)",
+                         names=[b["ticker"] for b in doubled][:20]),
                 ]
                 failed = [c for c in checks if c["failures"]]
                 findings = dict(hurdle_mismatches=hurdles, gap_mismatches=gaps,
                                 ccn_mismatches=ccns, provenance_gaps=prov, share_drift=drift,
-                                top_of_bench=top,
+                                top_of_bench=top, doubled_rows=doubled,
                                 engineless_in_top=engineless, gauges=gauges,
+                                preflight=flight, freshness=line,
+                                tickets_allowed=tickets_allowed,
                                 checks=checks, causes=[c["check"] for c in failed])
                 hb.detail.update(findings)
 
-                if not dry():
-                    for b in hurdles:
-                        observe(cur, "breach",
-                                f"{b['ticker']}: stored hurdle {b['stored_hurdle']} does not "
-                                f"re-derive from its own row — the solver says "
-                                f"{b['hurdle_that_clears_the_floor']}. A hurdle that cannot be "
-                                f"rebuilt from its own row must not be traded on.",
-                                ticker=b["ticker"], detail=b, once=True)
-                    for b in gaps + ccns + prov + drift:
-                        observe(cur, "breach",
-                                f"{b['ticker']}: a stored figure disagrees with the row it sits on "
-                                f"— {jsonb(b)}", ticker=b["ticker"], detail=b, once=True)
-                conn.commit()
-
+            # §4.2 (2026-08-02): "ambers print at the top of the brief; a red blocks the
+            # dispatch". BLOCKING is the small, named set — a number the machine cannot rebuild
+            # from its own row, or a row it counts twice. Those corrupt the arithmetic a session
+            # would speak from. A calibration gauge past its alarm is a finding about the SCREEN,
+            # not about tonight's numbers: loud, and never a gag.
             for c in failed:
-                hb.amber(f"{c['check']}: {c['failures']} — {c['detail']}"
-                         + (f" · {', '.join(c['names'])}" if c["names"] else ""))
-            print(f"verify: {len(failed)} check(s) failing — "
-                  f"{', '.join(c['check'] for c in failed) or 'none'}")
-            print(f"verify: {len(hurdles)} hurdle mismatches · {len(gaps)} gap · {len(ccns)} CCN · "
+                (hb.red if c["check"] in BLOCKING else hb.amber)(
+                    f"{c['check']}: {c['failures']} — {c['detail']}"
+                    + (f" · {', '.join(c['names'])}" if c["names"] else ""))
+            if not tickets_allowed:
+                hb.amber(f"tickets held — {line}")
+            blocked = [c["check"] for c in failed if c["check"] in BLOCKING]
+            hb.detail["blocks_dispatch"] = blocked
+            print(f"check: {line}")
+            print(f"check: {len(failed)} check(s) failing — "
+                  f"{', '.join(c['check'] for c in failed) or 'none'}"
+                  + (f" | BLOCKING: {', '.join(blocked)}" if blocked else ""))
+            print(f"check: gate {flight['gate']} · {flight['offerable']} offerable · "
+                  f"{flight['protective']} protective · "
+                  f"{flight['quantities_confirmed']}/{flight['positions']} quantities confirmed")
+            print(f"check: {len(hurdles)} hurdle mismatches · {len(gaps)} gap · {len(ccns)} CCN · "
                   f"{engineless} of {len(top)} top-bench names have no measurable engine")
             for b in hurdles:
                 print(f"  HURDLE {b['ticker']}: stored {b['stored_hurdle']} vs re-derived "

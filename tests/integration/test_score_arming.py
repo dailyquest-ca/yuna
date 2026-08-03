@@ -1,8 +1,8 @@
-"""End-to-end tests for the nightly job, over a real database.
+"""End-to-end tests for the arming half of `score`, over a real database.
 
-Each test states its whole world, runs `duties.main()`, and asserts on what the machine concluded.
-The vendor call is stubbed — the earnings calendar is the only outside dependency, and a test that
-needs the network is not a test.
+Each test states its whole world, runs the job, and asserts on what the machine concluded. Nothing
+here reaches the network: since the §4.2 rewrite the vendor calls live in `ingest` and `check`, so
+`score` has nothing to stub — which is the architecture doing its job.
 """
 import datetime as dt
 import sys
@@ -11,24 +11,51 @@ import pathlib
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "src"))
-import duties                                                             # noqa: E402
+import score                                                              # noqa: E402
+import arming                                                             # noqa: E402
+import ingest                                                             # noqa: E402
 import fixtures as world                                                     # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def no_vendor(monkeypatch):
-    """No test reaches the network. Earnings are supplied directly, and the quarantine's live-quote
-    check gets a stub that raises — the honest default, since a test machine has no vendor key. A
-    test that cares about verification patches `duties.get` itself."""
-    monkeypatch.setattr(duties, "sync_earnings", lambda conn, hb: 0)
+def only_the_arming_half(monkeypatch):
+    """These tests are about the book and the night's conclusions, so the bench scorer and the
+    momentum ranker — the other two thirds of `score` — are stubbed out. They have their own
+    coverage, they need a fully populated universe, and running them here would test the fixtures
+    rather than the arming."""
+    monkeypatch.setattr(score, "score_bench", lambda conn, hb: None)
+    monkeypatch.setattr(score.rank, "run", lambda conn, hb: None)
 
-    def no_quote(path, calls, **kw):
-        raise RuntimeError("no vendor in tests")
-    monkeypatch.setattr(duties, "get", no_quote)
+
+class _HB:
+    """The heartbeat's shape, without a runs row — enough for a helper called outside a job."""
+    def __init__(self):
+        self.detail, self.calls, self.rows, self.id = {}, [0], 0, None
+
+    def amber(self, why):
+        self.detail.setdefault("amber", []).append(why)
+
+
+def quarantine(db, monkeypatch, quote):
+    """Run the quarantine exactly as `ingest` does, then let `score` react to what it found.
+
+    §4.2 moved this pass into the first verb, which makes exit-blocking a contract ACROSS jobs:
+    ingest decides which prints nobody can confirm, score refuses to sell on them. Testing the two
+    together is the point — a quarantine nothing honours is decoration.
+    """
+    monkeypatch.setattr(ingest, "get", quote)
+    with db.cursor() as cur:
+        cur.execute("""select ticker from universe
+                       where is_holding or ticker in (select ticker from queue)
+                          or ticker in (select ticker from bench)
+                          or ticker in (select ticker from book where status='open')""")
+        bars = ingest.load_bars(cur, [r[0] for r in cur.fetchall()])
+        watched_exits = ingest.stops_breached(cur, bars)
+    return ingest.quarantine_pass(db, _HB(), bars, 0.40, 0.02, watched_exits)
 
 
 def run():
-    assert duties.main() == 0
+    assert score.main() == 0
 
 
 def armed(conn, kind=None, ticker=None):
@@ -658,7 +685,6 @@ def test_a_position_that_would_exceed_the_single_name_cap_is_blocked(db, fx):
 def test_a_suspicious_print_blocks_the_exit_it_would_have_fired(db, fx, monkeypatch):
     """§4.1's whole purpose: a bad tick must not sell a real position. The stop is breached by a
     −45% print with no corporate action behind it, and the second source disagrees."""
-    monkeypatch.setattr(duties, "get", lambda path, calls, **kw: {"close": 100.0})
     with db.cursor() as cur:
         world.add_name(cur, "AAA.US")
         world.flat_then_base(cur, "AAA.US", level=100.0, last_close=55.0, last_low=54.0,
@@ -667,6 +693,7 @@ def test_a_suspicious_print_blocks_the_exit_it_would_have_fired(db, fx, monkeypa
         world.position(cur, "AAA.US", cost=100.0, stop=95.0, confirmed=True, step=3)
         world.balances(cur)
     db.commit()
+    quarantine(db, monkeypatch, lambda path, calls, **kw: {"close": 100.0})
     run()
     assert [r for r in armed(db, "exit", "AAA.US") if r["reason"] == "stop"] == []
     check = [r for r in armed(db, "check", "AAA.US") if r["reason"] == "quarantine"]
@@ -681,7 +708,6 @@ def test_a_suspicious_print_blocks_the_exit_it_would_have_fired(db, fx, monkeypa
 def test_a_verified_print_confirms_and_stops_blocking(db, fx, monkeypatch):
     """When the live quote agrees, the move was real — the print is confirmed and trading resumes
     on it the next night."""
-    monkeypatch.setattr(duties, "get", lambda path, calls, **kw: {"close": 55.0})
     with db.cursor() as cur:
         world.add_name(cur, "AAA.US")
         world.flat_then_base(cur, "AAA.US", level=100.0, last_close=55.0, last_low=54.0)
@@ -689,6 +715,7 @@ def test_a_verified_print_confirms_and_stops_blocking(db, fx, monkeypatch):
         world.position(cur, "AAA.US", cost=100.0, stop=95.0, confirmed=True, step=3)
         world.balances(cur)
     db.commit()
+    quarantine(db, monkeypatch, lambda path, calls, **kw: {"close": 55.0})
     run()
     with db.cursor() as cur:
         cur.execute("select status from quarantine where ticker='AAA.US'")
@@ -698,7 +725,6 @@ def test_a_verified_print_confirms_and_stops_blocking(db, fx, monkeypatch):
 def test_a_corporate_action_explains_the_move_and_raises_nothing(db, fx, monkeypatch):
     """A 4:1 split reads as −75%. With the split logged, that is arithmetic, not a bad tick — and
     §4.1 says the quarantine trigger is a big move *with no corporate action*."""
-    monkeypatch.setattr(duties, "get", lambda path, calls, **kw: {"close": 25.0})
     with db.cursor() as cur:
         world.add_name(cur, "AAA.US")
         days = world.flat_then_base(cur, "AAA.US", level=100.0, last_close=25.0, last_low=24.0)
@@ -709,6 +735,7 @@ def test_a_corporate_action_explains_the_move_and_raises_nothing(db, fx, monkeyp
                        values ('AAA.US',%s,'split','{"split":"4.000000/1.000000"}')""", (days[-1],))
         world.balances(cur)
     db.commit()
+    quarantine(db, monkeypatch, lambda path, calls, **kw: {"close": 25.0})
     run()
     with db.cursor() as cur:
         cur.execute("select count(*) from quarantine where ticker='AAA.US' and reason='move'")
@@ -723,7 +750,6 @@ def test_a_corporate_action_explains_the_move_and_raises_nothing(db, fx, monkeyp
 
 def test_a_split_is_re_based_only_once(db, fx, monkeypatch):
     """The marker on the action makes it idempotent; without it every night would divide again."""
-    monkeypatch.setattr(duties, "get", lambda path, calls, **kw: {"close": 25.0})
     with db.cursor() as cur:
         world.add_name(cur, "AAA.US")
         days = world.flat_then_base(cur, "AAA.US", level=100.0, last_close=25.0)
@@ -733,6 +759,7 @@ def test_a_split_is_re_based_only_once(db, fx, monkeypatch):
                        values ('AAA.US',%s,'split','{"split":"4.000000/1.000000"}')""", (days[-1],))
         world.balances(cur)
     db.commit()
+    quarantine(db, monkeypatch, lambda path, calls, **kw: {"close": 25.0})
     run()
     run()
     assert book_row(db, "AAA.US")["avg_cost"] == pytest.approx(25.0)
@@ -740,7 +767,6 @@ def test_a_split_is_re_based_only_once(db, fx, monkeypatch):
 
 def test_an_unparseable_split_leaves_the_position_alone_and_shouts(db, fx, monkeypatch):
     """Guessing a ratio is worse than not adjusting: it would silently corrupt the cost basis."""
-    monkeypatch.setattr(duties, "get", lambda path, calls, **kw: {"close": 25.0})
     with db.cursor() as cur:
         world.add_name(cur, "AAA.US")
         days = world.flat_then_base(cur, "AAA.US", level=100.0, last_close=25.0)
@@ -750,10 +776,11 @@ def test_an_unparseable_split_leaves_the_position_alone_and_shouts(db, fx, monke
                        values ('AAA.US',%s,'split','{"split":"nonsense"}')""", (days[-1],))
         world.balances(cur)
     db.commit()
+    quarantine(db, monkeypatch, lambda path, calls, **kw: {"close": 25.0})
     run()
     assert book_row(db, "AAA.US")["avg_cost"] == pytest.approx(100.0)
     with db.cursor() as cur:
-        cur.execute("""select detail->'amber' from runs where job='duties' order by id desc limit 1""")
+        cur.execute("""select detail->'amber' from runs where job='score' order by id desc limit 1""")
         assert "NOT re-based" in str(cur.fetchone()[0])
 
 
@@ -762,7 +789,6 @@ def test_an_unverifiable_print_stays_held_rather_than_trading(db, fx, monkeypatc
     agreement — §4.1 needs two sources, and one source plus an outage is one source."""
     def boom(path, calls, **kw):
         raise RuntimeError("vendor unreachable")
-    monkeypatch.setattr(duties, "get", boom)
     with db.cursor() as cur:
         world.add_name(cur, "AAA.US")
         world.flat_then_base(cur, "AAA.US", level=100.0, last_close=55.0, last_low=54.0)
@@ -770,6 +796,7 @@ def test_an_unverifiable_print_stays_held_rather_than_trading(db, fx, monkeypatc
         world.position(cur, "AAA.US", cost=100.0, stop=95.0, confirmed=True, step=3)
         world.balances(cur)
     db.commit()
+    quarantine(db, monkeypatch, boom)
     run()
     with db.cursor() as cur:
         cur.execute("select status from quarantine where ticker='AAA.US'")
@@ -869,26 +896,6 @@ def test_a_pass_gets_its_thirty_day_mark_when_the_anniversary_arrives(db, fx):
         mark_30, mark_60, marked_at = cur.fetchone()
     assert mark_30 is not None and marked_at is not None
     assert mark_60 is None                    # not yet due
-
-
-def test_the_brief_carries_the_api_quota(db, fx, monkeypatch):
-    """§4.1: the brief alarms past ~70% of the daily budget."""
-    monkeypatch.setattr(duties, "get",
-                        lambda path, calls, **kw: {"apiRequests": 85000, "dailyRateLimit": 100000})
-    with db.cursor() as cur:
-        world.add_name(cur, "AAA.US")
-        world.flat_then_base(cur, "AAA.US")
-        world.gate(cur)
-        world.balances(cur)
-    db.commit()
-    run()
-    with db.cursor() as cur:
-        cur.execute("select detail->'api_quota', detail->'amber' from briefs where kind='nightly' order by id desc limit 1")
-        quota, _ = cur.fetchone()
-        cur.execute("select detail->'amber' from runs where job='duties' order by id desc limit 1")
-        amber = cur.fetchone()[0]
-    assert quota["fraction"] == pytest.approx(0.85)
-    assert "quota at 85%" in str(amber)
 
 
 def test_one_name_one_score_across_candidates_and_queue(db, fx):

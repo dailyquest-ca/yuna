@@ -89,7 +89,7 @@ def test_the_census_records_what_it_did(db, monkeypatch):
     stub_vendor(monkeypatch, listed=["ALIVE"], priced=["ALIVE"])
     assert funnel.main() == 0
     with db.cursor() as cur:
-        cur.execute("""select status, detail from runs where job='monthly-funnel'
+        cur.execute("""select status, detail from runs where job='ingest-universe'
                        order by id desc limit 1""")
         status, detail = cur.fetchone()
     assert status == "green" and detail["stage"] == "census"

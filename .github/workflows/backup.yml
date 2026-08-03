@@ -1,4 +1,4 @@
-name: monthly-backup
+name: backup
 on:
   schedule:
     - cron: '0 14 * * 6'   # weekly Sat 14:00 UTC; in-job guard keeps real runs to the 1st Saturday
@@ -43,6 +43,6 @@ jobs:
           git push
       - name: autopsy on failure
         if: failure()
-        run: python src/report_fail.py monthly-backup /tmp/job.out
+        run: python src/report_fail.py backup /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

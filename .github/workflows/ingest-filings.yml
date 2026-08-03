@@ -1,0 +1,47 @@
+name: ingest-filings
+# §4.2, verb one, filings slice: new filings -> fundamentals fields re-extracted -> effective
+# shares frozen (§3.1). Runs with the weekly sweep and on filing detection.
+#
+# STALE_ONLY skips names that have filed nothing since their last pull; a name with no
+# fundamentals row at all is never skipped, so a cold start still sweeps everything once.
+on:
+  schedule:
+    - cron: '0 11 * * 6'   # Sat 11:00 UTC — after ingest-universe, before score's weekly rank
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'fetch but write nothing'
+        default: 'false'
+      full_sweep:
+        description: 'ignore the stale filter and re-pull every name'
+        default: 'false'
+      reextract:
+        description: 're-derive every row from stored filings; no vendor calls at all'
+        default: 'false'
+      tickers:
+        description: 'comma-separated names to sweep instead of the universe'
+        default: ''
+jobs:
+  filings:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/fundamentals.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          REEXTRACT: ${{ inputs.reextract || 'false' }}
+          TICKERS: ${{ inputs.tickers || '' }}
+          STALE_ONLY: ${{ inputs.full_sweep == 'true' && 'false' || 'true' }}
+          WORKERS: '10'
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py ingest-filings /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

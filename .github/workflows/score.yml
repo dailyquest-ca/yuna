@@ -1,5 +1,14 @@
 name: score
+# §4.2, verb two: the ONE writer of every derived number. Gate C1 -> CCN -> hurdles -> market gate
+# -> group RS -> L1-M -> MCN -> queue -> triggers -> stops and trails -> the book revalued -> NAV
+# -> arming. A pure function of the database: it makes no vendor call at all.
+#
+# Runs after every ingest. The Saturday 12:00 appointment is this job in its weekly slot, not a
+# different job — that is where the full weekly rank lands.
 on:
+  schedule:
+    - cron: '30 3 * * 2-6'  # after ingest-daily's two windows
+    - cron: '0 12 * * 6'    # Sat 12:00 UTC — the full weekly rank
   workflow_dispatch:
     inputs:
       dry_run:
@@ -19,6 +28,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          SCHEDULED_UTC: ${{ github.event.schedule == '0 12 * * 6' && '12:00' || '03:30' }}
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py score /tmp/job.out

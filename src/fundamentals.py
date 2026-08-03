@@ -533,13 +533,13 @@ def reextract(conn, hb):
 def main():
     if os.environ.get("REEXTRACT", "false").lower() in ("1", "true", "yes"):
         with connect() as conn:
-            with Heartbeat(conn, "fundamentals") as hb:
+            with Heartbeat(conn, "ingest-filings") as hb:
                 reextract(conn, hb)
         return 0
     only = [t.strip() for t in os.environ.get("TICKERS", "").split(",") if t.strip()]
     stale_only = os.environ.get("STALE_ONLY", "false").lower() in ("1", "true", "yes")
     with connect() as conn:
-        with Heartbeat(conn, "fundamentals") as hb:
+        with Heartbeat(conn, "ingest-filings") as hb:
             with conn.cursor() as cur:
                 if only:
                     targets = only
