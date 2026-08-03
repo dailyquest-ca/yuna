@@ -184,7 +184,7 @@ def run(conn, hb):
         base = sg.base_scan(f["hi"], f["lo"], f["cl"])
         m2 = sg.trend_template(f["cl"])
         if m4.get(t) is None:
-            m4_unknown += 1
+            m4_missing.append(t)
         stop = (sg.initial_stop(base["pivot"], base["contraction_low"], max_stop=max_stop)
                 if base["valid"] else None)
         rows.append(dict(t=t, mcn=score, mq=q_p[t], setup=setup, grp=grp, m2=m2,
