@@ -51,10 +51,20 @@ def month_closes(cur, tickers):
     return out
 
 
-def pfcf_history(raw, closes):
-    """Median P/FCF over the quarters we can price, and the observation count."""
+FAIR_WINDOW_QUARTERS = 20        # §3.1: the stock's own *5-year* median P/FCF
+
+
+def pfcf_history(raw, closes, window=FAIR_WINDOW_QUARTERS):
+    """Median P/FCF over the quarters we can price, and the observation count.
+
+    §3.1 says the FIVE-year median, so the window is bounded at both ends: the most recent 20
+    priceable quarters, newest first. It was unbounded while the bar window held only three years,
+    which made the bound invisible — with ten years stored it is the difference between "what this
+    business has been worth lately" and an average across a whole cycle and a half.
+    """
     obs = []
-    for q in (raw or {}).get("quarterly_fcf", []):
+    for q in sorted((raw or {}).get("quarterly_fcf", []),
+                    key=lambda q: str(q[0]) if q else "", reverse=True):
         try:
             qdate, ttm_fcf, shares = q[0], float(q[1]), float(q[2])
         except (TypeError, ValueError, IndexError):
@@ -64,6 +74,8 @@ def pfcf_history(raw, closes):
         px = closes.get(str(qdate)[:7])
         if px:
             obs.append(px * shares / ttm_fcf)
+        if len(obs) >= window:
+            break
     return (st.median(obs) if obs else None), len(obs)
 
 
