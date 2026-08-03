@@ -735,3 +735,37 @@ def test_below_the_crossover_nothing_moves():
     F = 100e6
     hp = s.hurdle_price(fcf_ttm=F, shares=1e6, growth=0.10, fair_multiple=30.0)
     assert hp == pytest.approx(F / 1e6 / (0.15 - 0.10))   # 20x, the old answer too
+
+
+# --------------------------------------------------------------------------- fair multiple (§3.1)
+def test_fair_multiple_takes_the_stocks_own_median_ceilinged_at_the_cap():
+    """The permitted multiple is the stock's own history, never richer than the 30x ceiling."""
+    assert s.fair_multiple_of(18.0, 20) == 18.0
+    assert s.fair_multiple_of(44.0, 20) == 30.0
+
+
+def test_fair_multiple_short_history_threshold_is_twelve_quarters():
+    """Law of 2026-08-02: FEWER than 12 priced quarters is short history — flat 25x, and never
+    the stock's own current multiple. The boundary is the whole point of the ruling, so it is
+    pinned on both sides."""
+    assert s.fair_multiple_of(18.0, 11) == 25.0          # one quarter short → flat
+    assert s.fair_multiple_of(18.0, 12) == 18.0          # exactly enough → own history
+    assert s.fair_multiple_of(18.0, 8) == 25.0           # the old threshold no longer qualifies
+
+
+def test_fair_multiple_falls_back_when_the_median_is_unusable():
+    """No median, or a nonsense one, is short history by another name — never a free pass."""
+    assert s.fair_multiple_of(None, 40) == 25.0
+    assert s.fair_multiple_of(0.0, 40) == 25.0
+    assert s.fair_multiple_of(-3.0, 40) == 25.0
+    assert s.fair_multiple_of(18.0, None) == 25.0
+
+
+def test_short_history_multiple_can_never_exceed_the_hard_ceiling():
+    """Whatever route a name takes to its fair multiple, the hurdle it produces stays under the
+    30x ceiling — the property the whole 2026-08-02 batch exists to guarantee."""
+    for obs in (0, 5, 11, 12, 40):
+        fair = s.fair_multiple_of(60.0, obs)
+        assert fair <= 30.0
+        h = s.hurdle_price(fcf_ttm=100.0, shares=10.0, growth=0.25, fair_multiple=fair)
+        assert h is not None and h <= fair * 10.0 + 1e-9

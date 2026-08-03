@@ -5,8 +5,9 @@ at run time, exactly as §3.0 says, so scores move when the field moves.
 
 Deviation, announced and awaiting ratification (roadmap Part 4): the hurdle's "fair multiple"
 wants the stock's own 5-year median P/FCF. We hold a 3-year bar window, so the median is taken
-over the quarters we can price; under 8 such quarters the name uses the plan's short-history
-rule (fair = flat 25x, never the stock's own current multiple). The 8 is a builder's threshold.
+over the quarters we can price. §3.1 sets the short-history rule at **fewer than 12 priced
+quarters** — those names get fair = flat 25x, never the stock's own current multiple. The
+threshold is config (`hurdle_fair_history_min_quarters`), so moving it is a logged row.
 """
 import os, sys, json, math, statistics as st, datetime as dt
 import psycopg
@@ -65,6 +66,7 @@ def main():
                 growth_cap = float(config(cur, "hurdle_growth_cap", 0.25))
                 fair_cap = float(config(cur, "hurdle_fair_multiple_cap", 30))
                 fair_cap_short = float(config(cur, "hurdle_fair_multiple_cap_short", 25))
+                min_q = int(config(cur, "hurdle_fair_history_min_quarters", 12))
                 floor = float(config(cur, "hurdle_min_return", 0.15))
                 tol = float(config(cur, "engine_agreement_tolerance", 0.05))
 
@@ -140,16 +142,11 @@ def main():
                 # multiple, it is a category error — so it produces no hurdle at all (§009)
                 raw_d = {} if quote_ok is False else (raw if isinstance(raw, dict) else (json.loads(raw) if raw else {}))
                 pfcf_med, obs = pfcf_history(raw_d, closes.get(tk, {}))
-                if obs >= 8 and pfcf_med:
-                    fair = min(pfcf_med, fair_cap)
-                elif quote_ok is not False:
-                    # §3.1 (2026-08-02): short-history fair is a FLAT 25x. The lower-of-current
-                    # form was circular — with shares frozen at the filing it reproduced the
-                    # filing-date close exactly, so "is it cheap" degenerated into "has it fallen
-                    # since it last filed".
-                    fair = fair_cap_short
-                else:
-                    fair = None
+                # §3.1: the stock's own median, ceilinged — or the flat short-history multiple when
+                # we cannot price enough quarters. One home for the rule (signals.fair_multiple_of);
+                # a currency-mismatched name gets no multiple at all.
+                fair = None if quote_ok is False else sg.fair_multiple_of(
+                    pfcf_med, obs, cap=fair_cap, short_cap=fair_cap_short, min_quarters=min_q)
                 # The hurdle underwrites the same engine the CCN scores — the waterfall's value,
                 # capped, whichever side of the identity it came from. Growth-derived names carry
                 # §3.3's guardrails instead of a silent zero.

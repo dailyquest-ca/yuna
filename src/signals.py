@@ -464,6 +464,21 @@ def hurdle_growth_ceiling(fair_multiple, *, floor=0.15):
     return max(0.0, floor - 1.0 / fair_multiple)
 
 
+def fair_multiple_of(pfcf_median, observations, *, cap=30.0, short_cap=25.0, min_quarters=12):
+    """§3.1: the richest multiple of real cash the system will ever instruct paying.
+
+    The stock's own median P/FCF, ceilinged at `cap`. A name we cannot price over enough quarters
+    has no own-history to appeal to, so it takes the flat `short_cap` — never the lower-of-current
+    form, which was circular: with shares frozen at the filing it reproduced the filing-date close
+    exactly, and "is it cheap" degenerated into "has it fallen since it last filed".
+
+    `min_quarters` is 12 by law (2026-08-02). Returns None when the name cannot be priced at all.
+    """
+    if observations is None or observations < min_quarters or not pfcf_median or pfcf_median <= 0:
+        return short_cap
+    return min(pfcf_median, cap)
+
+
 def hurdle_price(*, fcf_ttm, shares, growth, fair_multiple, floor=0.15, years=5):
     """The highest price at which expected return still clears the floor (§3.1).
 
