@@ -11,6 +11,17 @@ review, same care as a formula. A session that did not write its `briefs` row di
 | Sunday reconciliation | Sun morning | `R4_reconcile.md` | `trig_014bPbo18uPXJTWncvduwKTT` | `0 16 * * 0` |
 | Monthly approval | 1st weekend | `R5_approval.md` | `trig_01WSDzax7TCUeZrGPqWSurMs` | `0 17 * * 0` + guard |
 
+The jobs those sessions read, per §4.2 — the canonical schedule, all UTC:
+
+| Job | Cron | What it owns |
+|---|---|---|
+| `ingest-daily` | `0 2 * * 2-6` and `0 3 * * 2-6` | bars, FX, corporate actions, earnings calendar, quarantine. The second firing exits if the night is already green |
+| `score` | `30 3 * * 2-6` · `0 12 * * 6` | every derived number, one writer. Saturday is the full weekly rank |
+| `check` | `50 3 * * 2-6` · `30 12 * * 6` | every assertion plus the pre-flight; writes nothing but its report row |
+| `ingest-universe` | `0 10 * * 6` (1st Sat) | the L0 census |
+| `ingest-filings` | `0 11 * * 6` | the filings sweep |
+| `backup` | `0 14 * * 6` (1st Sat) | the dump, minus daily bars |
+
 ## The Routines are part of the system — keep them in sync
 
 Each session is started by a scheduled Routine whose prompt points at `docs/yuna_plan.md` and the
