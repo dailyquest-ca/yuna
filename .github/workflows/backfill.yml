@@ -21,6 +21,15 @@ on:
       dry_run:
         description: 'fetch and count, write nothing'
         default: 'false'
+      workers:
+        description: 'parallel fetchers — lower means a gentler write rate'
+        default: '4'
+      wal_ceiling_mb:
+        description: 'pause when pg_wal passes this; the 2026-08-03 outage was a WAL burst'
+        default: '2000'
+      resweep:
+        description: 'redo names that already hold the full window (default skips them)'
+        default: 'false'
 jobs:
   backfill:
     runs-on: ubuntu-latest
@@ -40,6 +49,9 @@ jobs:
           SWEEP_LIMIT: ${{ inputs.sweep_limit }}
           TICKERS: ${{ inputs.tickers }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          WORKERS: ${{ inputs.workers || '4' }}
+          WAL_CEILING_MB: ${{ inputs.wal_ceiling_mb || '2000' }}
+          RESWEEP: ${{ inputs.resweep || 'false' }}
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py backfill /tmp/job.out
