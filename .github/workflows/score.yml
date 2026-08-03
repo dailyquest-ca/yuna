@@ -6,9 +6,13 @@ name: score
 # Runs after every ingest. The Saturday 12:00 appointment is this job in its weekly slot, not a
 # different job — that is where the full weekly rank lands.
 on:
-  schedule:
-    - cron: '30 3 * * 2-6'  # after ingest-daily's two windows
-    - cron: '0 12 * * 6'    # Sat 12:00 UTC — the full weekly rank
+  # PAUSED 2026-08-03 — the database is down on a full disk (see
+  # docs/incident-2026-08-03.md). Every job here writes to it, so the whole
+  # schedule is commented out rather than left to fail nightly. Restore the
+  # block below verbatim once the disk is resized and the pipeline is green.
+  # schedule:
+  #   - cron: '30 3 * * 2-6'  # after ingest-daily's two windows
+  #   - cron: '0 12 * * 6'    # Sat 12:00 UTC — the full weekly rank
   workflow_dispatch:
     inputs:
       dry_run:

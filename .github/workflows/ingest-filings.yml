@@ -5,8 +5,12 @@ name: ingest-filings
 # STALE_ONLY skips names that have filed nothing since their last pull; a name with no
 # fundamentals row at all is never skipped, so a cold start still sweeps everything once.
 on:
-  schedule:
-    - cron: '0 11 * * 6'   # Sat 11:00 UTC — after ingest-universe, before score's weekly rank
+  # PAUSED 2026-08-03 — the database is down on a full disk (see
+  # docs/incident-2026-08-03.md). Every job here writes to it, so the whole
+  # schedule is commented out rather than left to fail nightly. Restore the
+  # block below verbatim once the disk is resized and the pipeline is green.
+  # schedule:
+  #   - cron: '0 11 * * 6'   # Sat 11:00 UTC — after ingest-universe, before score's weekly rank
   workflow_dispatch:
     inputs:
       dry_run:
