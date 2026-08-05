@@ -180,8 +180,15 @@ def saturday_skeleton(cur, pay, freshness_line):
 
 # --------------------------------------------------------------------------- write
 
+# §5.2's reader looks back three hours, and that is the tightest window any session uses. A
+# composed row is a no-op only while it is still the row a session would actually find: past that
+# the night has no receipt, and §4.7's "a missing message is itself the alarm" fires on words that
+# exist and cannot be delivered.
+RECOMPOSE_AFTER_HOURS = 3
+
+
 def publish(cur, hb, kind, session_date, freshness_line, body, *, meta=None):
-    """One composed row per kind per session date — unless the words have changed.
+    """One composed row per kind per session date — unless the words have changed, or aged out.
 
     The guard used to be "already composed for this date, skip", which was right while this ran
     once a night on a cron. Off the `needs:` chain it runs after EVERY ingest, and that turned the
@@ -190,16 +197,24 @@ def publish(cur, hb, kind, session_date, freshness_line, body, *, meta=None):
     and compose skipped rather than correcting it. `notify` went red and was right to — the words a
     session would find were eight hours stale and outside its window.
 
-    So the key is the CONTENT. Same body, nothing new to say, skip. Different numbers, new row —
-    `briefs` is an append ledger (§4.3) and every reader takes the newest.
+    So the key is the CONTENT, and it expires. Same body, still inside the reader's window, skip —
+    a chained retry forty minutes later has nothing to add. Different numbers, or a row too old for
+    any session to find, new row; `briefs` is an append ledger (§4.3) and every reader takes the
+    newest.
+
+    The expiry half is the stop sheet's doing. Its body is often byte-identical night to night —
+    "✓ stops all placed correctly" — and §5.2 makes that line the pipeline's **nightly receipt**.
+    Content-only dedupe skipped it, and `notify` went red on a sheet that existed and was eight
+    hours stale. The receipt is owed to the run, not to the prose.
     """
     sha = hashlib.sha256(body.encode()).hexdigest()[:12]
-    cur.execute("""select detail->>'sha' from briefs where kind=%s and session_date=%s
-                   and detail->>'composed'='true' order by at desc limit 1""",
-                (kind, session_date))
+    cur.execute("""select detail->>'sha', at > now() - make_interval(hours => %s)
+                     from briefs
+                    where kind=%s and session_date=%s and detail->>'composed'='true'
+                    order by at desc limit 1""", (RECOMPOSE_AFTER_HOURS, kind, session_date))
     row = cur.fetchone()
-    if row and row[0] == sha:
-        hb.detail.setdefault("skipped", []).append(f"{kind} unchanged for {session_date}")
+    if row and row[0] == sha and row[1]:
+        hb.detail.setdefault("skipped", []).append(f"{kind} unchanged and still deliverable")
         return False
     summary = next((l for l in body.splitlines() if l.strip()), "")[:300]
     if dry():

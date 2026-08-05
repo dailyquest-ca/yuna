@@ -40,6 +40,23 @@ def test_the_same_words_twice_write_one_row(db):
     assert "unchanged" in str(hb.detail["skipped"])
 
 
+def test_an_unchanged_sheet_too_old_to_deliver_is_written_again(db):
+    """§5.2: the stop sheet's line IS the pipeline's nightly receipt, and its body is often
+    byte-identical night to night — "✓ stops all placed correctly". Dedupe on content alone left
+    the 2026-08-05 receipt eight hours old and outside R2's three-hour window, so `notify` went red
+    on words that existed and could not be delivered. The receipt is owed to the run, not the prose.
+    """
+    hb = Beat()
+    with db.cursor() as cur:
+        compose.publish(cur, hb, "stopsheet", dt.date.today(), "fresh", "✓ stops all placed")
+        cur.execute("""update briefs set at = now() - interval '9 hours'
+                        where kind='stopsheet'""")
+        assert compose.publish(cur, hb, "stopsheet", dt.date.today(), "fresh", "✓ stops all placed")
+    db.commit()
+    rows = composed(db)
+    assert len(rows) == 2 and rows[0][1] == rows[1][1], "same words, new receipt"
+
+
 def test_new_numbers_replace_the_frozen_brief(db):
     """The live failure: a stop sheet composed at 14:18 described a book without that day's fills,
     a fresh score recomputed everything at 22:52, and the desk kept the 14:18 words."""
