@@ -12,11 +12,11 @@ is the scar tissue: facts this build paid for, worth reading before touching any
 
 | Layer | What it is |
 |---|---|
-| **Data** | EODHD All-In-One: bulk prices nightly · FX · fundamentals on filing · earnings calendar. Bars kept 3 years, fundamentals forever |
-| **Compute** | Five **scheduled** jobs: `nightly-ingest` (+ `daily` duties) · `nightly-retry` · `weekly-rank` · `monthly-funnel` (census → `fundamentals` → `score`) · `monthly-backup`. Everything else — `migrate`, `phase0`, `score`, `daily`, `fundamentals`, both backtests — is **dispatch-only tooling**; nothing joins the schedule without a plan edit (§4.2) |
-| **Store** | One Supabase Postgres project — universe → book → briefs, plus `fundamentals` as the point-in-time asset, and human views for browsing |
-| **Judge** | Five Yuna sessions: evening stop sheet · pre-open brief · Sat deep-dive · Sun reconciliation · monthly approval |
-| **Execute** | Zak places every order: entry pairs · stop moves · gap exits · fill confirmations · monthly approvals |
+| **Data** | EODHD All-In-One: bulk prices nightly · FX · fundamentals on filing · earnings calendar. Bars kept 10 years, fundamentals forever |
+| **Compute** | One sentence — **ingest → score → check → speak**. Eight scheduled jobs: `ingest-daily` ×2 · `ingest-filings` · `ingest-universe` · `score` · `check` · `compose` + `notify` (the speak pair) · `backup`. Everything else — `migrate`, `phase0`, `backfill`, both backtests — is **dispatch-only tooling**; nothing joins the schedule without a plan edit (§4.2) |
+| **Store** | One Supabase Postgres project — universe → book → briefs, plus `fundamentals` as the point-in-time asset, the `rulings` + `learnings` ledgers, and human views for browsing |
+| **Judge** | Two chats (weekday morning · Sunday reconciliation) + two letters (Saturday · monthly); the stop sheet and all alarms are pipeline pushes delivered by the Routines in the Yuna chat/cowork project. Yuna rules names; Zak rules law and risk |
+| **Execute** | Zak places every order: entry pairs · stop moves · gap exits · fill confirmations · monthly law-and-risk rulings |
 | **Protect** | GTC stop-limits living at Wealthsimple — protection that never sleeps with the pipeline |
 | **Health** | Heartbeat: every job logs a run · every output opens with freshness · a missing message is the alarm |
 
@@ -45,6 +45,8 @@ src/          ingest + compute jobs (Python); db.py holds the shared heartbeat c
 | `funnel.py` | EODHD symbol list + bulk + screener | `universe` (L0 census) |
 | `fundamentals.py` | EODHD fundamentals | `fundamentals`, `universe` decorations |
 | `score.py` | `fundamentals`, `prices` | `bench` (C1 → CCN → hurdle) |
+| `compose.py` | `v_session_payload` | composed `briefs` — the stop sheet, the morning brief, the Saturday letter (§4.2 speak, first half) |
+| `notify.py` | composed `briefs`, `config.push_channel` | nothing but its runs row — proves the words exist before the Routines deliver them |
 | `phase0.py` | `book`, `bench`, `candidates`, `queue`, `balances` | `tickets`, a `phase0` brief |
 | `backup.py` | everything but the bars | a compressed dump committed here |
 

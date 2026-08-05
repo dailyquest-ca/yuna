@@ -1,63 +1,33 @@
-# R2 — Evening stop sheet (weekdays ~20:30 PT)
+# R2 — Evening stop sheet (pipeline push, weekdays ~20:30 PT)
 
-You are Yuna. This is the shortest thing you write and the one that must never be missing: it is
-both Zak's protective instruction and the pipeline's nightly receipt. **Always at least one line.**
-
-Every window has closed by now — `ingest-daily` at 02:00 UTC and again at 03:00, `score` at 03:30,
-`check` at 04:00 — so this session is also the first human-visible read on whether tonight's
-machine worked.
-
-## Step 1 — Heartbeat, all three verbs
+**No session judges here** — §4.4 (2026-08-04): the stop sheet is composed by `compose` and
+delivered by `notify`; under `push_channel = cowork` the scheduled Routine in the Yuna project is
+the doorbell. The whole run is one read and one delivery:
 
 ```sql
-select job, status, started_at, finished_at, detail->'amber' amber, detail->'red' red
-  from runs where job in ('ingest-daily','score','check')
-    and started_at > now() - interval '30 hours' order by id desc;
+select freshness, body from briefs
+ where kind='stopsheet' and detail->>'composed'='true'
+   and at > now() - interval '3 hours'
+ order by at desc limit 1;
 ```
 
-The freshness line the machine writes for itself — `ingest ✓ score ✓ check ✓` — is on the latest
-`check` row as `detail->>'freshness'`, and `detail->'blocks_dispatch'` names anything that must
-stop you speaking at all.
+- **Row found → deliver `body` verbatim.** No re-derivation, no additions, no commentary — the
+  pipeline already spoke, and a deliverer that edits the words is a second author the audit
+  trail doesn't have. The composed line set is exactly §5.2's:
+  `✓ stops all placed correctly` · or one line per action, both prices
+  (`NVDA · stop 176.20 / limit 170.90` · `AMD · blackout — cancel entry order`) · or
+  `⚠️ pipeline red — touch nothing, GTCs stand as placed`.
+- **Row missing → the pipeline failed to speak**, and §4.7 makes this message the nightly
+  receipt, so it still sends — flat:
 
-Pipeline red or the night missing entirely → one line, flat, and **touch nothing**:
+  > ⚠️ pipeline red — touch nothing, GTCs stand as placed
 
-> ⚠️ pipeline red — touch nothing, GTCs stand as placed.
+  plus one line naming which runs row is red or absent (`ingest-daily` 02:00/03:00 UTC ·
+  `score` 03:30 · `check` 03:50 · `compose` 04:05 · `notify` 04:20). Protective rows from
+  `v_armed_latest` (`urgency='protective'`) are the one thing that may be appended on a red
+  night — protection never waits for the pipeline (§4.6).
 
-That is the correct instruction. Existing broker stops are already protecting the book; what a
-broken pipeline must never do is talk Zak into moving them on stale numbers.
-
-## Step 2 — The protective set
-
-```sql
-select kind, ticker, reason, stop, stop_limit_price, note from v_armed_latest
-  where urgency='protective' order by kind, ticker;
-select ticker, stop, stop_limit, trail_mode from book
-  where status='open' and sleeve='momentum' order by ticker;
-```
-
-One line per action, both prices, no prose:
-
-- `NVDA · stop 176.20 / limit 170.90` — a trail moved; place it
-- `AMD · blackout — cancel entry order` — a live entry order dies before a print (§3.3); the
-  protective stop stays, always
-- `TSM · presumed stopped — confirm the fill`
-
-Repeat an unconfirmed move as the same single line each evening until Zak confirms it. No escalation
-language: he is not late, the machine is just patient.
-
-## Step 3 — Nothing to do is a result
-
-If no protective action is outstanding and the pipeline is green:
-
-> ✓ stops all placed correctly
-
-That line is the receipt. Send it every weekday without exception.
-
-## Step 4 — Store it
-
-```sql
-insert into briefs (kind, session_date, freshness, summary, body, detail)
-values ('stopsheet', current_date, :freshness, :summary, :body, :detail);
-```
-
-A tiny brief is still a brief. §5.6: a session that produced nothing durable didn't happen.
+**Always exactly one message, minimum one line.** A missing message is itself the alarm, so
+silence is never an acceptable output. The delivery writes nothing new when the composed row
+exists — that row already is the record; the fallback banner (the missing-row case) is written
+to `briefs` as kind `stopsheet` so the ledger shows what was actually sent.
