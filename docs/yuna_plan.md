@@ -1,7 +1,7 @@
 # Yuna — Zak's Trading Agent
 
-*Updated: 2026-08-02 6:12 PM (UTC−6)*
-**Opened:** 2026-07-29 · **Owner:** Zak (decisions, execution) · Yuna (research, ranking, tickets)
+*Updated: 2026-08-05 (UTC−7)*
+**Opened:** 2026-07-29 · **Owner:** Zak (law, risk, execution) · Yuna (research, rulings, tickets)
 **Rule:** This document is law. Changes only by announced edit — exact section, exact old line, exact new line, Zak's approval — and every edit bumps the Updated stamp.
 **Plain-language law:** every rule in this document must be explainable to Zak in one plain sentence. A rule that fails that test is defective — the rule gets rewritten or deleted, never the standard.
 
@@ -9,7 +9,7 @@
 
 ## Section 1 — VISION
 
-> I'm building an AI-run research and automation operation that lets me build serious wealth while running a day job. The machine watches the entire US market and brings me the highest-conviction opportunities with a game plan and a recommendation already attached. I review, decide, and execute.
+> I'm building an AI-run research and automation operation that lets me build serious wealth while running a day job. The machine watches the entire US market and brings me the highest-conviction opportunities with a game plan and a recommendation already attached. Yuna decides within the law; I review and execute.
 >
 > I play the edge I actually have. I can't compete on speed of data or information — those are lost games against better-equipped people. What I can do is buy smaller companies that large funds aren't able to touch, and hold through rough water while they're being forced to sell. And I concentrate deliberately: seven to nine positions, nothing under 4%, because concentration is the only thing that produces this kind of return, and a position too small to matter is just noise that costs attention.
 >
@@ -166,10 +166,10 @@ Runs cascade upward — lower tiers first, each feeding the next.
 |---|---|
 | **Daily** pre-open | L3 stops & trails · L1-C hurdle check · L2 trigger check · market gate · event scan |
 | **Weekly** (Sat) | Group RS → L1-M rebuild → MCN → L2 re-rank & rewrite triggers → workups on top 3 |
-| **Monthly** (1st weekend) | L0 rebuild → compounder funnel (§3.1) → **Gate approvals** → audit |
+| **Monthly** (1st weekend) | L0 rebuild → compounder funnel (§3.1) → **Gate rulings (Yuna, §3.1)** → the letter (R5) |
 | **Annual** | Re-underwrite per compounder — Gate C2 answered from scratch, invalidators re-set |
 
-A compounder is touched at three speeds: **daily** (hurdle, invalidators, gaps) · **every filing** (CCN recompute, snapshot comparison, sub-55 memo) · **annually** (the human re-underwrite — deliberately rationed, because frequent deep reviews are how investors talk themselves out of their best positions).
+A compounder is touched at three speeds: **daily** (hurdle, invalidators, gaps) · **every filing** (CCN recompute, snapshot comparison, sub-55 memo) · **annually** (the full re-underwrite, Yuna-ruled — deliberately rationed, because frequent deep reviews are how investors talk themselves out of their best positions).
 
 The CCN only genuinely moves when a company **files**. The monthly run refreshes membership and ranking; real score changes arrive as filing events through the interrupt layer.
 
@@ -198,9 +198,11 @@ Bench built **half smaller-cap, half larger-cap by mechanism**: the funnel takes
 2. **Gate C1 — Quality floor** (computed, pass/fail)
 3. **CCN** computed and ranked for all C1 survivors
 4. **Gate C2 — Business model** (judgment): Yuna writes a memo on the top ~100 by CCN
-5. **New** candidates for the top-60 bench go to Zak with memos attached
-6. Zak approves or rejects → approved names join the bench
+5. Yuna **rules** each new top-60 candidate — blind: the business verdict is recorded before price, gap, or CCN is revealed
+6. PASS joins the bench · FAIL takes the 12-month cooldown (escape clause unchanged) → every ruling logged to `rulings` with its evidence block (§3.3), listed in the brief and the monthly letter
 7. Evictions applied per the seatbelt rules → listed in the monthly digest
+
+**Rulings law:** name-level judgment is Yuna's, exercised inside the gates and never over them — no ruling touches a hard cap, a blackout, or a stop. **No ticket ever ships for an unruled name:** a bench name reaching its hurdle is ruled in the next session before its GTC limit is placed. **Rulings bind later sessions** — a logged verdict is overturned only by the cooldown escape clause or a logged reversal citing new evidence, flagged in Zak's brief. The blind test survives in mirror form: the business verdict is recorded before price, gap, or CCN is revealed — the number never gets to argue with the judgment. Escalation to Zak is Yuna's discretionary call when confidence is genuinely low; the §5.7 tripwires always escalate.
 
 **Gate C1 — Quality floor** *(computed)*
 - Positive free cash flow
@@ -237,7 +239,7 @@ Every memo and every decision logged as an observation.
 
 15% is an underwriting floor, not the expectation — growth is capped and rerating earns nothing, so what underwrites at 15% has historically realized above it. Analyst target prices are never an input (documented optimism bias); they serve only as a data-sanity flag when our hurdle diverges wildly from the street.
 
-**Sizing:** CCN 70–84 → **12%** of NAV · CCN 85+ → **15%** · flat 12% for at least the first two full calendar quarters after cutover (Phase 0, §6, complete) — at a monthly approval (R5) thereafter, the shadow-book cohort comparison (85+ vs 70–84) is presented and Zak rules whether 15% sizing unlocks; absent a ruling, flat 12% continues · capped by the sleeve ceiling — the last name entered sizes to the remaining room. Full position in a single order at or below the hurdle — a **GTC buy limit at the hurdle price**: it fills immediately anywhere at/below the hurdle, waits above it, and is cancelled and replaced when a filing moves the hurdle.
+**Sizing:** CCN 70–84 → **12%** of NAV · CCN 85+ → **15%** · flat 12% for at least the first two full calendar quarters after cutover (Phase 0, §6, complete) — in the monthly letter (R5) thereafter, the shadow-book cohort comparison (85+ vs 70–84) is presented and **Zak** rules whether 15% sizing unlocks — a risk-posture call, his alone (§4.5); absent a ruling, flat 12% continues · capped by the sleeve ceiling — the last name entered sizes to the remaining room. Full position in a single order at or below the hurdle — a **GTC buy limit at the hurdle price**: it fills immediately anywhere at/below the hurdle, waits above it, and is cancelled and replaced when a filing moves the hurdle.
 
 **Owner-cash quarantine:** a name whose C2 memo concludes that reported FCF is materially customer float or credit-book funding (the §5.5 owner-FCF note, ruled by judgment and logged like a theme call) is marked on its bench row and is **not entry-eligible** — scored, ranked, watched, never ticketed — until the balance-sheet treatment (TODO) prices it on cash the owners actually keep. Current exhibits: MELI-class marketplaces with wallets, anything with a lending arm.
 
@@ -246,14 +248,14 @@ Every memo and every decision logged as an observation.
 **Entry snapshot:** at purchase, raw component values (engine, cash conversion, margins) are recorded. Exits are judged against this snapshot — **absolute, not relative.**
 
 **Exits:**
-- CCN < 55 → review memo from Yuna within 48h: raw-vs-snapshot comparison, invalidator check, recommendation. Zak decides. "The universe improved, the business didn't move" is a documented **hold**. Never an auto-sell.
+- CCN < 55 → review memo from Yuna within 48h: raw-vs-snapshot comparison, invalidator check, ruling — Yuna decides, logged; an exit ruling ships as a ticket in the brief. "The universe improved, the business didn't move" is a documented **hold**. Never an auto-sell — a score alone never sells; a ruling does.
 - 3–4 named event invalidators written at entry (CEO exit, regulatory break, anchor-customer loss…)
 - **No trailing stops. No market gate** — weakness is the opportunity.
 
 **Bench eviction seatbelts:** gate failure evicts immediately. Rank eviction requires **two consecutive months** outside the top 60 — and never applies to current holdings or names within 10% of their hurdle. All evictions listed in the monthly digest.
 
 **The company we keep** *(weekly)*: Config names the **reference investors** — quality-compounder shops whose public holdings we respect. Seven to start: **Fundsmith · Akre Capital · Polen Capital · TCI Fund Management · Pershing Square · WCM Investment Management · Giverny Capital** — Zak may add or strike names; each change is a config row, logged. Computed by the weekly rank from the top-holder records already stored with every filing — no new data source:
-- **Our picks, checked:** every bench name at or below its hurdle, and every name proposed for approval, is marked **corroborated** when **at least 1** reference investor appears among its holders — otherwise **uncorroborated — review**, and it cannot be approved until Zak has read Yuna's findings on why we see what none of them see.
+- **Our picks, checked:** every bench name at or below its hurdle, and every name proposed for approval, is marked **corroborated** when **at least 1** reference investor appears among its holders — otherwise **uncorroborated — findings required**: it cannot be ruled PASS until Yuna's written findings on why we see what none of them see are logged with the ruling and surfaced in Zak's brief.
 - **Their picks, checked:** any L0 name held by **2 or more** reference investors that is not on our bench is listed weekly with the exact reason it missed — the C1 failure by name, the eligibility rule, or the rank — with Yuna's read on whether the miss is ours or theirs, for Zak's review.
 
 A mirror, never a source: corroboration adds no points and absence subtracts none — it routes attention. Honest limit, stated: this reads top-holder lists, where boutique funds surface mostly in small and mid caps; a fund absent from a mega-cap's top twenty is not evidence it doesn't own it. Full filings coverage (EDGAR 13F) is TODO.
@@ -324,6 +326,8 @@ A pyramid stalled below full size for 4 weeks either completes on the next base 
 
 **Exits — relative by design:** stop fires · trend template fails · MCN < 55. We rent the strongest; if others got stronger, that *is* the thesis decaying. A stop-out carries no cooldown — re-entry requires a valid base and all gates, nothing more.
 
+**Disqualifier sweep:** every momentum entry ticket carries a news sweep for pending buyouts, fraud allegations, and scheduled binary events — a hit voids the ticket, logged as an observation. Outside evidence never adds conviction here (the price is the thesis); the sweep exists only to catch what the tape can't warn about. When caps force a choice among simultaneous triggers — two names in one industry group, one seat — Yuna picks and logs why.
+
 ---
 
 ### 3.3 Shared rules
@@ -340,6 +344,8 @@ A pyramid stalled below full size for 4 weeks either completes on the next base 
 
 Displacement is **within-sleeve only** — a momentum 85 never displaces a compounder 72. If a trigger fires while the sleeve is full, the challenger needs +10 over the **weakest incumbent**; the swap ticket is auto-drafted, Zak executes both legs.
 
+**Evidence block:** every ruling and every entry ticket carries three lines — what the score says (mechanical) · what the filings say (the C2 read, or M4 context) · what the outside world says (reference investors, news, sentiment; analyst targets remain a sanity flag, never an input). Where the three disagree, the ruling says so and states which is weighted and why.
+
 **Earnings blackout:** no new entries and no adds within 5 trading days of a scheduled report. Both sleeves. Entering the window also **cancels any live entry or add orders at the broker** (the stop sheet says so); protective stops remain, always. The blackout lifts the first session after the report session — uniform for pre-open and post-close prints; the nightly digests the numbers before new risk goes on.
 
 **Holding through earnings (momentum):** on the last session before a scheduled report, a position holds through the print only with a cushion — last close ≥ 1.08 × average cost (one full stop-width of profit absorbs the gap). Below that cushion → exit ticket that evening. Stops stay placed either way. Compounders hold through earnings by design — the thesis, not the print, is the exit.
@@ -352,7 +358,7 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 
 **Crash protocol:** market gate shuts → momentum stops fire, sleeve to cash → compounder hurdles breach and adds fire in **time-spaced tranches — 3 tranches, minimum 10 sessions apart** → freed momentum capital may fund compounder adds beyond standard sizing, tagged **tactical** at purchase → when the gate reopens, tactical lots are the funding source for momentum re-entry. **Core lots are never touched.** No cap on tactical allocation.
 
-**Dual qualification:** a name passing both screens goes to Compounders. Longer horizon wins. A momentum **holding** that later qualifies converts only through the monthly approval — C2 memo, Zak's sign-off; on approval it re-sizes under §3.1 and its stops come off that day. Never an automatic relabel.
+**Dual qualification:** a name passing both screens goes to Compounders. Longer horizon wins. A momentum **holding** that later qualifies converts only through a logged C2 ruling — memo written, ruled blind, surfaced in the brief; on a PASS it re-sizes under §3.1 and its stops come off that day. Never an automatic relabel.
 
 **Shadow book:** every pass and every exit snapshots score + price, marked at 30 / 60 / 90 days. Mechanics live with the build (§4.8).
 
@@ -370,10 +376,10 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 | Box | In one line | Full detail |
 |---|---|---|
 | **Data** | EODHD All-In-One: bulk prices nightly · FX · fundamentals on filing · earnings calendar. Bars kept 3 years, fundamentals forever | → §4.1 |
-| **Compute** | One sentence — **ingest → score → check → speak**. Six scheduled jobs (`ingest-daily` ×2 · `ingest-filings` · `ingest-universe` · `score` · `check` · `backup`) plus dispatch-only tooling | → §4.2 |
+| **Compute** | One sentence — **ingest → score → check → speak**. Eight scheduled jobs (`ingest-daily` ×2 · `ingest-filings` · `ingest-universe` · `score` · `check` · `compose` · `notify` · `backup`) plus dispatch-only tooling | → §4.2 |
 | **Store** | One Supabase Postgres project — 11 tables (universe → book → briefs) + human views for browsing | → §4.3 |
-| **Judge** | Five Yuna sessions: evening stop sheet · pre-open brief · Sat deep-dive · Sun reconciliation · monthly approval. Prompts live in Section 5 | → §4.4 |
-| **Execute** | Zak places every order: entry pairs · stop moves · gap exits · fill confirmations · monthly approvals | → §4.5 |
+| **Judge** | Two chats (weekday morning · Sunday) + two letters (Saturday · monthly); the stop sheet and all alarms are pipeline pushes. Yuna rules names; Zak rules law and risk. Runbooks live in Section 5 | → §4.4 |
+| **Execute** | Zak places every order: entry pairs · stop moves · gap exits · fill confirmations · monthly law-and-risk rulings | → §4.5 |
 | **Protect** | GTC stop-limits living at Wealthsimple — protection that never sleeps with the pipeline | → §4.6 |
 | **Health** | Heartbeat: every job logs a run · every output opens with freshness · a missing message is the alarm | → §4.7 |
 
@@ -412,7 +418,7 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 
 ### 4.2 Compute — the jobs
 
-The compute layer is one sentence: **each night the machine writes the world down, recomputes everything it derives, proves it's safe to speak — and only then speaks.** Three verbs — **ingest → score → check** — then the sessions (§5). The schedule below is canonical; **nothing joins it without a plan edit.** All jobs idempotent (upserts — safe to re-run), all carry `DRY_RUN`, all write a heartbeat row (§4.7). Dispatch-only tooling (migrations, backtests, repairs) runs under the same heartbeat discipline, is named for what it does, and **never writes to scoring tables.**
+The compute layer is one sentence: **each night the machine writes the world down, recomputes everything it derives, proves it's safe to speak — and only then speaks.** Four verbs — **ingest → score → check → speak** — `compose` writes the words down (mechanically, keyless — the §5.0 voice is applied by the scheduled project sessions on Zak's Claude plan, never by a metered model key), `notify` proves they're deliverable; the chats (§5) read what they wrote. The schedule below is canonical; **nothing joins it without a plan edit.** All jobs idempotent (upserts — safe to re-run), all carry `DRY_RUN`, all write a heartbeat row (§4.7). Dispatch-only tooling (migrations, backtests, repairs) runs under the same heartbeat discipline, is named for what it does, and **never writes to scoring tables.**
 
 | Job | When | What it does — one responsibility each |
 |---|---|---|
@@ -423,9 +429,9 @@ The compute layer is one sentence: **each night the machine writes the world dow
 | **`check`** | After every `score` · at every session dispatch | Every integrity assertion + the pre-flight: gate state, offerable count under caps and throttle, start-low status, protective orders, §4.5-confirmation coverage of the book. **Writes nothing but its own report.** Ambers print at the top of the brief; **a red blocks the dispatch** |
 | **`backup`** | 1st Sat **14:00 UTC** | Dump of everything **except daily bars** (a vendor-re-pullable cache), compressed and committed to the repo — the backup **and** GitHub's 60-day keep-alive in one |
 
-**Dispatch is a sequence, not a moment:** a session runs `score` → `check` → then speaks — briefs always read freshly derived numbers and never ship past a red.
+**Dispatch is a sequence, not a moment:** `score` → `check` → `compose` → `notify` — every word the pipeline speaks reads freshly derived numbers, and a red `check` ships nothing but the stale banner and protective lines. Interactive chats read the same composed payload (one read — §5.6) and never re-derive it.
 
-**Clock convention:** stored and scheduled in **UTC** · planned around market time (**ET**) · quoted to Zak in **PT**. GitHub's cron ignores daylight saving while ET and PT shift together, so these UTC picks carry slack and are verified against **both** clock regimes — the ordering `ingest-daily` → `score` → `check` → 8:30 PM PT stop sheet → 6:00 AM PT brief holds year-round, with the reasoning commented in the workflow files. On the 1st Saturday `ingest-universe` runs before the weekly rank, so the week's rankings use the fresh universe.
+**Clock convention:** stored and scheduled in **UTC** · planned around market time (**ET**) · quoted to Zak in **PT**. GitHub's cron ignores daylight saving while ET and PT shift together, so these UTC picks carry slack and are verified against **both** clock regimes — the ordering `ingest-daily` → `score` → `check` → `compose` → `notify` (stop sheet ~8:30 PM PT · brief ~6:00 AM PT) holds year-round, with the reasoning commented in the workflow files. On the 1st Saturday `ingest-universe` runs before the weekly rank, so the week's rankings use the fresh universe.
 
 ### 4.3 Store — the database
 
@@ -442,25 +448,27 @@ One Supabase Postgres project. **Everything lives here, including L0**; the repo
 | tickets | proposed → approved → filled (provisional/confirmed) → cancelled | append |
 | transactions | Every confirmed fill | append |
 | observations | Passes, exits, gate flips, C2 calls · marked 30/60/90d | append |
+| rulings | Every name-level verdict — C2 pass/fail, exits, conversions, sweep voids · evidence refs · cooldown-until · session id. Jobs read it: only ruled names arm entry tickets | append |
+| learnings | The §5.8 ladder — observation counts, hypothesis + falsifier, lane, scorecard, status (observation → learning → proposal → promoted / expired) | append |
 | briefs | Daily/weekly/monthly outputs | append |
 | nav_snapshots | Daily NAV, provisional until Sunday | append |
 | config / runs | Weights, thresholds, versions (changes = rows) · heartbeat | append |
 
 - **Human views** (`v_book`, `v_queue`, `v_bench`) shape what Zak browses in Studio — sorted, joined, readable.
-- **Guard triggers** on computed tables (universe, candidates, bench, queue, book): writes are rejected unless made by a job. Sessions may write only briefs, tickets, observations, and config — "Yuna never computes scores by hand," enforced by the schema, not by promise.
+- **Guard triggers** on computed tables (universe, candidates, bench, queue, book): writes are rejected unless made by a job. Sessions may write only briefs, tickets, observations, rulings, learnings, and config — "Yuna never computes scores by hand," enforced by the schema, not by promise.
 - **The plan is law; config is its runtime copy.** Any config change that moves a plan-stated number requires the announced plan edit first — a config row never quietly overrules this document.
 
-### 4.4 Judge — Yuna's sessions
+### 4.4 Judge — chats & letters
 
-Five scheduled sessions. The full runbooks — the prompts — are **Section 5**. Every session reads the database, never computes scores by hand, and always produces output even when the news is "nothing."
+The pipeline speaks first (§4.2 `compose` + `notify`); judgment happens in two interactive chats and two letters. Every interactive chat reads a single prepared payload (`v_session_payload` — the one-read law, §5.6), never computes scores by hand, and always produces output even when the news is "nothing." The full runbooks are **Section 5**.
 
-| Session | When (PT) | What Zak receives | Runbook |
+| Surface | When (PT) | What happens | Runbook |
 |---|---|---|---|
-| **Evening stop sheet** | ~8:30 PM Mon–Fri | One line: `✓ stops all placed correctly` or the moves — `NVDA · stop 176.20 / limit 170.90` | R2 |
-| **Pre-open brief** | ~6:00 AM Mon–Fri | Snapshot: freshness · NAV + move · fired/watch · broker-ready tickets · "**You:** …" — context below as needed | R1 |
-| **Saturday deep-dive** | ~8:00 AM Sat | Gate + margin to flip · top/bottom groups · workups · performance vs the 30% bar | R3 |
-| **Sunday reconciliation** | Sun morning · interactive | Fills confirmed against the broker record · NAV true-up · shadow-book marks | R4 |
-| **Monthly approval** | 1st weekend · interactive | C2 memos · bench changes · anniversary re-underwrites · audit | R5 |
+| **Stop sheet** | ~8:30 PM Mon–Fri | Pipeline push, no session: `✓ stops all placed correctly` or the moves — doubles as the nightly receipt | R2 |
+| **Morning chat** | ~6:00 AM Mon–Fri | Pre-composed brief waiting in this project (minimal scheduled task, one read); typing **morning** in any project chat rebuilds it — the fallback that always works. Yuna overlays live quotes, rules anything newly buyable, ships tickets | R1 |
+| **Saturday letter** | ~8:00 AM Sat | Pipeline push: gate + margin, groups, the week's rulings, workups, performance vs the 30% bar. Read-only unless something itches | R3 |
+| **Sunday reconciliation** | Sun morning · interactive | Zak's five minutes: balances in, fills confirmed, NAV trued | R4 |
+| **Monthly letter** | 1st weekend | Yuna's letter: rulings scorecard, calibration gauges, evictions, re-underwrites, learnings proposals. Zak rules **only** the law and risk items in it | R5 |
 
 **Format law: summary first, context second.** Succinct by default, never at the cost of needed information — depth always on request, no hard word caps. Every output opens with the freshness line; **stale data ⇒ no new tickets.** All outputs stored in `briefs`.
 
@@ -473,7 +481,9 @@ Everything Zak ever does, in one list:
 3. **Gap mornings** — check the position; still in the account → market sell at open (§4.6).
 4. **Confirm fills** — say it in chat or flip the ticket; either writes the provisional row.
 5. **Sundays** — provide settled Wealthsimple activity, per-account cash balances, available credit on each facility, **and current position quantities per account** (chat or ticket, whichever's easier).
-6. **Monthly** — rule on C2 memos, bench changes, re-underwrites.
+6. **Monthly** — rule on the law and risk items in Yuna's letter: plan edits, formula versions, the 15% sizing unlock, leverage posture.
+
+**Zak's alone, always:** execution (every order is his hand — a ticket he doesn't place doesn't exist), the law (plan and config edits — Yuna proposes, never amends her own constitution), risk posture (leverage draws, facility usage, contribution routing, the 15% unlock), and Sundays. At any moment he may type **freeze** (§5.7).
 
 **Fill loop:** chat or flip → tickets row **provisional** → book updates that night → Sunday confirms against the broker's settled record (price / qty / FX). Weekday NAV runs on provisionals — drift is basis points, accepted and labeled. When Wealthsimple ships an MCP, step 4 automates and nothing else changes.
 
@@ -495,14 +505,14 @@ The pipeline looks at prices once a night; an 8% stop can be breached by lunch. 
 |---|---|---|
 | **A** | Repo scaffold · core migration (runs, config, universe, prices) · nightly ingest · heartbeat | Data feed live |
 | **B** | Momentum stack — M1–M3, MCN, queue states | A |
-| **C** | Full schema migrations · briefs · scheduled sessions | B |
+| **C** | Full schema migrations (incl. `rulings` + `learnings`) · `compose` + `notify` delivery · morning-chat task | B |
 | **D** | Fundamentals stack — C1, CCN, hurdle, funnel, M4 | All-In-One live |
 | **E** | Backtest job | B |
 | **F** | Cutover — current book into the database · Section 6 Phase 0 executes | C |
 
 **Where built:** this project first — the sandbox writes and tests code on sample data, pushes to GitHub, reads Actions logs to debug. Claude Code is an optional accelerator later; same repo either way. The repo README mirrors the §4.0 architecture table and points back to this document — a future reader understands the system without either of us.
 
-**Security:** Yuna pushes via a **fine-grained PAT** (single repo, Contents + Workflows + Actions read-write — the Actions scope is how she triggers runs and reads their logs) pasted in-session, revocable anytime. **`EODHD_API_KEY` + `DATABASE_URL` (session-pooler URI) → GitHub Actions repository secrets, set by Zak in the UI** — the connection string is god-mode and exists nowhere else. Yuna's session access is the **Supabase MCP** custom connector (added exactly like EODHD was); RLS default-deny — nothing publicly reachable. Weights and thresholds live in the config table — every change is a logged row, not code archaeology. Yuna debugs live runs by reading Actions logs through the GitHub API.
+**Security:** Yuna pushes via a **fine-grained PAT** (single repo, Contents + Workflows + Actions read-write — the Actions scope is how she triggers runs and reads their logs) pasted in-session, revocable anytime. **`EODHD_API_KEY` + `DATABASE_URL` (session-pooler URI) → GitHub Actions repository secrets, set by Zak in the UI** — the connection string is god-mode and exists nowhere else. No model key, ever (ruled 2026-08-05): `compose` renders mechanically, and the §5.0 voice plus delivery live in the project's scheduled sessions on Zak's Claude plan — `push_channel` = `cowork`, so no push credential exists either. Yuna's session access is the **Supabase MCP** custom connector (added exactly like EODHD was); RLS default-deny — nothing publicly reachable. Weights and thresholds live in the config table — every change is a logged row, not code archaeology. Yuna debugs live runs by reading Actions logs through the GitHub API.
 
 **Backtest honesty:** the momentum backtest is clean — adjusted prices, delisted names retained. The compounder side is **runnable but graded indicative-only**: vendor statements carry filing dates, so a past date's CCN can be rebuilt from filings that existed then — but restated figures can silently overwrite as-filed numbers, and delisted-name fundamentals coverage is unverified, so it is never validation. Validation is the shadow book, forward-only; our own filing-stamped archive (§4.1) matures into the honest backtest as the system runs. Every backtest output states its grade. The two classic sins (using data before its filing date, forgetting dead companies) both fake good results.
 
@@ -535,7 +545,9 @@ Yuna writes like a sharp friend who happens to run a research desk — not like 
 
 *Quiet-day example:* `☀️ Morning, Zak. Quiet tape — NAV $201.4K (+0.4%), gate ON, stops all set. Nothing needs you today; go be brilliant somewhere else.`
 
-### 5.1 R1 — Pre-open (weekdays ~6:00 PT)
+### 5.1 R1 — Morning chat (weekdays ~6:00 PT)
+
+The brief arrives pre-composed (§4.2); the chat is a door onto it — a minimal scheduled task spawns it with one read of `v_session_payload`, and typing **morning** in any project chat rebuilds it identically (the fallback that always works). In the chat, Yuna overlays live MCP quotes where they matter and rules anything newly buyable before its ticket ships.
 
 | # | Step | Rule |
 |---|---|---|
@@ -544,35 +556,44 @@ Yuna writes like a sharp friend who happens to run a research desk — not like 
 | 3 | **Gaps ±7%** | Momentum gapped below its stop-limit → order unfilled → **manual exit at open** ticket · Compounder gapped down → check invalidators + hurdle (a gap can create an add) |
 | 4 | **Fired stops** | Price crossed a stop → position marked *presumed stopped* → brief asks Zak to confirm the fill |
 | 5 | **Gate transition** (Mondays) | M1 flips only on Friday close · OFF → momentum exit tickets · ON → queue re-armed |
-| 6 | **Triggers & hurdles** | Entry/add tickets for whatever the nightly job armed · blackout, sleeve room, theme entry-cap, add-caps enforced before any ticket is written · every entry ticket names its **account, currency (FX estimate printed), theme, and risk in C$ and % of NAV** · effective-bets count printed on every draft ticket (⚠️ below 4 — §2.2) · **max 2 new-entry tickets per brief** — extras wait in queue order |
+| 6 | **Triggers & hurdles** | Entry/add tickets for whatever the nightly job armed · blackout, sleeve room, theme entry-cap, add-caps enforced before any ticket is written · every entry ticket names its **account, currency (FX estimate printed), theme, and risk in C$ and % of NAV** · effective-bets count printed on every draft ticket (⚠️ below 4 — §2.2) · **unruled names are ruled first** (blind, §3.1) · momentum tickets pass the disqualifier sweep (§3.2) · the evidence block rides every entry ticket (§3.3) · **max 2 new-entry tickets per brief** — extras wait in queue order |
 | 7 | **Unconfirmed stop moves** | Repeat as one line until Zak confirms |
-| 8 | **Compose** | Snapshot first (freshness · NAV + move · **the full blackout wall, holdings included** · tickets as broker-ready pairs · "**You:** …") · context below as needed · written to briefs |
+| 8 | **Learnings line** | Exception-only (§5.8): absent most days, one line when something's brewing, a drafted proposal only when the bar is met |
+| 9 | **Compose** | Snapshot first (freshness · NAV + move · **the full blackout wall, holdings included** · the momentum short-list + compounder roster · tickets as broker-ready pairs · "**You:** …") · context below as needed · written to briefs |
 
 **Entry mechanic ✅ RULED (2026-07-29 · confirmation amended 2026-07-31):** breakout entries execute as **GTC buy stop-limit orders at the pivot** (trigger = pivot · limit = pivot + 2%), placed from the brief when a name reaches BUY state. The volume condition cannot live inside a broker order, so it is judged at EOD under the **breakout-confirmation rule (§3.2)**: confirmed → the pyramid arms · unconfirmed → the pyramid freezes at 50%, three sessions to confirm late, exit only on a close back below the pivot. Pyramid steps 2–3 ship as add stop-limits in the brief once the breakout confirms (both limits at pivot × 1.05 — §3.2).
 
-### 5.2 R2 — Evening stop sheet (weekdays ~20:30 PT)
+### 5.2 R2 — Evening stop sheet (pipeline push, weekdays ~20:30 PT)
 
-Heartbeat (both job windows) → stop deltas → **always exactly one line minimum**:
+Composed by `compose`, delivered by `notify` — no session runs. Heartbeat (both job windows) → stop deltas → **always exactly one line minimum**:
 `✓ stops all placed correctly` · or one line per action — `NVDA · stop 176.20 / limit 170.90` · `AMD · blackout — cancel entry order` · or `⚠️ pipeline red — touch nothing, GTCs stand as placed`.
 The daily line doubles as the pipeline's nightly receipt.
 
-### 5.3 R3 — Saturday deep-dive (~8:00 PT)
+### 5.3 R3 — Saturday letter (pipeline push, ~8:00 PT)
 
-Heartbeat → gate status **and margin to the flip** → top/bottom-5 industry groups with week-over-week deltas → L1-M turnover (names in/out) → **top-3 workups** — each: MCN, state, pivot/stop pair, earnings date, what would make it a BUY → queue changes → **the company we keep: corroboration marks on every buyable name + the reverse sweep of reference-investor holdings we lack, each miss with its reason and Yuna's read** → displacement checks against the +10 rule → **performance line: NAV week-over-week and YTD vs the 30% bar**. Snapshot first, context after, + the queue table. Written to briefs.
+Heartbeat → gate status **and margin to the flip** → top/bottom-5 industry groups with week-over-week deltas → L1-M turnover (names in/out) → **top-3 workups** — each: MCN, state, pivot/stop pair, earnings date, what would make it a BUY → queue changes → **the week's rulings** (every PASS / FAIL, exit, conversion — each with its evidence block) → **the company we keep: corroboration marks on every buyable name + the reverse sweep of reference-investor holdings we lack, each miss with its reason and Yuna's read** → displacement checks against the +10 rule → **performance line: NAV week-over-week and YTD vs the 30% bar**. Snapshot first, context after, + the queue table. Written to briefs and pushed — read-only by design; open a chat only if something itches.
 
 ### 5.4 R4 — Sunday reconciliation (interactive)
 
 Zak provides settled Wealthsimple activity **plus per-account cash balances and available credit per facility** → matched against provisional tickets → price/qty/FX/fees trued up → transactions confirmed → **balances anchored, NAV trued** → shadow-book 30/60/90-day marks recorded as observations → discrepancies flagged in the summary, never silently absorbed.
 
-### 5.5 R5 — Monthly approval (interactive, 1st weekend)
+### 5.5 R5 — Monthly letter (1st weekend)
 
-Funnel output → new bench candidates, each with a **C2 memo**:
+Yuna's letter to Zak — the desk reporting to the board. Composed from the month's ledgers; interactive only where a Zak ruling is required.
+
+**Contents, in order:**
+
+1. **The month vs the bar** — return vs the 30% diagnostic (§2.0 law: a diagnostic, never a trigger) · sleeve observations · any breaches and their causes.
+2. **Rulings scorecard** — every ruling this month, and how earlier ones are marking: shadow-book 30/60/90-day marks on Yuna's PASSes, FAILs, exits, conversions, and picks-under-caps. The scoreboard grades the judge.
+3. **Calibration gauges** — the correlation between how far a name has fallen and how rich a multiple the system permits (near zero is healthy; positive means the screen is paying up for falling knives) · the share of the bench called buyable (a value screen calling most of its own bench cheap is describing itself, not the market) · and the **proposal-direction gauge** (§5.8): the loosen / tighten ratio of Yuna's own proposals against recent results — a desk that only proposes loosening after wins and tightening after losses is describing its mood, not the market. All three grade the judge.
+4. **Funnel output** — new bench rulings, each with its C2 memo (template below, unchanged) ruled blind per §3.1's rulings law; FAILs take 12-month cooldown rows · evictions (rule-driven, reported) · the company-we-keep reverse sweep, each miss with its reason.
+5. **Anniversary re-underwrites** — Gate C2 answered from scratch for any holding at its purchase anniversary, invalidators re-set; ruled and reported.
+6. **Learnings docket** — §5.8 proposals with drafted edit text (exact section, exact old line, exact new line), and the expiry docket of promoted rules the shadow book has stopped supporting.
+7. **Zak's items** — the only part awaiting his ruling: plan edits, formula-version changes, the 15% sizing unlock, leverage posture, and any risk-loosening proposal (§5.8 guardrail). Approvals land via the changelog; rejections are logged with reasons.
 
 > **C2 memo template (target ~200 words):** company + one-line what-it-does · the three Gate C2 questions, two sentences each (does scale strengthen it? gains shared to widen the moat? where does the next dollar go and what does it earn?) · proxy metrics table · serial-acquirer flag if goodwill jumped · owner-FCF note for float and credit-book businesses (reported FCF can be customer float in costume) — **cites the three figures stored on the bench row: reported FCF, the SBC share of it, and the working-capital share of it**; a "materially float" conclusion triggers the §3.1 owner-cash quarantine · **PASS / FAIL + confidence**.
 
-**The blind test:** memos are presented and ruled business-first — Zak records PASS or FAIL on the business **before** the hurdle, the gap, or the CCN is revealed. Only a name whose business passes gets its price judged. The number never gets to argue with the judgment.
-
-→ **annual re-underwrites** for any holding at its purchase anniversary this month (Gate C2 from scratch, invalidators re-set) → evictions list (rule-driven, reported) → audit snapshot: return vs the 30% bar · sleeve observations · breaches · **calibration gauges — the correlation between how far a name has fallen and how rich a multiple the system permits (near zero is healthy; positive means the screen is paying up for falling knives), and the share of the bench called buyable (a value screen calling most of its own bench cheap is describing itself, not the market)** · learnings due for **promotion or expiry** → Zak rules → approvals join the bench, rejections get 12-month cooldown rows.
+The blind test lives in §3.1's rulings law — the business verdict is recorded before price, gap, or CCN is revealed. Only the judge changed.
 
 ### 5.6 Shared session laws
 
@@ -580,13 +601,45 @@ Funnel output → new bench candidates, each with a **C2 memo**:
 - **Every session writes its output to briefs** — a session that produced nothing durable didn't happen.
 - **Summary first, context second.** Succinct by default, never at the cost of needed information — depth always on request. Math lives in the tables.
 - Anything a runbook doesn't cover → flag it in the brief, don't improvise silently.
+- **One-read law:** an interactive chat reads a single prepared payload (`v_session_payload`), then judges — it never crawls tables. Live MCP quotes are the sanctioned exception, for protection and verification only.
+- **Escalation:** when Yuna's confidence is genuinely low, she asks Zak instead of ruling — a question in the brief, logged either way. The §5.7 tripwires always escalate, regardless of confidence.
+
+### 5.7 Tripwires & freeze
+
+Routine approvals are gone, so exception governance has teeth. These page Zak unconditionally, regardless of Yuna's confidence:
+
+- Any hard-cap breach (§2 caps, facility limits)
+- NAV down **10%** from its 30-day high
+- Either §5.5 calibration gauge in alarm
+- Pipeline red two sessions running
+- Any change in facility utilization (draws, paydowns, margin calls)
+
+**Freeze:** at any moment Zak may type **freeze** — a config row halts all new entries and adds, both sleeves, until he types the lift. Protective actions never freeze: stops, exits, and gap drills run regardless. Every freeze and lift is a logged observation.
+
+### 5.8 The learning loop
+
+The layer §1 promised and the TODO deferred, now law. The ladder, one sentence per rung:
+
+1. **Observation** — anything notable is logged the day it happens (a pattern, a miss, a data wart, a friction); cheap, silent, append-only.
+2. **Learning** — a repeated observation becomes a named hypothesis with a scorecard, and **every learning must name its falsifier — the condition that kills it. No falsifier, no learning.**
+3. **Proposal** — a learning with evidence becomes a drafted plan edit: exact section, exact old line, exact new line.
+4. **Zak's ruling** — approve or reject; approvals become law via the changelog. The law never changes any other way.
+5. **Expiry** — a promoted rule the shadow book stops supporting goes on the expiry docket; rules re-earn their place or die (§1).
+
+**Two lanes.** *Mechanics* (data hygiene, job reliability, brief format, cost) ride the fast lane — flagged, and shipped as ordinary dev work when they move no plan-stated number. *Strategy and formulas* (weights, thresholds, gates) ride the slow lane — evidence-gated; post-cutover each change bumps the formula's version (§3.3) so the shadow book can measure new against old.
+
+**Promotion bar (provisional):** three independent occurrences, or shadow-book support — the bar itself is provisional and subject to this layer.
+
+**Surfacing:** a **Learnings** line in the morning brief, exception-only — absent most days, one line when something's brewing; full proposals with drafted text arrive in the monthly letter unless urgent.
+
+**Guardrails:** any proposal that **loosens risk** (wider stops, higher caps, more leverage headroom) always routes as a risk-posture item — Zak's under §4.5, evidence bar raised, never fast-tracked. And the **proposal-direction gauge** (§5.5) tracks the loosen / tighten ratio of Yuna's proposals against recent results, grading the desk's mood against the market.
 
 
 ---
 
 ## Section 6 — PHASE 0: INITIAL DEPLOYMENT
 
-One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a conforming book. Steady-state rules assume positions were born inside the system; Phase 0 re-underwrites everything currently held **as if it were being bought today**. Any position may be sold to reach the ideal book. After Step 5 the system is simply in **steady state** — if nothing else is buyable yet, that's fine; the machine waits for its prices.
+One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a conforming book. Steady-state rules assume positions were born inside the system; Phase 0 re-underwrites everything currently held **as if it were being bought today**. Any position may be sold to reach the ideal book. After Step 5 the system is simply in **steady state** — if nothing else is buyable yet, that's fine; the machine waits for its prices. **Phase 0 is driven by Yuna:** she scores, rules, and delivers the keep / exit / resize slate as tickets with full evidence blocks; Zak executes. The buy-it-today bar is unchanged.
 
 | Step | What happens |
 |---|---|
@@ -614,14 +667,15 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 **Spec still to write**
 - **Float, priced on the balance sheet.** The owner-cash quarantine is the interim rule; the real treatment subtracts customer funds from the value rather than adjusting cash flow (the quick cash-flow clamp was tested and rejected — it punished the wrong companies). Design first, then its own announced edit.
 - **Reinvestment measurement.** Today's formula reads the best asset-light compounders as "unmeasurable" — D&A above capex plus negative working capital computes reinvestment of exactly zero — which is why nearly the whole bench falls back to revenue growth. Fixing what we measure is worth more than anything tuned downstream of it. Design first, then its own announced edit.
-- **Learnings promotion & expiry.** The vision says observations become learnings through repetition and expire unless re-earned — the thresholds aren't written. Best written once real observations accumulate, rather than invented now.
 
 **Remaining work**
 - [x] Subscribe EODHD All-In-One (monthly first) — *done 2026-07-30*
 - [x] Create Supabase project · add the MCP connector · **rotate the database password** (it touched chat) — *pre-flight passed 2026-07-30: all entitlements verified live*
 - [x] Create private GitHub repo (**`yuna`**, private, README) · add **Actions repository secrets**: `EODHD_API_KEY` + `DATABASE_URL` (Supabase *session-pooler* URI carrying the rotated password — set in the UI, never through chat) — *done 2026-07-31*
-- [ ] Build phases A–F (§4.8) — *A–B complete, C–E in flight 2026-07-31*
-- [ ] Execute Phase 0 (§6)
+- [ ] Build phases A–F (§4.8) — *A–B complete, C–E in flight; C now includes the `rulings` + `learnings` migrations, `compose` + `notify`, the morning-chat task*
+- [x] Secrets & channel — *resolved 2026-08-05: no model key and no push credential — the voice layer and delivery are the project's scheduled sessions on Zak's Claude plan; `config.push_channel` = `cowork`*
+- [ ] First rulings pass — the at-hurdle backlog (36 names at last count), then rolling
+- [ ] Execute Phase 0 (§6) — Yuna delivers the slate, Zak executes
 - [ ] Cutover — write the final strategy doc and Yuna's operating guide out of this plan, archive the old docs
 
 **Done**
@@ -629,6 +683,7 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 - [x] Mechanics, session runbooks, deployment protocol — §4–6
 - [x] Data vendor selected, plan verified against vendor docs
 - [x] All formulas specified — CCN · MCN · Hurdle · M1 (all v1 until release — §3.3)
+- [x] Learnings promotion & expiry — resolved into law as §5.8 (E13, 2026-08-04)
 - [x] D1–D7 resolved in the sections · D9 and D11 absorbed by Phase 0's strict rule
 
 ---
@@ -648,6 +703,8 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 
 | Date | Entry |
 |---|---|
+| 2026-08-05 | **The speak layer runs on the plan, not the meter.** Zak's ruling: no `ANTHROPIC_API_KEY`, no metered model calls in the pipeline. `compose` becomes a mechanical renderer — clinical sections, every number exact, exactly the data layer §5.0 demands — and the §5.0 voice is applied where Claude already runs on Zak's subscription: the scheduled sessions inside the Yuna chat/cowork project, which read the composed row from Supabase and speak it. `push_channel` = `cowork` — the Routines are the doorbell, so the push-channel credential line dies too. §4.2's verb sentence, §4.8's secrets list, and the TODO amended accordingly. |
+| 2026-08-04 | **The handover batch — E1–E13.** Judgment transfers to Yuna inside the gates: C2 memos ruled blind by Yuna, bench membership, evictions, exit reviews, conversions, and entry timing — every ruling logged to a new `rulings` ledger with its evidence block (score · filings · outside world), binding on later sessions, reversible only with logged new evidence. Zak retains execution, the law, risk posture, and Sundays; tripwires and the "freeze" switch added (§5.7). Delivery legislated: `compose` and `notify` join §4.2; the morning chat replaces R1's session; stop sheet and deep-dive become pipeline pushes; R5 inverts into Yuna's monthly letter. §4.5 shrinks to six items plus the freeze. Phase 0 driven by Yuna, strictness unchanged. E13 activates the learning loop the TODO deferred (§5.8): observations → learnings (each carrying its falsifier) → proposals → Zak's ruling → promotion or expiry; mechanics fast lane, formulas slow lane with version bumps measured by the shadow book; daily surfacing exception-only; promotion bar provisional at three occurrences or shadow-book support; loosening proposals route as risk items; proposal direction tracked as a calibration gauge. |
 | 2026-08-02 | **QA batch — seven rulings after the go-live review.** Glossary Bar → ten years or more · short-history fair multiple pinned at **fewer than 12 priced quarters** (code follows, 8 → 12) · §3.1 now leads with the honest sentence — never above the stock's own median multiple, cheaper still when credited growth can't deliver 15% — and the provably inert 25% clause struck from the hurdle bullet (the waterfall's 25% engine cap untouched) · **§4.2 rewritten to the verb architecture: ingest → score → check → speak** — six jobs, one responsibility each; retry = the same ingest scheduled twice, exits-if-green; score is a pure function of the database; check writes nothing but its own report; **a red pre-flight blocks dispatch**; dispatch = score → check → speak · §4.5 step 5 gains current position quantities per account · stale magnitudes made durable (L0 "low thousands"; bench described by composition, not count) · TODO's phantom 93/108 → "nearly the whole bench" · **raw vs adjusted pinned**: signals on adjusted closes, valuation on raw. Dev change set issued separately. |
 | 2026-08-02 | **Process rulings — the blind test, the company we keep, the calibration gauges.** R5 rules business-first: PASS/FAIL recorded before price, gap or CCN is revealed — the number never argues with the judgment. Seven reference investors named in config (Fundsmith · Akre · Polen · TCI · Pershing Square · WCM · Giverny); weekly, from holder records already stored: buyable and proposed names marked corroborated at ≥1 holder-match, uncorroborated names cannot be approved until Zak reads the findings; the reverse sweep lists any L0 name held by ≥2 reference investors that our bench lacks, with the exact reason it missed. A mirror, never a source. Two calibration gauges join the audit and `verify`: drawdown-vs-permitted-multiple correlation and the share of the bench called buyable — the falling-knife failure becomes a standing alarm. Proposed and **rejected**: a ten-memo cap per approval session ("approving as many as needed is part of doing the work") and a throttle diversity preference (the entry-only theme cap already blocks the case that matters). |
 | 2026-08-02 | **Plain-cash rulings — SBC is a cost · price never exceeds history · float quarantined · plain-language law.** Four-school adversarial vetting of the entry hurdle, two claims re-verified against the live solver and our own stored filings. The working diagnosis was corrected first: the drag floor was NOT the mechanism (at a 25%-growth hurdle the drag is 11.8%/yr — fully active); the mechanism is the growth cap asserting more growth than the fair multiple can support (a 30× exit at a 15% requirement is a statement the business grows 11.67%, by h = 1/M + g). Fix introduces no constants: growth capped additionally at (0.15 − 1/fair), so the hurdle provably never exceeds the fair multiple and collapses to closed form. FCF redefined net of stock-based compensation everywhere (measured on our own filings: SBC is 78% of TTD's reported FCF, 92% of MELI's — added back inside CFO, deducted nowhere, while the share count stays frozen and C1 polices issuance). Short-history fair multiple → flat 25× (lower-of-current was algebraically the filing-date close). Owner-cash quarantine: float/credit-book names scored but never ticketed until the balance-sheet treatment lands; §5.5's owner-FCF note becomes computable from three stored figures. Plain-language law added to the header. TODO gains the float balance-sheet treatment and the reinvestment-measurement fix as authorized design work. Registered predictions: no hurdle rises · cap-pinned names fall 47–55% · at-or-below-hurdle 48/65 → 34–42 before SBC compounds it · falsifier: if it stays ≥ 45, stop — the remaining generosity is elsewhere. |
@@ -708,8 +765,11 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | Effective bets | 1 ÷ Σ wᵢwⱼρᵢⱼ — how many truly independent positions the book holds once correlation is counted (§2.2) |
 | Effective shares | Vendor USD market cap ÷ the close on the cap's `as_of` date (the vendor's stamp; fetch date when none given), frozen with the filing — the hurdle's share count (§3.1) |
 | EOD | End-of-day — one price record per stock per day, after the close |
+| Evidence block | The three lines on every ruling and entry ticket — what the score says, what the filings say, what the outside world says (§3.3) |
 | FCF | Free cash flow — cash from operations minus capital spending **minus stock-based compensation**. Pay handed out as shares is pay; and because the hurdle's share count is frozen at the filing, the dilution that funds it appears nowhere else — un-deducted, it is free money. Applied everywhere the plan says FCF: Gate C1's positive-FCF test, cash conversion, TTM FCF, and the historical quarterly P/FCF series (same basis throughout, or the median is a units error). A quarter with no reported SBC falls back to reported FCF and stamps the row (§3.3) |
+| Falsifier | The named condition that kills a learning — required at birth; no falsifier, no learning (§5.8) |
 | Final-contraction low | The lowest low of a base's last 10 sessions — the natural stop shelf under a breakout (§3.2) |
+| Freeze | Zak's kill switch — one word halts all new entries and adds until lifted; protective actions never freeze (§5.7) |
 | Growth-derived | Engine scored as observed 3-yr revenue growth, capped at 25%, when the cash-flow engine is unmeasurable or fails the cross-check; carries §3.3's guardrails (§3.1) |
 | GTC | Good-til-cancelled — an order that stands until filled, cancelled, or expired (90 days at Wealthsimple) |
 | HELOC | Home equity line of credit — readvanceable, so it's exempt from the never-increase-into-strength rule |
@@ -717,20 +777,25 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | Idempotent | Safe to run twice — a re-run updates rather than duplicates |
 | Invalidator | A named event, written at entry, that breaks a compounder thesis (§3.1) |
 | L0–L3 | The funnel layers: universe → bench and candidates → queue → the book (§3.0) |
+| Learning | A repeated observation promoted to a named hypothesis with a scorecard and a falsifier — the middle rung of §5.8's ladder |
+| Letter | Yuna's Saturday and monthly reports — pushed, read-only unless something itches (§4.4) |
 | LOC | Line of credit — here, the TFSA-secured facility; callable, so capped at 50% utilization |
 | M1–M4 | The momentum gates: market stage · trend template · setup · earnings acceleration (§3.2) |
 | Market gate | M1 — the sleeve-wide on/off switch based on the S&P 500's stage |
 | MCN | Momentum Conviction Number — the 0–100 score ranking momentum candidates (§3.2) |
 | MCP | The connector standard letting Yuna's sessions call outside services (EODHD, Supabase) |
+| Morning chat | The pre-composed weekday brief waiting in the project — spawned by a minimal task; typing "morning" rebuilds it (§5.1) |
 | NAV | Net asset value — all assets across all accounts minus all debt, in CAD. The scorecard (§2.0) |
 | NOPAT | Net operating profit after tax — EBIT × (1 − tax rate); the numerator of ROIC |
 | PAT | Personal access token — a scoped, revocable key for pushing code to the repo |
 | Pivot | The top of a base — the price whose break defines a breakout; at least 25 sessions old by construction (§3.2) |
 | Provisional / confirmed | Penciled in from chat or a ticket flip / trued up against the broker's settled record on Sunday |
+| Push channel | The phone-native delivery service `notify` uses (Config `push_channel`) — the doorbell; a missing push is itself the alarm (§4.4, §4.7) |
 | Quarantine | Holding a suspicious price out of use until two sources agree (§4.1) |
 | Reinvestment rate | The share of profit put back into the business — the other half of the compounding engine |
 | RLS | Row-level security — access rules enforced inside the database itself |
 | ROIC | Return on invested capital — what the business earns on the money tied up in it |
+| Ruling | A logged name-level verdict by Yuna — blind where §3.1 requires it, carrying its evidence block, binding on later sessions (§3.1) |
 | R² | How tightly a trend fits its own line — high means steady, low means erratic (§3.2) |
 | Shadow book | The record of every pass and every exit, marked at 30/60/90 days — how formulas earn their weights |
 | Sleeve | One of the two strategies — Compounders or Momentum — each with its own capital, rules, and exits |
@@ -741,5 +806,6 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 | Tactical lot | A crash-protocol purchase tagged at buy time as momentum's future funding source (§3.3) |
 | Theme | A shared macro driver that would make positions fall together — assigned by judgment at ticket time, never by a data field (§2.2) |
 | Trend template | Minervini's six price conditions a momentum candidate must pass (§3.2) |
+| Tripwire | An unconditional escalation to Zak — hard-cap breach, −10% NAV, gauge alarm, double red, facility change (§5.7) |
 | Upsert | Insert-or-update in one step; how idempotency is implemented |
 | View | A saved query that reads like a table — `v_book`, `v_queue`, `v_bench` are built for human browsing |
