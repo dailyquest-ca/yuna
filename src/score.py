@@ -218,7 +218,16 @@ def score_bench(conn, hb):
                  "reports in a foreign currency or trades as a depositary receipt — "
                  "excluded pending the §3.0 one-currency conversion (roadmap Part 4)"),
             cohort=("large" if (mcap or 0) >= boundary else "small"),
-            hurdle_price=hp, fcf_yield=(fcf / mcap if fcf and mcap else None),
+            # §3.1: "FCF yield = TTM FCF ÷ market cap at P" — and the cap at P uses the FROZEN
+            # effective shares, so the yield stored beside last_close must be priced AT last_close.
+            # fcf/mcap was the yield at the filing's as_of close wearing today's date: `check`
+            # reconstructs FCF/share as fcf_yield x last_close, so every name whose quote had
+            # drifted 0.5% off its as_of close flagged as a hurdle mismatch — 106 of them, 11
+            # apparently overstated, on 2026-08-05. The vendor cap remains the fallback only
+            # where the frozen share count never got derived.
+            hurdle_price=hp,
+            fcf_yield=(fcf / (eff_shares * px) if fcf and eff_shares and px
+                       else (fcf / mcap if fcf and mcap else None)),
             engine_growth=g, fair_multiple=fair,
             derating_drag=(max(0.0, 1 - (fair / pfcf_cur) ** 0.2) if fair and pfcf_cur else None),
             last_close=px, gap_to_hurdle=gap,
