@@ -2,23 +2,29 @@
 
 The pipeline speaks first (§4.2: **ingest → score → check → speak**, where `compose` writes the
 words and `notify` proves they exist); judgment happens in two interactive chats and two letters
-(§4.4, 2026-08-04). Each runbook here is the session's code: same review, same care as a formula.
+(§4.4, 2026-08-04). Each runbook is that session's code: same review, same care as a formula.
 A session that did not write its `briefs` row did not happen.
 
-**These five files are a mirror.** §4.8: the scheduled sessions have no repo checkout by design —
-a session that needs the repo to know the law has two laws — so the runbooks they actually read
-are the Project docs, and these copies exist for whoever is reading the code. They are the
-**read-side contract this repo must satisfy**: `compose` writes what these sessions read, and if
-it stops emitting `detail.composed='true'` or renames a `kind`, the sessions go silent and the
-only symptom is a missing message.
+**The runbooks are not in this repo, and that is the design** (§4.8, ruled 2026-08-05): *the
+scheduled sessions have no repo checkout by design — a session that needs the repo to know the law
+has two laws.* R1–R5 are Project docs, read directly by the Cowork sessions that execute them. Copies
+lived here until 2026-08-05 and were deleted the day they were found a full ruling out of date,
+still quoting crons that no longer exist.
 
-| Surface | When (PT) | Runbook | Reads |
+What this file is instead: **the read-side contract this repo must satisfy.** `compose` writes what
+those sessions read. If it stops emitting `detail.composed='true'`, renames a `kind`, or misses its
+window, the session goes silent and the only symptom is a missing message.
+
+| Surface | When (PT) | Runbook (in the Project) | What it reads |
 |---|---|---|---|
-| Morning chat | ~06:00 Mon–Fri | `R1_preopen.md` | `v_session_payload` — one row |
-| Stop sheet (push) | ~midnight, after the chain | `R2_stopsheet.md` | `briefs` `kind='stopsheet'`, composed, within 3h |
-| Saturday letter (push) | ~10:00 Sat | `R3_deepdive.md` | `briefs` `kind='deepdive'`, composed, within 8h |
-| Sunday reconciliation | ~09:00 Sun · interactive | `R4_reconcile.md` | `v_session_payload` — one row |
-| Monthly letter | Sundays ~11:00, if the month has none | `R5_approval.md` | `briefs` `kind='monthly'` — its own month guard |
+| Morning chat | ~06:00 Mon–Fri | R1 | `v_session_payload` — one row, everything on it |
+| Stop sheet (push) | ~midnight, after the chain | R2 | `briefs` `kind='stopsheet'`, `detail->>'composed'='true'`, within 3h |
+| Saturday letter (push) | ~10:00 Sat | R3 | `briefs` `kind='deepdive'`, composed, within 8h |
+| Sunday reconciliation | ~09:00 Sun · interactive | R4 | `v_session_payload` — one row |
+| Monthly letter | Sundays ~11:00, if the month has none | R5 | `briefs` `kind='monthly'` — and that row is the month guard |
+
+Change a `kind`, a composed flag or a window on the left, and a session on the right stops speaking.
+Nothing in CI can catch that, because the other half of the contract is not in this repository.
 
 **The automated Claude sessions live inside the Yuna chat/cowork project** — ruled 2026-08-05.
 The Routines above fire fresh sessions in the project's environment, carrying its Supabase and
@@ -53,14 +59,17 @@ freshness line — a session that beats the chain says so rather than speaking s
 tickets are held only by old bars, a failed price-critical job, or a chain that ran out of order
 (§5.6).
 
-## The Routines are part of the system — keep them in sync
+## The sessions are part of the system — keep them in sync
 
-Each Routine's prompt points at `docs/yuna_plan.md` and the runbook beside it. The prompt is
+Each session's prompt points at the plan and at its runbook, both Project docs. The prompt is
 deliberately a **pointer, not a copy**: the runbook is the code, and a prompt that restates it
 drifts from it — silently, and in the direction of whatever the prompt was written against.
 
-**So: any change to a runbook, to §4.4, or to §5 is not finished until the Routine prompt agrees
-with it.** Review it the way you review a migration.
+**So: any change to a runbook, to §4.4, or to §5 is not finished until the session prompt agrees
+with it.** Review it the way you review a migration. And the reverse edge is the one this
+repository owns: a change *here* to what `compose` writes — a `kind`, a composed flag, a window,
+a section — is not finished until the runbook that reads it agrees, and that document is not in
+this repository. It is the one dependency no test can hold.
 
 The prompts also carry one exclusivity rule, because a session that reaches outside this system
 cannot be audited: the plan, the runbooks and the Supabase project are the whole world. Anything
