@@ -3,6 +3,7 @@
 *Updated: 2026-08-05 (UTC−7)*
 **Opened:** 2026-07-29 · **Owner:** Zak (law, risk, execution) · Yuna (research, rulings, tickets)
 **Rule:** This document is law. Changes only by announced edit — exact section, exact old line, exact new line, Zak's approval — and every edit bumps the Updated stamp.
+**Authoritative copy:** the copy in the Project is law (ruled 2026-08-05); `docs/yuna_plan.md` in the repo is its mirror — the repo builds toward the plan, never the reverse, and where they disagree the Project wins and the session says so.
 **Plain-language law:** every rule in this document must be explainable to Zak in one plain sentence. A rule that fails that test is defective — the rule gets rewritten or deleted, never the standard.
 
 ---
@@ -166,7 +167,7 @@ Runs cascade upward — lower tiers first, each feeding the next.
 |---|---|
 | **Daily** pre-open | L3 stops & trails · L1-C hurdle check · L2 trigger check · market gate · event scan |
 | **Weekly** (Sat) | Group RS → L1-M rebuild → MCN → L2 re-rank & rewrite triggers → workups on top 3 |
-| **Monthly** (1st weekend) | L0 rebuild → compounder funnel (§3.1) → **Gate rulings (Yuna, §3.1)** → the letter (R5) |
+| **Monthly** (first Sunday that finds the work undone) | L0 rebuild → compounder funnel (§3.1) → **Gate rulings (Yuna, §3.1)** → the letter (R5) |
 | **Annual** | Re-underwrite per compounder — Gate C2 answered from scratch, invalidators re-set |
 
 A compounder is touched at three speeds: **daily** (hurdle, invalidators, gaps) · **every filing** (CCN recompute, snapshot comparison, sub-55 memo) · **annually** (the full re-underwrite, Yuna-ruled — deliberately rationed, because frequent deep reviews are how investors talk themselves out of their best positions).
@@ -375,9 +376,9 @@ Displacement is **within-sleeve only** — a momentum 85 never displaces a compo
 
 | Box | In one line | Full detail |
 |---|---|---|
-| **Data** | EODHD All-In-One: bulk prices nightly · FX · fundamentals on filing · earnings calendar. Bars kept 3 years, fundamentals forever | → §4.1 |
-| **Compute** | One sentence — **ingest → score → check → speak**. Eight scheduled jobs (`ingest-daily` ×2 · `ingest-filings` · `ingest-universe` · `score` · `check` · `compose` · `notify` · `backup`) plus dispatch-only tooling | → §4.2 |
-| **Store** | One Supabase Postgres project — 11 tables (universe → book → briefs) + human views for browsing | → §4.3 |
+| **Data** | EODHD All-In-One: bulk prices nightly · FX · fundamentals on filing · earnings calendar. Bars kept 10 years, fundamentals forever | → §4.1 |
+| **Compute** | One sentence — **ingest → score → check → speak**. Eight jobs — four scheduled (`ingest-daily` ×2 · `ingest-filings` · `ingest-universe` · `backup`), four chained off them (`score` · `check` · `compose` · `notify`) — plus dispatch-only tooling | → §4.2 |
+| **Store** | One Supabase Postgres project — the system of record (universe → book → briefs) + human views for browsing | → §4.3 |
 | **Judge** | Two chats (weekday morning · Sunday) + two letters (Saturday · monthly); the stop sheet and all alarms are pipeline pushes. Yuna rules names; Zak rules law and risk. Runbooks live in Section 5 | → §4.4 |
 | **Execute** | Zak places every order: entry pairs · stop moves · gap exits · fill confirmations · monthly law-and-risk rulings | → §4.5 |
 | **Protect** | GTC stop-limits living at Wealthsimple — protection that never sleeps with the pipeline | → §4.6 |
@@ -424,14 +425,18 @@ The compute layer is one sentence: **each night the machine writes the world dow
 |---|---|---|
 | **`ingest-daily`** | Mon–Fri **02:00 UTC** (≈ 6–7 PM PT), scheduled again **03:00 UTC** — the second run reads the runs table and exits if the night is already green | Write the world down: the day's bars (bulk) + FX + corporate actions → quarantine. Touches only source-of-truth tables; derives nothing |
 | **`ingest-filings`** | With the weekly sweep, and on filing detection | New filings → fundamentals fields re-extracted → effective shares frozen (§3.1) |
-| **`ingest-universe`** | 1st Sat **10:00 UTC** | Rebuild L0 from listings + liquidity filters |
-| **`score`** | After every ingest · Sat **12:00 UTC** runs the full weekly rank | Every derived number, one writer: Gate C1 → CCN → hurdles → stops & trails → book revalued from the latest bars — **every holding's valuation price must equal its latest bar; any mismatch fails the run** → NAV snapshot → market gate → event scan (earnings ≤ 5 days, gaps ± 7%) → group RS → L1-M → MCN → queue re-rank → triggers → arming (writes `armed`). **A pure function of the database — every number a session reads was written here** |
-| **`check`** | After every `score` · at every session dispatch | Every integrity assertion + the pre-flight: gate state, offerable count under caps and throttle, start-low status, protective orders, §4.5-confirmation coverage of the book. **Writes nothing but its own report.** Ambers print at the top of the brief; **a red blocks the dispatch** |
+| **`ingest-universe`** | Sat **10:00 UTC** — rebuilds if the month's universe is unbuilt, else exits | Rebuild L0 from listings + liquidity filters |
+| **`score`** | Chained to every ingest by `needs:` — no cron of its own · the Saturday chain runs the full weekly rank | Every derived number, one writer: Gate C1 → CCN → hurdles → stops & trails → book revalued from the latest bars — **every holding's valuation price must equal its latest bar; any mismatch fails the run** → NAV snapshot → market gate → event scan (earnings ≤ 5 days, gaps ± 7%) → group RS → L1-M → MCN → queue re-rank → triggers → arming (writes `armed`). **A pure function of the database — every number a session reads was written here** |
+| **`check`** | Chained to every `score` by `needs:` · and at every session dispatch | Every integrity assertion + the pre-flight: gate state, offerable count under caps and throttle, start-low status, protective orders, §4.5-confirmation coverage of the book. **Writes nothing but its own report.** Ambers print at the top of the brief; **a red blocks the dispatch** |
+| **`compose`** | Chained to every `check` by `needs:` | Writes the words down, mechanically and keyless: the stop sheet + the next morning's brief sections nightly; the Saturday letter sections weekly. The monthly letter stays with the R5 session — rulings are judgment |
+| **`notify`** | Chained to every `compose` by `needs:` | Proves the composed rows exist and are deliverable; red when they aren't (§4.7). Writes nothing but its own runs row |
 | **`backup`** | 1st Sat **14:00 UTC** | Dump of everything **except daily bars** (a vendor-re-pullable cache), compressed and committed to the repo — the backup **and** GitHub's 60-day keep-alive in one |
 
 **Dispatch is a sequence, not a moment:** `score` → `check` → `compose` → `notify` — every word the pipeline speaks reads freshly derived numbers, and a red `check` ships nothing but the stale banner and protective lines. Interactive chats read the same composed payload (one read — §5.6) and never re-derive it.
 
-**Clock convention:** stored and scheduled in **UTC** · planned around market time (**ET**) · quoted to Zak in **PT**. GitHub's cron ignores daylight saving while ET and PT shift together, so these UTC picks carry slack and are verified against **both** clock regimes — the ordering `ingest-daily` → `score` → `check` → `compose` → `notify` (stop sheet ~8:30 PM PT · brief ~6:00 AM PT) holds year-round, with the reasoning commented in the workflow files. On the 1st Saturday `ingest-universe` runs before the weekly rank, so the week's rankings use the fresh universe.
+**Clock convention:** stored and scheduled in **UTC** · planned around market time (**ET**) · quoted to Zak in **PT**. GitHub's cron ignores daylight saving while ET and PT shift together, so every appointment is verified against **both** clock regimes. **The chain has no clock; the sessions keep appointments** (ruled 2026-08-05). Only the ingests are scheduled — `score` → `check` → `compose` → `notify` chain off them by `needs:` in `pipeline.yml`, so the ordering is a data dependency and cannot invert however late Actions queues the night. **Order and currency are the guarantees; punctuality is not.** Each session fires at a fixed hour chosen to sit after the chain and opens with the freshness line — a session that beats the chain says so rather than speaking stale. On the Saturday it rebuilds, `ingest-universe` runs before the weekly rank, so that week's rankings use the fresh universe.
+
+**Monthly work is guarded by whether it has run, never by the date** (ruled 2026-08-05). `ingest-universe` and the R5 letter both fire weekly and exit if the month's work already exists — cron cannot express "first Saturday" or "first Sunday", and a date-keyed guard skips the month in silence when the firing is missed. A missed month is picked up the following week instead of lost.
 
 ### 4.3 Store — the database
 
@@ -439,12 +444,20 @@ One Supabase Postgres project. **Everything lives here, including L0**; the repo
 
 | Table | Holds | Mode |
 |---|---|---|
+| prices | Daily bars, raw + adjusted, 10-year window (§4.1) | append |
+| fundamentals | One row per (ticker, filing date) — extracted fields + raw filing `jsonb`, kept forever (§4.1) | append |
+| earnings | Report dates — the blackout and the interrupts read this | overwrite |
+| corporate_actions | Splits and dividends — each one triggers a per-name history re-pull | append |
 | universe (L0) | a few thousand names + filters | overwrite |
 | bench | top-60 ranked + holdings + unranked residents · CCN + components · hurdle · owner-FCF disclosure (reported FCF, SBC share, ΔWC share) · corroboration (which reference investors hold it) · C2 status · approval | overwrite |
 | candidates | 150 momentum · MCN · BUY/WAIT · pivot/stop | overwrite |
 | queue | ~20 pre-written triggers | overwrite |
 | armed | The night's arming decisions — every trigger the job proposed, stamped with its run id | append |
+| gate_state | The M1 latch — it holds its state until the opposite condition fires (§3.2) | append |
+| group_strength | Industry-group 6-month returns — the MCN's third component | overwrite |
+| quarantine | Suspicious prints held out of use until two sources agree (§4.1) | append |
 | book | Positions · lots (core/tactical) · stops · theme · thesis + invalidators · entry snapshots | overwrite |
+| accounts / balances | The account register · and Sunday's anchor: per-account cash by currency, drawn and available credit per facility (§5.4) | overwrite / append |
 | tickets | proposed → approved → filled (provisional/confirmed) → cancelled | append |
 | transactions | Every confirmed fill | append |
 | observations | Passes, exits, gate flips, C2 calls · marked 30/60/90d | append |
@@ -452,23 +465,26 @@ One Supabase Postgres project. **Everything lives here, including L0**; the repo
 | learnings | The §5.8 ladder — observation counts, hypothesis + falsifier, lane, scorecard, status (observation → learning → proposal → promoted / expired) | append |
 | briefs | Daily/weekly/monthly outputs | append |
 | nav_snapshots | Daily NAV, provisional until Sunday | append |
+| backtest_runs / trades / equity | Phase E output, graded per §4.8's backtest-honesty rule | append |
 | config / runs | Weights, thresholds, versions (changes = rows) · heartbeat | append |
 
 - **Human views** (`v_book`, `v_queue`, `v_bench`) shape what Zak browses in Studio — sorted, joined, readable.
 - **Guard triggers** on computed tables (universe, candidates, bench, queue, book): writes are rejected unless made by a job. Sessions may write only briefs, tickets, observations, rulings, learnings, and config — "Yuna never computes scores by hand," enforced by the schema, not by promise.
-- **The plan is law; config is its runtime copy.** Any config change that moves a plan-stated number requires the announced plan edit first — a config row never quietly overrules this document.
+- **The plan is law; config is its runtime copy.** Any config change that moves a plan-stated number requires the announced plan edit first — a config row never quietly overrules this document. `config` is an append ledger, so a key appears once per ruling and **the latest row wins** — readers take the newest, never the first.
 
 ### 4.4 Judge — chats & letters
 
 The pipeline speaks first (§4.2 `compose` + `notify`); judgment happens in two interactive chats and two letters. Every interactive chat reads a single prepared payload (`v_session_payload` — the one-read law, §5.6), never computes scores by hand, and always produces output even when the news is "nothing." The full runbooks are **Section 5**.
 
+**All five surfaces run as Cowork scheduled sessions inside this Project** (ruled 2026-08-05) — they carry the Project's Supabase and EODHD connectors with no per-run authorization, read the plan and their runbooks (`runbooks/R1`–`R5`) as Project docs, and Zak answers them in the chat they open. The pushes are still pushes: composed mechanically, nothing asked of him.
+
 | Surface | When (PT) | What happens | Runbook |
 |---|---|---|---|
-| **Stop sheet** | ~8:30 PM Mon–Fri | Pipeline push, no session: `✓ stops all placed correctly` or the moves — doubles as the nightly receipt | R2 |
+| **Stop sheet** | ~midnight after the chain — covering Mon–Fri sessions | Pipeline push: `✓ stops all placed correctly` or the moves — doubles as the nightly receipt. Protective GTCs live at the broker and never wait on it (§4.6) | R2 |
 | **Morning chat** | ~6:00 AM Mon–Fri | Pre-composed brief waiting in this project (minimal scheduled task, one read); typing **morning** in any project chat rebuilds it — the fallback that always works. Yuna overlays live quotes, rules anything newly buyable, ships tickets | R1 |
-| **Saturday letter** | ~8:00 AM Sat | Pipeline push: gate + margin, groups, the week's rulings, workups, performance vs the 30% bar. Read-only unless something itches | R3 |
-| **Sunday reconciliation** | Sun morning · interactive | Zak's five minutes: balances in, fills confirmed, NAV trued | R4 |
-| **Monthly letter** | 1st weekend | Yuna's letter: rulings scorecard, calibration gauges, evictions, re-underwrites, learnings proposals. Zak rules **only** the law and risk items in it | R5 |
+| **Saturday letter** | ~10:00 AM Sat | Pipeline push: gate + margin, groups, the week's rulings, workups, performance vs the 30% bar. Read-only unless something itches | R3 |
+| **Sunday reconciliation** | ~9:00 AM Sun · interactive | Zak's five minutes: balances in, fills confirmed, NAV trued | R4 |
+| **Monthly letter** | Sundays ~11:00 AM — writes if the month has no letter yet | Yuna's letter: rulings scorecard, calibration gauges, evictions, re-underwrites, learnings proposals. Zak rules **only** the law and risk items in it | R5 |
 
 **Format law: summary first, context second.** Succinct by default, never at the cost of needed information — depth always on request, no hard word caps. Every output opens with the freshness line; **stale data ⇒ no new tickets.** All outputs stored in `briefs`.
 
@@ -493,9 +509,9 @@ The pipeline looks at prices once a night; an 8% stop can be breached by lunch. 
 
 ### 4.7 Health — the heartbeat
 
-- Every job writes one row to `runs`: job, started, finished, **stage-level status**, rows written, calls used, errors. A job that half-fails goes **amber**, not green — downstream sessions treat the affected domain as stale.
+- Every job writes one row to `runs`: job, started, finished, **stage-level status**, rows written, calls used, errors. A job that half-fails goes **amber**, not green — downstream sessions treat the affected domain as stale. **Schedule drift is not a half-failure** (ruled 2026-08-05): it prints as `late: <job> +NNNm` on the freshness line, and never turns a job amber.
 - All timestamps and `as_of` stamps are **UTC**.
-- Every output opens with the freshness line: `data <date> close ✓ all green` or `⚠️ <job> failed — stale N days`.
+- Every output opens with the freshness line: `data <date> close ✓ all green` · `⚠️ <job> failed — stale N days` · `late: <job> +NNNm` (informational — it blocks nothing).
 - The evening one-liner doubles as the pipeline's nightly receipt.
 - **A missing message is itself the alarm** — the briefs are pushes Zak expects; silence means something died. Stale data ⇒ no new tickets, protective moves only.
 
@@ -510,7 +526,7 @@ The pipeline looks at prices once a night; an 8% stop can be breached by lunch. 
 | **E** | Backtest job | B |
 | **F** | Cutover — current book into the database · Section 6 Phase 0 executes | C |
 
-**Where built:** this project first — the sandbox writes and tests code on sample data, pushes to GitHub, reads Actions logs to debug. Claude Code is an optional accelerator later; same repo either way. The repo README mirrors the §4.0 architecture table and points back to this document — a future reader understands the system without either of us.
+**Where built:** this project first — the sandbox writes and tests code on sample data, pushes to GitHub, reads Actions logs to debug. Claude Code is an optional accelerator later; same repo either way. The repo README mirrors the §4.0 architecture table and points back to this document — a future reader understands the system without either of us. **The scheduled sessions have no repo checkout by design** — a session that needs the repo to know the law has two laws.
 
 **Security:** Yuna pushes via a **fine-grained PAT** (single repo, Contents + Workflows + Actions read-write — the Actions scope is how she triggers runs and reads their logs) pasted in-session, revocable anytime. **`EODHD_API_KEY` + `DATABASE_URL` (session-pooler URI) → GitHub Actions repository secrets, set by Zak in the UI** — the connection string is god-mode and exists nowhere else. No model key, ever (ruled 2026-08-05): `compose` renders mechanically, and the §5.0 voice plus delivery live in the project's scheduled sessions on Zak's Claude plan — `push_channel` = `cowork`, so no push credential exists either. Yuna's session access is the **Supabase MCP** custom connector (added exactly like EODHD was); RLS default-deny — nothing publicly reachable. Weights and thresholds live in the config table — every change is a logged row, not code archaeology. Yuna debugs live runs by reading Actions logs through the GitHub API.
 
@@ -563,13 +579,13 @@ The brief arrives pre-composed (§4.2); the chat is a door onto it — a minimal
 
 **Entry mechanic ✅ RULED (2026-07-29 · confirmation amended 2026-07-31):** breakout entries execute as **GTC buy stop-limit orders at the pivot** (trigger = pivot · limit = pivot + 2%), placed from the brief when a name reaches BUY state. The volume condition cannot live inside a broker order, so it is judged at EOD under the **breakout-confirmation rule (§3.2)**: confirmed → the pyramid arms · unconfirmed → the pyramid freezes at 50%, three sessions to confirm late, exit only on a close back below the pivot. Pyramid steps 2–3 ship as add stop-limits in the brief once the breakout confirms (both limits at pivot × 1.05 — §3.2).
 
-### 5.2 R2 — Evening stop sheet (pipeline push, weekdays ~20:30 PT)
+### 5.2 R2 — Stop sheet (pipeline push, ~midnight PT after the chain)
 
-Composed by `compose`, delivered by `notify` — no session runs. Heartbeat (both job windows) → stop deltas → **always exactly one line minimum**:
+Composed by `compose`; the session reads it and speaks it — nothing is asked of Zak. Heartbeat (both job windows) → stop deltas → **always exactly one line minimum**:
 `✓ stops all placed correctly` · or one line per action — `NVDA · stop 176.20 / limit 170.90` · `AMD · blackout — cancel entry order` · or `⚠️ pipeline red — touch nothing, GTCs stand as placed`.
 The daily line doubles as the pipeline's nightly receipt.
 
-### 5.3 R3 — Saturday letter (pipeline push, ~8:00 PT)
+### 5.3 R3 — Saturday letter (pipeline push, ~10:00 AM PT)
 
 Heartbeat → gate status **and margin to the flip** → top/bottom-5 industry groups with week-over-week deltas → L1-M turnover (names in/out) → **top-3 workups** — each: MCN, state, pivot/stop pair, earnings date, what would make it a BUY → queue changes → **the week's rulings** (every PASS / FAIL, exit, conversion — each with its evidence block) → **the company we keep: corroboration marks on every buyable name + the reverse sweep of reference-investor holdings we lack, each miss with its reason and Yuna's read** → displacement checks against the +10 rule → **performance line: NAV week-over-week and YTD vs the 30% bar**. Snapshot first, context after, + the queue table. Written to briefs and pushed — read-only by design; open a chat only if something itches.
 
@@ -577,7 +593,7 @@ Heartbeat → gate status **and margin to the flip** → top/bottom-5 industry g
 
 Zak provides settled Wealthsimple activity **plus per-account cash balances and available credit per facility** → matched against provisional tickets → price/qty/FX/fees trued up → transactions confirmed → **balances anchored, NAV trued** → shadow-book 30/60/90-day marks recorded as observations → discrepancies flagged in the summary, never silently absorbed.
 
-### 5.5 R5 — Monthly letter (1st weekend)
+### 5.5 R5 — Monthly letter (Sundays — writes if the month has no letter yet)
 
 Yuna's letter to Zak — the desk reporting to the board. Composed from the month's ledgers; interactive only where a Zak ruling is required.
 
@@ -597,7 +613,7 @@ The blind test lives in §3.1's rulings law — the business verdict is recorded
 
 ### 5.6 Shared session laws
 
-- **Stale data ⇒ no new tickets.** Protective moves only. Every brief opens with the freshness line.
+- **Stale data ⇒ no new tickets.** Protective moves only. Every brief opens with the freshness line. **Stale means the bars, not the clock** (ruled 2026-08-05): tickets are held when the bars are old, when a price-critical job failed, or when the chain ran **out of order** — a `score` older than the ingest beside it ranked yesterday's world. Lateness alone holds nothing; it prints as `late: <job> +NNNm` and decides nothing.
 - **Every session writes its output to briefs** — a session that produced nothing durable didn't happen.
 - **Summary first, context second.** Succinct by default, never at the cost of needed information — depth always on request. Math lives in the tables.
 - Anything a runbook doesn't cover → flag it in the brief, don't improvise silently.
@@ -703,6 +719,8 @@ One-time protocol. Bridges today's book (≈70% cash, non-conforming) to a confo
 
 | Date | Entry |
 |---|---|
+| 2026-08-05 | **Alignment sweep — the runbooks catch up to the law, and three fossils die.** Audit of the plan against all five runbooks, the five live session prompts, and the config table. Finding worth recording: **the session prompts were ahead of the runbook docs** — each session is told to read its runbook as its code, and R2, R3 and R5 still quoted the retired per-job crons (`score` 03:30 · `check` 03:50 · `compose` 04:05 · `notify` 04:20 nightly; 12:00/12:30/13:00/13:15 Saturday), the old hours, "1st Saturday/1st weekend", and "Routine" for what are now Cowork sessions. All five runbooks rewritten to today's rulings and given the `late:`-is-not-stale reading; R1 gains a check that an armed name is not one Zak already owns, R4 gains the fill-with-no-ticket path and the note that an activity export carries changes, not balances. Plan fossils corrected: §4.0 said **"Bars kept 3 years"** against §4.1's 10-year window, the live config value of 10, and the 10 years of bars actually stored (2016-08-05 → 2026-08-05) — the 2026-08-01 edit changed §4.1 and never swept §4.0; §4.0's **"11 tables"** replaced with "the system of record", counts being the thing that rots; and §4.3's map, which omitted nine tables the system genuinely runs on — `prices`, `fundamentals`, `earnings`, `corporate_actions`, `gate_state`, `group_strength`, `quarantine`, `accounts`/`balances` (R4 writes balances every Sunday) and the `backtest_*` trio. §4.3 also now states what `config` being an append ledger means for readers: latest row wins. |
+| 2026-08-05 | **The chain gets a spine; the clock stops deciding.** Production drifted 150–195 minutes past slot every night and the nightly sequence held only by luck — `pipeline.yml` now chains `score` → `check` → `compose` → `notify` off the ingests by `needs:`, and those four lose their crons (§4.2, §4.0). **Order and currency are the guarantees; punctuality is not.** Two clocks named and separated: the chain has no clock, the sessions keep appointments — each fires at a fixed hour chosen to sit after the chain and opens with the freshness line (§4.2 clock convention). The one with teeth: `freshness()` held tickets on any amber and `Heartbeat` went amber at 30 minutes of drift, so a queued Actions run gagged the desk on perfectly current prices and RS.US / CTS.US sat armed and frozen behind a clock — **stale now means the bars, not the clock** (§5.6), and §4.7 rules that schedule drift is not a half-failure and never turns a job amber. `compose` and `notify` get table rows at last — §4.0 has promised eight jobs since 2026-08-04 while §4.2 listed six. **Monthly work is guarded by whether it has run, never by the date** (§4.2): "1st weekend" was implemented as "exit outside the first seven days", which skipped August in silence — the R5 letter and `ingest-universe` (never once run) both inherit the work-keyed guard; §3.0 and §5.5 follow. Stop sheet and Saturday letter re-timed to the observed chain (§4.4, §5.2, §5.3). The five surfaces are Cowork sessions inside this Project carrying its connectors, with no repo checkout by design (§4.4, §4.8) — so "pipeline push" now describes the content, not the absence of a session. The Project copy of this document is authoritative and the repo mirror builds toward it (header). Edits to §4.2, §5.6 and §4.7 describe `yuna-pipeline-fixes.patch`, not yet on `main`: the law leads the code here, by ruling. |
 | 2026-08-05 | **The speak layer runs on the plan, not the meter.** Zak's ruling: no `ANTHROPIC_API_KEY`, no metered model calls in the pipeline. `compose` becomes a mechanical renderer — clinical sections, every number exact, exactly the data layer §5.0 demands — and the §5.0 voice is applied where Claude already runs on Zak's subscription: the scheduled sessions inside the Yuna chat/cowork project, which read the composed row from Supabase and speak it. `push_channel` = `cowork` — the Routines are the doorbell, so the push-channel credential line dies too. §4.2's verb sentence, §4.8's secrets list, and the TODO amended accordingly. |
 | 2026-08-04 | **The handover batch — E1–E13.** Judgment transfers to Yuna inside the gates: C2 memos ruled blind by Yuna, bench membership, evictions, exit reviews, conversions, and entry timing — every ruling logged to a new `rulings` ledger with its evidence block (score · filings · outside world), binding on later sessions, reversible only with logged new evidence. Zak retains execution, the law, risk posture, and Sundays; tripwires and the "freeze" switch added (§5.7). Delivery legislated: `compose` and `notify` join §4.2; the morning chat replaces R1's session; stop sheet and deep-dive become pipeline pushes; R5 inverts into Yuna's monthly letter. §4.5 shrinks to six items plus the freeze. Phase 0 driven by Yuna, strictness unchanged. E13 activates the learning loop the TODO deferred (§5.8): observations → learnings (each carrying its falsifier) → proposals → Zak's ruling → promotion or expiry; mechanics fast lane, formulas slow lane with version bumps measured by the shadow book; daily surfacing exception-only; promotion bar provisional at three occurrences or shadow-book support; loosening proposals route as risk items; proposal direction tracked as a calibration gauge. |
 | 2026-08-02 | **QA batch — seven rulings after the go-live review.** Glossary Bar → ten years or more · short-history fair multiple pinned at **fewer than 12 priced quarters** (code follows, 8 → 12) · §3.1 now leads with the honest sentence — never above the stock's own median multiple, cheaper still when credited growth can't deliver 15% — and the provably inert 25% clause struck from the hurdle bullet (the waterfall's 25% engine cap untouched) · **§4.2 rewritten to the verb architecture: ingest → score → check → speak** — six jobs, one responsibility each; retry = the same ingest scheduled twice, exits-if-green; score is a pure function of the database; check writes nothing but its own report; **a red pre-flight blocks dispatch**; dispatch = score → check → speak · §4.5 step 5 gains current position quantities per account · stale magnitudes made durable (L0 "low thousands"; bench described by composition, not count) · TODO's phantom 93/108 → "nearly the whole bench" · **raw vs adjusted pinned**: signals on adjusted closes, valuation on raw. Dev change set issued separately. |
