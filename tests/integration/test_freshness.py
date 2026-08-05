@@ -25,10 +25,11 @@ def bars_today(cur):
 
 
 def run(cur, job, status="green", *, started="now()", finished="now()", detail="{}",
-        dry_run=False):
-    cur.execute(f"""insert into runs (job, status, started_at, finished_at, dry_run, detail)
-                    values (%s, %s, {started}, {finished}, %s, %s::jsonb) returning id""",
-                (job, status, dry_run, detail))
+        dry_run=False, rows=1):
+    cur.execute(f"""insert into runs (job, status, started_at, finished_at, dry_run,
+                                      rows_written, detail)
+                    values (%s, %s, {started}, {finished}, %s, %s, %s::jsonb) returning id""",
+                (job, status, dry_run, rows, detail))
     return cur.fetchone()[0]
 
 
@@ -146,3 +147,17 @@ def test_a_dry_run_ingest_cannot_gag_the_desk(db):
     db.commit()
     _, tickets = dbm.freshness(db)
     assert tickets is True
+
+
+def test_an_ingest_that_wrote_nothing_is_not_out_of_order(db):
+    """`ingest-universe` exits clean when the month is already built, and the retry ingest exits
+    when the night is already green. Neither lands a row, so neither can leave a score behind —
+    and a guard that gagged the desk every Saturday would just be the old bug with a new trigger."""
+    with db.cursor() as cur:
+        bars_today(cur)
+        run(cur, "score", started="now() - interval '90 minutes'",
+            finished="now() - interval '80 minutes'")
+        run(cur, "ingest-universe", started="now() - interval '20 minutes'", rows=0)
+    db.commit()
+    line, tickets = dbm.freshness(db)
+    assert tickets is True and "out of order" not in line

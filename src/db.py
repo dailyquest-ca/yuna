@@ -343,7 +343,7 @@ def freshness(conn, *, stale_days=4):
                        where started_at > now() - interval '36 hours' order by job, id desc""")
         recent = [(j, s, d) for j, s, d in cur.fetchall()]
         # every finished, non-dry run in the window — the ordering question is about runs, not jobs
-        cur.execute("""select job, started_at, finished_at from runs
+        cur.execute("""select job, started_at, finished_at, coalesce(rows_written, 0) from runs
                        where started_at > now() - interval '36 hours'
                          and status <> 'running' and not dry_run""")
         timeline = cur.fetchall()
@@ -368,9 +368,13 @@ def freshness(conn, *, stale_days=4):
         line += " · " + " · ".join(late)
 
     # §5.6's third condition: order. The chain is a data dependency (§4.2's `needs:`), so this
-    # should be impossible — which is exactly why it is asserted rather than assumed.
-    ingest_end = max((f for j, _, f in timeline if j in VERBS["ingest"] and f), default=None)
-    score_start = max((s for j, s, _ in timeline if j in VERBS["score"]), default=None)
+    # should be impossible — which is exactly why it is asserted rather than assumed. Only an
+    # ingest that LANDED ROWS can leave a score behind: the monthly guard's own exit-clean run and
+    # the retry that finds the night already green both finish having written nothing, and neither
+    # makes a single derived number older than its source.
+    ingest_end = max((f for j, _, f, n in timeline if j in VERBS["ingest"] and f and n > 0),
+                     default=None)
+    score_start = max((s for j, s, _, _ in timeline if j in VERBS["score"]), default=None)
     out_of_order = bool(ingest_end and score_start and ingest_end > score_start)
 
     bad = [f"{j} {s}" for j, s, _ in recent if s in ("red", "amber")]
@@ -383,8 +387,9 @@ def freshness(conn, *, stale_days=4):
                 False)
     if out_of_order:
         return (f"⚠️ chain out of order — an ingest landed rows after the score beside it "
-                f"({ingest_end:%H:%M} > {score_start:%H:%M} UTC); data {last_bar}, tickets held "
-                f"· {line}", False)
+                f"({ingest_end.astimezone(dt.timezone.utc):%H:%M} > "
+                f"{score_start.astimezone(dt.timezone.utc):%H:%M} UTC); data {last_bar}, "
+                f"tickets held · {line}", False)
     if bad:
         return (f"data {last_bar} close · {line} · {', '.join(sorted(set(bad)))} "
                 f"(that domain only)", True)
