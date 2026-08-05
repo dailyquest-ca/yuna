@@ -98,6 +98,47 @@ def apply_fills(conn, hb):
     return applied
 
 
+def sync_fills_from_tickets(conn, hb):
+    """§4.5 fill loop under the 2026-08-04 write list: a fill travels as ticket state — chat or
+    flip writes `fill_*` on the ticket and marks it provisional — and THIS job derives the
+    transactions row, because §4.3 no longer lets a session touch the ledger. Sunday's
+    confirmation flips the ticket to confirmed with trued numbers; the same pass here trues the
+    transaction. Both directions are idempotent: one transaction per ticket, updates by delta."""
+    made, trued = [], []
+    with conn.cursor() as cur:
+        cur.execute("""select k.id, k.ticker, k.account, k.action, k.fill_qty, k.fill_price,
+                              coalesce(k.currency, 'USD'), k.fill_fx, k.fill_fees,
+                              coalesce(k.fill_date, current_date)
+                       from tickets k
+                       where k.state = 'provisional' and k.fill_price is not null
+                         and k.fill_qty is not null and k.account is not null
+                         and not exists (select 1 from transactions t where t.ticket_id = k.id)""")
+        for tid, tk, acct, action, qty, price, ccy, fxr, fees, tdate in cur.fetchall():
+            side = "sell" if action in ("sell", "exit") else "buy"
+            cur.execute("""insert into transactions (ticket_id, ticker, account, side, qty,
+                             price, currency, fx_rate, fees, trade_date, confirmed)
+                           values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,false)""",
+                        (tid, tk, acct, side, qty, price, ccy, fxr, fees or 0, tdate))
+            made.append(f"{side} {float(qty):g} {tk} @ {float(price):g} (ticket {tid})")
+        cur.execute("""select k.id, k.fill_qty, k.fill_price, k.fill_fx, k.fill_fees, k.fill_date
+                       from tickets k join transactions t on t.ticket_id = k.id
+                       where k.state = 'confirmed' and not t.confirmed""")
+        for tid, qty, price, fxr, fees, tdate in cur.fetchall():
+            cur.execute("""update transactions set
+                             qty = coalesce(%s, qty), price = coalesce(%s, price),
+                             fx_rate = coalesce(%s, fx_rate), fees = coalesce(%s, fees),
+                             trade_date = coalesce(%s, trade_date),
+                             confirmed = true, confirmed_at = now()
+                           where ticket_id = %s""", (qty, price, fxr, fees, tdate, tid))
+            trued.append(tid)
+    conn.commit()
+    if made:
+        hb.detail["fills_derived_from_tickets"] = made
+    if trued:
+        hb.detail["fills_confirmed_from_tickets"] = trued
+    return made
+
+
 # --------------------------------------------------------------------------- splits (§4.1)
 def rebase_for_splits(conn, hb):
     """Re-base a held position's stored prices when its stock splits.
@@ -559,8 +600,14 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                                  where t.ticker = b.ticker and t.side='buy'
                                    and t.trade_date > current_date - interval '12 months'
                                    and t.trade_date > k.opened_at) as adds_12m,
-                              k.account
+                              k.account, r.verdict, r.cooldown_until
                        from bench b
+                       left join lateral (select verdict, cooldown_until from rulings
+                                          where ticker = b.ticker and kind = 'c2'
+                                            and verdict in ('pass','fail')
+                                            and not exists (select 1 from rulings x
+                                                             where x.reverses = rulings.id)
+                                          order by at desc limit 1) r on true
                        join universe u on u.ticker=b.ticker
                        left join book k on k.ticker=b.ticker and k.status='open'
                        left join v_dividend_ttm d on d.ticker=b.ticker
@@ -571,7 +618,8 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                          and b.last_close is not null and b.last_close <= b.hurdle_price
                        order by b.ccn desc""")
         for (tk, ccn_score, hurdle, px, gap, confidence, industry, report, held, hqty, hcost,
-             provenance, dps_ttm, entry_fill, owner_suspect, adds, hacct) in cur.fetchall():
+             provenance, dps_ttm, entry_fill, owner_suspect, adds, hacct,
+             ruling, cooldown_until) in cur.fetchall():
             ccn_score = float(ccn_score) if ccn_score is not None else None
             px, hurdle = float(px), float(hurdle)
             in_bo = sg.in_blackout(dt.date.today(), report, holidays=holidays)
@@ -627,6 +675,15 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                 blocked = f"§3.3 — earnings blackout ({report})"
             elif confidence not in ("full", None):
                 blocked = f"§3.3 — scored {confidence}: manual sign-off before sizing"
+            # §4.3: jobs read the rulings ledger — only ruled names ship entry tickets. A live
+            # FAIL blocks outright (the 12-month cooldown, §3.1); a name never ruled still arms,
+            # flagged, because §3.1's law is that the NEXT SESSION rules it blind before its GTC
+            # is placed — a row the session cannot see is a ruling that never happens.
+            unruled = ruling is None
+            if ruling == "fail" and not blocked:
+                until = f" until {cooldown_until}" if cooldown_until else ""
+                blocked = (f"§3.1 — ruled FAIL, 12-month cooldown{until} "
+                           f"(escape: new filing + CCN at rejection +10)")
             if owner_suspect and not blocked:
                 # §3.1 owner-cash quarantine (2026-08-02): scored, ranked, watched — never
                 # ticketed. Reported FCF here is materially customer money, and no growth cap
@@ -668,10 +725,13 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                     currency=("CAD" if tk.endswith(".TO") else "USD"), fx_estimate=fx,
                     note=(f"CCN {ccn_score:.1f} · GTC limit at the hurdle {hurdle:.2f} · "
                           f"{abs(gap or 0):.0%} below"
+                          + (" · UNRULED — rule blind before the GTC ships (§3.1)"
+                             if unruled else "")
                           + (f" · swap out {swap['ticker']}" if swap else "")
                           + (f" · {engine_note}" if engine_note else ""))
                     if ccn_score else None,
                     detail=dict(theme_weights=theme_weight, industry=industry,
+                                needs_ruling=unruled,
                                 swap_out=swap["ticker"] if swap else None,
                                 engine_provenance=provenance,
                                 dividend_yield_ttm=yield_ttm, prefers_rrsp=prefers_rrsp,
@@ -856,6 +916,7 @@ def run(conn, hb, *, held=frozenset()):
         first_fill = cur.fetchone()[0]
     caps["start_low"] = not first_fill or (dt.date.today() - first_fill).days <= 90
 
+    sync_fills_from_tickets(conn, hb)
     apply_fills(conn, hb)
     rebase_for_splits(conn, hb)
 
