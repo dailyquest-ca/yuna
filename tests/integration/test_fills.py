@@ -94,13 +94,36 @@ def test_running_it_twice_applies_nothing_twice(the_book_before, monkeypatch):
 
 
 def test_a_dry_run_writes_nothing(the_book_before, monkeypatch):
+    """DRY_RUN means compute everything and write nothing — including through the two passes this
+    job borrows from `score`, which used to fold the book regardless of it."""
     monkeypatch.setenv("FILLS_GLOB", str(MANIFEST))
     monkeypatch.setenv("DRY_RUN", "true")
     assert fills.main() == 0
     with the_book_before.cursor() as cur:
         cur.execute("select count(*) from tickets")
         assert cur.fetchone()[0] == 0
+        cur.execute("select count(*) from transactions")
+        assert cur.fetchone()[0] == 0
     assert book(the_book_before)["VRT.US"]["status"] == "open"
+
+
+def test_a_dry_run_still_says_what_it_would_do(the_book_before, monkeypatch):
+    """A rehearsal nobody can read is not a rehearsal — the run row names every pending fill."""
+    monkeypatch.setenv("FILLS_GLOB", str(MANIFEST))
+    assert fills.main() == 0                      # write the tickets and the ledger for real
+    with the_book_before.cursor() as cur:
+        cur.execute("update transactions set applied_at = null")   # as if the book were behind
+    the_book_before.commit()
+
+    monkeypatch.setenv("DRY_RUN", "true")
+    assert fills.main() == 0
+    with the_book_before.cursor() as cur:
+        cur.execute("select detail from runs where job='fills' order by id desc limit 1")
+        detail = cur.fetchone()[0]
+    assert len(detail["fills_would_apply"]) == 4
+    with the_book_before.cursor() as cur:
+        cur.execute("select count(*) from transactions where applied_at is not null")
+        assert cur.fetchone()[0] == 0, "the rehearsal applied nothing"
 
 
 def test_a_momentum_position_that_arrives_without_a_stop_gets_one(the_book_before, monkeypatch):

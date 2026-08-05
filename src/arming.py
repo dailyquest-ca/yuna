@@ -45,6 +45,13 @@ def apply_fills(conn, hb):
                        where t.applied_at is null
                        order by t.trade_date, t.id""")
         rows = cur.fetchall()
+        if dry():
+            # §4.2: every job carries DRY_RUN, and DRY_RUN means compute everything and write
+            # nothing. This pass wrote the book regardless — so a rehearsal moved real positions,
+            # and the one job whose whole purpose is to be rehearsed (`fills`) inherited it.
+            hb.detail["fills_would_apply"] = [f"{r[3]} {float(r[4]):g} {r[1]} @ {float(r[5]):g}"
+                                              for r in rows]
+            return []
         for (tid, tk, acct, side, qty, price, ccy, tdate, step, ticket_id, sleeve, theme,
              stop, stop_limit, pivot, target_qty) in rows:
             qty, price = float(qty), float(price)
@@ -135,7 +142,12 @@ def sync_fills_from_tickets(conn, hb):
                          and k.fill_qty is not null and k.account is not null
                          and not exists (select 1 from transactions t where t.ticket_id = k.id)
                        order by k.fill_date, k.id""")
-        for tid, tk, acct, action, qty, price, ccy, fxr, fees, tdate, state in cur.fetchall():
+        pending = cur.fetchall()
+        if dry():
+            hb.detail["fills_would_derive"] = [f"{r[1]} {float(r[4]):g} @ {float(r[5]):g}"
+                                               for r in pending]
+            return []
+        for tid, tk, acct, action, qty, price, ccy, fxr, fees, tdate, state in pending:
             side = "sell" if action in ("sell", "exit") else "buy"
             settled = state == "confirmed"
             cur.execute("""insert into transactions (ticket_id, ticker, account, side, qty,
