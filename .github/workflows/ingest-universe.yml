@@ -1,14 +1,19 @@
 name: ingest-universe
 # §4.2, verb one, monthly slice: rebuild L0 from listings and the liquidity filters. Membership
-# only — the C1/CCN half of the old funnel is just `score` running afterwards, which the schedule
-# already provides (Sat 12:00).
+# only — the C1/CCN half of the old funnel is just `score` running afterwards, which `pipeline.yml`
+# now chains off this job by `needs:`.
+#
+# Fires WEEKLY and rebuilds only when the month's universe is unbuilt (§4.2, ruled 2026-08-05:
+# monthly work is guarded by whether it has run, never by the date). Cron cannot express "first
+# Saturday" — dom and dow are OR-ed — and the date-keyed guard this replaces skipped the month in
+# silence whenever its one firing was missed. It had never produced a single runs row.
 on:
   schedule:
-    - cron: '0 10 * * 6'   # weekly Sat 10:00 UTC; in-job guard keeps real runs to the 1st Saturday
+    - cron: '0 10 * * 6'   # Sat 10:00 UTC — rebuilds if the month's universe is unbuilt, else exits
   workflow_dispatch:
     inputs:
       force:
-        description: 'run census regardless of date'
+        description: 'rebuild even if this month is already built'
         default: 'false'
 
 # §4.2, added 2026-08-03: every job that writes shares ONE concurrency group, so Actions serialises

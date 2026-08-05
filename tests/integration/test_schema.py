@@ -26,15 +26,24 @@ def test_every_job_written_table_is_cleared_between_tests(db):
 
 
 def test_the_session_writable_tables_are_not_guarded(db):
-    """§4.3's other half: a session must be able to write briefs, tickets, observations and
-    transactions. A guard trigger on any of them would silently break every runbook."""
+    """§4.3's other half: the session write list must actually be writable by a session.
+
+    The list is six things and no more — **briefs, tickets, observations, rulings, learnings,
+    config** (§4.3, 2026-08-04). `transactions` left it that day: a fill now travels as ticket
+    state and the job derives the ledger row, which migration 033's `guard_transactions` enforces.
+    This test asserted the old list for three days and failed on the migration that implemented the
+    new one — the assertion, not the guard, was the thing out of date.
+    """
     with db.cursor() as cur:
         cur.execute("""select distinct c.relname from pg_trigger t
                        join pg_class c on c.oid = t.tgrelid
                        join pg_proc p on p.oid = t.tgfoid
                        where p.proname = 'yuna_jobs_only' and not t.tgisinternal""")
         guarded = {r[0] for r in cur.fetchall()}
-    assert not guarded & {"briefs", "tickets", "observations", "transactions", "config"}
+    assert not guarded & {"briefs", "tickets", "observations", "rulings", "learnings", "config"}
+    assert "transactions" in guarded, (
+        "§4.3 took transactions off the session write list on 2026-08-04 — the guard is the "
+        "enforcement, and R4's runbook routes discretionary fills through tickets because of it")
 
 
 def test_latest_view_exposes_every_fundamentals_column(db):
