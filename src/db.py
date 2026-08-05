@@ -400,10 +400,9 @@ def freshness(conn, *, stale_days=4):
         cur.execute("""select distinct on (job) job, status, detail from runs
                        where started_at > now() - interval '36 hours' order by job, id desc""")
         recent = [(j, s, d) for j, s, d in cur.fetchall()]
-        # every finished, non-dry run in the window — the ordering question is about runs, not jobs
+        # every non-dry run in the window — the ordering question is about runs, not jobs
         cur.execute("""select job, started_at, finished_at, coalesce(rows_written, 0) from runs
-                       where started_at > now() - interval '36 hours'
-                         and status <> 'running' and not dry_run""")
+                       where started_at > now() - interval '36 hours' and not dry_run""")
         timeline = cur.fetchall()
 
     status = {j: s for j, s, _ in recent}
@@ -426,10 +425,14 @@ def freshness(conn, *, stale_days=4):
         line += " · " + " · ".join(late)
 
     # §5.6's third condition: order. The chain is a data dependency (§4.2's `needs:`), so this
-    # should be impossible — which is exactly why it is asserted rather than assumed. Only an
-    # ingest that LANDED ROWS can leave a score behind: the monthly guard's own exit-clean run and
-    # the retry that finds the night already green both finish having written nothing, and neither
-    # makes a single derived number older than its source.
+    # should be impossible — which is exactly why it is asserted rather than assumed.
+    #
+    # Two asymmetries, both learned the hard way on the first night this ran. An ingest counts only
+    # once it has FINISHED and landed rows: the monthly guard's exit-clean run and the retry that
+    # finds the night already green both finish having written nothing, and neither makes a derived
+    # number older than its source. A score counts from the moment it STARTS, run in progress
+    # included — because the caller asking this question is usually that very run, and comparing
+    # against the previous score made every chained run report itself out of order.
     ingest_end = max((f for j, _, f, n in timeline if j in VERBS["ingest"] and f and n > 0),
                      default=None)
     score_start = max((s for j, s, _, _ in timeline if j in VERBS["score"]), default=None)

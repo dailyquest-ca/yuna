@@ -149,6 +149,27 @@ def test_a_dry_run_ingest_cannot_gag_the_desk(db):
     assert tickets is True
 
 
+def test_the_score_asking_the_question_counts_as_the_score(db):
+    """`score` calls this from inside its own run, while its row still reads `running`.
+
+    Caught on the first night the chain ran for real: the ingest landed at 22:48, the chained score
+    started at 22:49 and asked whether it was out of order — and the newest *finished* score was
+    the previous one, from 21:56. Every chained run would have reported itself late, on a night
+    when the order was exactly right.
+    """
+    with db.cursor() as cur:
+        bars_today(cur)
+        run(cur, "score", started="now() - interval '120 minutes'",
+            finished="now() - interval '115 minutes'")            # the previous night's run
+        run(cur, "ingest-daily", started="now() - interval '20 minutes'",
+            finished="now() - interval '2 minutes'")
+        cur.execute("""insert into runs (job, status, started_at, dry_run)
+                       values ('score', 'running', now() - interval '1 minute', false)""")
+    db.commit()
+    line, tickets = dbm.freshness(db)
+    assert tickets is True and "out of order" not in line
+
+
 def test_an_ingest_that_wrote_nothing_is_not_out_of_order(db):
     """`ingest-universe` exits clean when the month is already built, and the retry ingest exits
     when the night is already green. Neither lands a row, so neither can leave a score behind —

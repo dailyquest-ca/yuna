@@ -181,11 +181,25 @@ def saturday_skeleton(cur, pay, freshness_line):
 # --------------------------------------------------------------------------- write
 
 def publish(cur, hb, kind, session_date, freshness_line, body, *, meta=None):
-    """One composed row per kind per session date — a re-run is a no-op, not a duplicate."""
-    cur.execute("""select 1 from briefs where kind=%s and session_date=%s
-                   and detail->>'composed'='true' limit 1""", (kind, session_date))
-    if cur.fetchone():
-        hb.detail.setdefault("skipped", []).append(f"{kind} already composed for {session_date}")
+    """One composed row per kind per session date — unless the words have changed.
+
+    The guard used to be "already composed for this date, skip", which was right while this ran
+    once a night on a cron. Off the `needs:` chain it runs after EVERY ingest, and that turned the
+    first version of the day into the final one: the 2026-08-05 stop sheet composed at 14:18
+    described a world without that day's four fills, a fresh score at 22:52 recomputed everything,
+    and compose skipped rather than correcting it. `notify` went red and was right to — the words a
+    session would find were eight hours stale and outside its window.
+
+    So the key is the CONTENT. Same body, nothing new to say, skip. Different numbers, new row —
+    `briefs` is an append ledger (§4.3) and every reader takes the newest.
+    """
+    sha = hashlib.sha256(body.encode()).hexdigest()[:12]
+    cur.execute("""select detail->>'sha' from briefs where kind=%s and session_date=%s
+                   and detail->>'composed'='true' order by at desc limit 1""",
+                (kind, session_date))
+    row = cur.fetchone()
+    if row and row[0] == sha:
+        hb.detail.setdefault("skipped", []).append(f"{kind} unchanged for {session_date}")
         return False
     summary = next((l for l in body.splitlines() if l.strip()), "")[:300]
     if dry():
@@ -194,8 +208,7 @@ def publish(cur, hb, kind, session_date, freshness_line, body, *, meta=None):
     cur.execute("""insert into briefs (kind, session_date, freshness, summary, body, detail)
                    values (%s,%s,%s,%s,%s,%s)""",
                 (kind, session_date, freshness_line, summary, body,
-                 jsonb(dict(composed=True, sha=hashlib.sha256(body.encode()).hexdigest()[:12],
-                            **(meta or {})))))
+                 jsonb(dict(composed=True, sha=sha, recomposed=bool(row), **(meta or {})))))
     hb.rows += 1
     return True
 
