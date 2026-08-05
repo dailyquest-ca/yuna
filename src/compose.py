@@ -201,7 +201,10 @@ def publish(cur, hb, kind, session_date, freshness_line, body, *, meta=None):
 
 
 def main():
-    slot = os.environ.get("COMPOSE_SLOT", "nightly")
+    # `or`, not a default argument: the chain passes this in from a job output, and an upstream
+    # job that died hands down an empty string rather than an absent variable. Nightly is the
+    # ordinary night, and a brief written on the wrong day is a smaller failure than no brief.
+    slot = os.environ.get("COMPOSE_SLOT") or "nightly"
     with connect() as conn:
         with Heartbeat(conn, "compose",
                        scheduled_utc=os.environ.get("SCHEDULED_UTC")) as hb:

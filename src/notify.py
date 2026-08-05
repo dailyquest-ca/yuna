@@ -39,7 +39,9 @@ def fresh_composed(cur, kinds, *, hours=3):
 
 
 def main():
-    slot = os.environ.get("NOTIFY_SLOT", "nightly")
+    # `or`, not a default argument — see compose.main(): a dead upstream job in the chain hands
+    # this down as an empty string, and silence is the one outcome §4.7 has no reader for.
+    slot = os.environ.get("NOTIFY_SLOT") or "nightly"
     kinds = EXPECTED.get(slot)
     if not kinds:
         raise SystemExit(f"unknown NOTIFY_SLOT {slot!r}")
