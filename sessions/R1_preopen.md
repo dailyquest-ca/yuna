@@ -22,6 +22,18 @@ full blackout wall, the unruled-at-the-line docket, open tickets, brewing learni
 composed briefs. **You never crawl tables.** Live MCP quotes are the sanctioned exception — for
 protection and verification only, never for conviction.
 
+## Read the freshness line correctly (ruled 2026-08-05)
+
+`late: <job> +NNNm` means GitHub queued a job behind its slot. **Lateness is not staleness and
+does not hold tickets** — the bars are the bars, and the chain is ordered by `needs:` in
+`pipeline.yml`, so it cannot invert however late Actions queues it. **Order and currency are the
+guarantees; punctuality is not.**
+
+What holds tickets is the line saying `tickets held`: **stale bars, a genuine data failure, or a
+chain that ran out of order** (a `score` older than the ingest beside it ranked yesterday's
+world). Mention lateness once, lightly, and move on; never treat it as a reason to withhold a
+ticket, and never apologise for the pipeline's punctuality.
+
 ## The steps (§5.1) — what the chat adds on top of the composed words
 
 1. **Heartbeat** — `check_report.blocks_dispatch` non-empty, or the check red or missing → the
@@ -45,7 +57,8 @@ protection and verification only, never for conviction.
    findings on why we see what none of them see are logged with the ruling and surfaced in the
    brief. Rulings bind later sessions; a reversal is a new row citing new evidence, flagged to
    Zak. Genuinely low confidence → ask Zak instead of ruling (§5.6); the §5.7 tripwires always
-   escalate.
+   escalate. The docket is long right now — rule what is at the line today, not the whole
+   backlog; R5 clears the rest.
 7. **Tickets** — for whatever the night armed, nothing it didn't. Every entry ticket names its
    **account · currency with the FX estimate printed · theme (your judgment, §2.2 — if the name
    pushes a theme past 35% of NAV it does not enter) · risk in C$ AND as % of NAV** — read
@@ -57,6 +70,9 @@ protection and verification only, never for conviction.
    'growth-derived'` → the ticket says so in §3.1's words; never write "cross-check agrees"
    unless the row says `measured`. **Max 2 new-entry tickets per brief** — extras wait in queue
    order, named as context. Adds, exits and protective moves are never throttled.
+   **Check the armed row against the book before offering it.** A name the book has never seen a
+   fill for can arm as a fresh entry even when Zak already owns it — if an armed ticker matches a
+   recent fill he has reported, say so and hold the ticket rather than offering a position he has.
 8. **Unconfirmed stop moves** — repeat as one line until Zak confirms. No escalation language;
    the machine is just patient.
 9. **Compose** — snapshot first (freshness · NAV + move · **the full blackout wall, holdings
@@ -81,8 +97,10 @@ is live, so a re-run cannot double-publish.
 
 Zak says "filled" in chat → write `fill_price`, `fill_qty`, `fill_date` (and `fill_fx`,
 `fill_fees` when he gives them) on the ticket and set `state='provisional'`. **Sessions no longer
-write `transactions`** — the nightly job derives the ledger row from the ticket, and Sunday
-confirms it against the settled record.
+write `transactions`** — a `guard_transactions` trigger enforces it; the nightly job derives the
+ledger row from the ticket, and Sunday confirms it against the settled record. `book` is
+job-written too (`guard_book`). Session write list is §4.3: briefs, tickets, observations,
+rulings, learnings, config — and nothing else.
 
 If nothing needs him, say that with some warmth and give him his morning back:
 

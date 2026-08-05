@@ -13,7 +13,7 @@ is the scar tissue: facts this build paid for, worth reading before touching any
 | Layer | What it is |
 |---|---|
 | **Data** | EODHD All-In-One: bulk prices nightly · FX · fundamentals on filing · earnings calendar. Bars kept 10 years, fundamentals forever |
-| **Compute** | One sentence — **ingest → score → check → speak**. Eight scheduled jobs: `ingest-daily` ×2 · `ingest-filings` · `ingest-universe` · `score` · `check` · `compose` + `notify` (the speak pair) · `backup`. Everything else — `migrate`, `phase0`, `backfill`, both backtests — is **dispatch-only tooling**; nothing joins the schedule without a plan edit (§4.2) |
+| **Compute** | One sentence — **ingest → score → check → speak**. Eight jobs: four scheduled (`ingest-daily` ×2 · `ingest-filings` · `ingest-universe` · `backup`) and four chained off them by `needs:` in `pipeline.yml` (`score` → `check` → `compose` → `notify`) — **the chain has no clock; the sessions keep appointments** (§4.2, 2026-08-05). Everything else — `migrate`, `phase0`, `backfill`, `fills`, both backtests — is **dispatch-only tooling**; nothing joins the schedule without a plan edit |
 | **Store** | One Supabase Postgres project — universe → book → briefs, plus `fundamentals` as the point-in-time asset, the `rulings` + `learnings` ledgers, and human views for browsing |
 | **Judge** | Two chats (weekday morning · Sunday reconciliation) + two letters (Saturday · monthly); the stop sheet and all alarms are pipeline pushes delivered by the Routines in the Yuna chat/cowork project. Yuna rules names; Zak rules law and risk |
 | **Execute** | Zak places every order: entry pairs · stop moves · gap exits · fill confirmations · monthly law-and-risk rulings |
@@ -47,7 +47,8 @@ src/          ingest + compute jobs (Python); db.py holds the shared heartbeat c
 | `score.py` | `fundamentals`, `prices` | `bench` (C1 → CCN → hurdle) |
 | `compose.py` | `v_session_payload` | composed `briefs` — the stop sheet, morning-brief and Saturday-letter sections, rendered mechanically and keyless; the project's scheduled sessions apply the §5.0 voice on Zak's Claude plan (§4.2 speak, first half) |
 | `notify.py` | composed `briefs`, `config.push_channel` | nothing but its runs row — proves the words exist before the Routines deliver them |
-| `phase0.py` | `book`, `bench`, `candidates`, `queue`, `balances` | `tickets`, a `phase0` brief |
+| `phase0.py` | `book`, `bench`, `candidates`, `queue`, `balances` | `book.sleeve` (§6 Step 2a), `tickets`, a `phase0` brief |
+| `fills.py` | `data/fills/*.json` | `tickets` → `transactions` → `book`, through the same two passes `score` makes |
 | `backup.py` | everything but the bars | a compressed dump committed here |
 
 Debug from `runs.detail`, never from Actions log downloads — those 302 to a blob store that

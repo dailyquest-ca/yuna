@@ -10,7 +10,7 @@ exit or entry ticket per line. Yuna never executes; Zak places every order.
 """
 import os, sys, json, math, datetime as dt
 import psycopg
-from db import connect, config, dry, nav_cad, Heartbeat
+from db import connect, config, dry, nav_cad, observe, Heartbeat
 
 ENTER = 70.0          # §3.3 enterable
 FULL = 85.0           # §3.3 full conviction
@@ -217,8 +217,39 @@ def main():
                                               momentum=round(0.40 - mom_room, 3)),
                           groups=groups, themes={k: round(v, 3) for k, v in themes.items()})
 
+            assigned = []
             if not dry():
                 with conn.cursor() as cur:
+                    # §6 Step 2a: "It joins whichever sleeve it qualifies for." Joining a sleeve is
+                    # a column on the book, and no other actor can write it — `book` is job-written
+                    # (§4.3's guard_book), and a session that edits positions directly is the one
+                    # thing this design exists to prevent.
+                    #
+                    # This job has been computing the assignment and publishing it in a brief since
+                    # 2026-07-31 while every row stayed `sleeve='unassigned'`, which is why Step 2a
+                    # never completed and cutover could never start. It is not a cosmetic column:
+                    # the stop ladder, the pyramid, both relative exits and both sleeve ceilings
+                    # all select on it, so an unassigned holding is a position the machine can see
+                    # and cannot protect.
+                    #
+                    # Only the sleeve is written here. Theme is judgment assigned in the session
+                    # that writes a ticket (§2.2), stops are `score`'s to compute (§3.2), and a
+                    # name that qualified for neither sleeve stays unassigned on its way out.
+                    for v in verdicts:
+                        if v["sleeve_assigned"] and v["sleeve_assigned"] != v["sleeve"]:
+                            cur.execute("""update book set sleeve=%s, updated_at=now()
+                                           where id=%s and status='open'""",
+                                        (v["sleeve_assigned"], v["id"]))
+                            assigned.append(f"{v['ticker']}: {v['sleeve']} -> "
+                                            f"{v['sleeve_assigned']}")
+                            observe(cur, "note",
+                                    f"§6 Step 2a — {v['ticker']} joins {v['sleeve_assigned']}: "
+                                    f"{v['why']}",
+                                    ticker=v["ticker"], score=v["ccn"] or v["mcn"],
+                                    detail=dict(step="2a", from_sleeve=v["sleeve"],
+                                                to_sleeve=v["sleeve_assigned"],
+                                                verdict=v["verdict"]))
+
                     cur.execute("""insert into briefs(kind,session_date,freshness,summary,detail)
                                    values ('phase0',current_date,%s,%s,%s) returning id""",
                                 ("phase 0 re-underwrite", summary, json.dumps(detail, default=str)))
@@ -265,7 +296,14 @@ def main():
             hb.detail.update(keeps=[v["ticker"] for v in keeps], exits=[v["ticker"] for v in exits],
                              step5=[v["ticker"] for v in step5], nav_cad=round(nav, 2),
                              balances_captured=anchored, compounders=len(comp_list),
-                             momentum=len(mom_list))
+                             momentum=len(mom_list), sleeves_assigned=assigned)
+            unassigned = [v["ticker"] for v in verdicts
+                          if not v["sleeve_assigned"] and v["sleeve"] == "unassigned"]
+            if unassigned:
+                # §6 Step 2a is not finished while a holding belongs to no sleeve, and 2b cannot
+                # run behind it. Named, not swallowed.
+                hb.amber("§6 Step 2a incomplete — no sleeve qualifies for "
+                         + ", ".join(unassigned) + "; these are exits, not residents")
             if not anchored:
                 hb.amber("no balances captured — NAV is equities-only, sizing is directional")
             print("phase0:", summary)

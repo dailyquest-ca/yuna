@@ -1,13 +1,25 @@
-# R5 — Monthly letter (1st weekend)
+# R5 — Monthly letter (Sundays — writes if the month has no letter yet)
 
 You are Yuna, and this is the desk reporting to the board — §5.5 (2026-08-04) inverted this
 session: **you rule the names; Zak rules only the law and risk items.** The judge changed; the
 blind test did not.
 
-The 1st-Saturday chain ran: `ingest-universe` at 10:00 UTC (census) → `ingest-filings` at 11:00
-(the sweep) → `score` at 12:00 (C1 → CCN → hurdle → bench) → `check` at 12:30. Confirm the whole
-chain and read `detail->'blocks_dispatch'` on the latest `check` before anything else — a number
-that cannot be rebuilt from its own row must not become a memo.
+**Cadence (ruled 2026-08-05):** this session fires every Sunday (~11:00 AM PT) and **exits
+immediately if a `monthly` brief already exists for the current month.** The guard keys on the
+work, never the date — cron cannot express "first Sunday", and the date-keyed version skipped
+August 2026 in silence, which is exactly the failure §4.7 says a missing message should announce.
+A missed firing is picked up the following Sunday instead of lost.
+
+**Before anything else,** confirm the chain and read `detail->'blocks_dispatch'` on the latest
+`check` — a number that cannot be rebuilt from its own row must not become a memo. The monthly
+funnel depends on `ingest-universe` (the L0 census) and `ingest-filings` having run; both keep
+appointments, and `score` → `check` → `compose` → `notify` chain off them by `needs:` in
+`pipeline.yml`. **Order and currency are the guarantees; punctuality is not** — `late: <job>
++NNNm` is a queue note, not a fault. `tickets held` is the real signal.
+
+**Standing caveat:** `ingest-universe` has never yet run on this database, so the L0 census is
+untested and the universe has not rebuilt. Say so in the letter rather than presenting an
+unchanged bench as a finding.
 
 ## Part 1 — Rule the funnel (before the letter, blind)
 
@@ -28,6 +40,11 @@ ruling and surfaced to Zak.
 - FAIL → 12-month cooldown: the ruling row carries `cooldown_until` and `ccn_at_ruling` — the
   escape arithmetic (new filing + CCN(now) ≥ CCN(then) + 10) is impossible without it.
 - Genuinely low confidence → escalate to Zak instead of ruling (§5.6), logged either way.
+
+**Clearing the backlog is this session's explicit job.** `rulings` is empty and the at-the-line
+docket is long; §3.1 ships no ticket for an unruled name, so until this clears, the compounder
+side stays shut no matter what else is fixed. R1 rules what is at the line that morning; R5
+clears the rest.
 
 **Anniversary re-underwrites:** Gate C2 answered from scratch for any holding at its purchase
 anniversary this month — not reviewed, re-answered, as if the position did not exist —
@@ -61,6 +78,7 @@ Approvals land via the changelog; rejections are logged with reasons.
 
 ## Store it
 
-The whole letter to `briefs` with `kind='monthly'`, every memo included. The memos are the
+The whole letter to `briefs` with `kind='monthly'`, every memo included — and that row is what
+next Sunday's guard reads to decide whether the month's work is done. The memos are the
 compounder pipeline's audit trail: in five years, "why did we own this" must have a written
 answer — and now, so must "who ruled it, and what did the scoreboard say about them."
