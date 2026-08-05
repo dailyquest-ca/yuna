@@ -925,6 +925,50 @@ def test_a_below_seventy_name_never_arms_an_entry(db, fx):
     assert armed(db, "entry", "WEAK.US") == []
 
 
+def test_a_name_the_ledger_owns_is_never_armed_as_a_new_entry(db, fx):
+    """The RS.US failure of 2026-08-05, as an assertion.
+
+    Zak filled RS.US at 419.83 on the 4th. No ticket carried the fill, so the book never saw it —
+    and the book is the only thing arming consulted. Four briefs then offered him a new momentum
+    entry at trigger 419.83: the same name, at the price he had already paid. Ownership is now
+    read from the ledger, which cannot be behind a fill by construction, and the discrepancy is
+    armed as a `check` so the session sees it instead of a silent skip.
+    """
+    with db.cursor() as cur:
+        world.add_name(cur, "RS.US")
+        world.flat_then_base(cur, "RS.US")
+        world.gate(cur)
+        world.queued(cur, "RS.US", mcn=77.3)
+        tid = world.ticket(cur, "RS.US", state="confirmed")
+        world.fill(cur, tid, "RS.US", qty=10, price=419.83)   # ledger yes, book no
+        cur.execute("update transactions set applied_at = now()")   # already digested, badly
+        world.balances(cur)
+    db.commit()
+    run()
+    assert armed(db, "entry", "RS.US") == [], "no entry for a name we own"
+    flagged = armed(db, "check", "RS.US")
+    assert flagged and flagged[0]["reason"] == "already_owned"
+    assert "the ledger holds this name and the book does not" in flagged[0]["note"]
+
+
+def test_a_name_fully_sold_is_armable_again(db, fx):
+    """The mirror: net quantity, not "has ever been bought". §3.2 gives a stop-out no cooldown —
+    re-entry needs a valid base and the gates, nothing more."""
+    with db.cursor() as cur:
+        world.add_name(cur, "RS.US")
+        world.flat_then_base(cur, "RS.US")
+        world.gate(cur)
+        world.queued(cur, "RS.US", mcn=77.3)
+        tid = world.ticket(cur, "RS.US", state="confirmed")
+        world.fill(cur, tid, "RS.US", qty=10, price=419.83, days_ago=30)
+        world.fill(cur, tid, "RS.US", side="sell", qty=10, price=430.0, days_ago=5)
+        cur.execute("update transactions set applied_at = now()")
+        world.balances(cur)
+    db.commit()
+    run()
+    assert armed(db, "entry", "RS.US"), "flat is flat — the name is a candidate like any other"
+
+
 def test_a_holding_outside_l0_is_still_scored(db, fx):
     """§3.0: 'Holdings are always scored, by both pipelines — membership lists never drop a name the
     book owns.' The L0 bar filters decide membership, not scoreability.

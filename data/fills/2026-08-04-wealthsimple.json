@@ -1,0 +1,60 @@
+{
+  "source": "Wealthsimple settled activity, 2026-08-04 session — provided by Zak 2026-08-05",
+  "note": "Four fills the book had never seen. It was correct through 2026-07-29 (ANET, NVDA and ISRG all reproduce to the cent from the export) and blind to the session after it. The cost was not bookkeeping: the 2026-08-05 briefs armed RS.US as a new momentum entry at trigger 419.83 — the same name at the same price Zak had already filled.",
+  "fills": [
+    {
+      "ref": "ws-2026-08-04-vrt-sell",
+      "trade_date": "2026-08-04",
+      "ticker": "VRT.US",
+      "account": "TFSA",
+      "side": "sell",
+      "qty": 0.0031,
+      "price": 274.182,
+      "currency": "USD",
+      "fx": 1.4063,
+      "net_cash_usd": 0.85,
+      "note": "closes the position — the book still showed 0.0031 open"
+    },
+    {
+      "ref": "ws-2026-08-04-nue-buy-1",
+      "trade_date": "2026-08-04",
+      "ticker": "NUE.US",
+      "account": "TFSA",
+      "side": "buy",
+      "sleeve": "momentum",
+      "qty": 16,
+      "price": 272.84,
+      "currency": "USD",
+      "fx": 1.4063,
+      "net_cash_usd": -4365.44
+    },
+    {
+      "ref": "ws-2026-08-04-nue-buy-2",
+      "trade_date": "2026-08-04",
+      "ticker": "NUE.US",
+      "account": "TFSA",
+      "side": "buy",
+      "sleeve": "momentum",
+      "qty": 16,
+      "price": 262.59,
+      "currency": "USD",
+      "fx": 1.4047,
+      "net_cash_usd": -4201.44,
+      "note": "second lot the same session — 32 shares at a 267.715 average once both are applied"
+    },
+    {
+      "ref": "ws-2026-08-04-rs-buy",
+      "trade_date": "2026-08-04",
+      "ticker": "RS.US",
+      "account": "TFSA",
+      "side": "buy",
+      "sleeve": "momentum",
+      "qty": 10,
+      "price": 419.83,
+      "currency": "USD",
+      "fx": 1.4047,
+      "net_cash_usd": -4198.30,
+      "note": "filled at the armed pivot — the entry the briefs went on offering afterwards"
+    }
+  ]
+}

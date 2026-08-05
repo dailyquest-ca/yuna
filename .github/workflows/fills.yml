@@ -1,0 +1,42 @@
+name: fills
+# Dispatch-only tooling (§4.2): fold a broker export into the ledger when the Sunday path missed
+# one. Named for what it does, runs under the same heartbeat discipline as every other job, and
+# writes to no scoring table — only `tickets`, and then `transactions` and `book` through the two
+# functions the nightly `score` already calls.
+#
+# Manifests live in `data/fills/*.json` and each fill carries a `ref`, so a re-run applies nothing
+# twice. Run it with dry_run first: it prints every row it would write and writes none.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'read the manifests, write nothing'
+        default: 'true'
+      glob:
+        description: 'which manifests to read (default data/fills/*.json)'
+        default: ''
+
+concurrency:
+  group: yuna-writes
+  cancel-in-progress: false
+
+jobs:
+  fills:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/fills.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FILLS_GLOB: ${{ inputs.glob }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py fills /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
