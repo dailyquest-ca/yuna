@@ -85,6 +85,69 @@ def get(path, calls, tries=3, timeout=90, **params):
             raise
 
 
+def cash_by_account(cur):
+    """Per-account cash by currency: Sunday's anchor, carried forward by the ledger.
+
+    §2.0 — **balances are truth, prices are the extrapolation** — and §2.0 again, on the other
+    side of the same coin: a ticket "is only written if that account holds the cash", and cash
+    "includes unsettled proceeds of same-account sells". Money moves when a fill happens. The
+    anchor is a Sunday reading, so a fill after it has already moved the real cash and the anchor
+    has not caught up: the ledger is what carries it forward.
+
+    Found the day four 2026-08-04 fills were reconciled. The book gained NUE and RS while the cash
+    that bought them sat untouched in an anchor dated the 3rd, and NAV read 8.1% high — C$17,937
+    of stock the account was credited with owning and with still having the money for. Before the
+    reconciliation the two errors cancelled, which is the least comfortable way for a number to be
+    right.
+
+    A buy takes its own currency out, a sell puts it back, fees on both. Nothing else is modelled:
+    deposits, dividends and interest keep being absorbed at the next anchor, exactly as §2.0 says.
+    A levered buy can drive an account's cash negative between anchors — that is the undrawn
+    facility showing through, and NAV lands in the same place either way, because borrowing is
+    NAV-neutral at the moment of use.
+    """
+    cur.execute("""select distinct on (b.account) b.account, a.kind, b.cash, b.cash_cad,
+                          b.cash_usd, b.drawn, b.credit_limit, b.total_value, b.as_of
+                   from balances b join accounts a on a.code=b.account
+                   order by b.account, b.as_of desc, b.id desc""")
+    bal = {r[0]: dict(kind=r[1], cash=r[2], cad=r[3], usd=r[4], drawn=r[5], limit=r[6],
+                      total=r[7], as_of=r[8]) for r in cur.fetchall()}
+
+    # only movement the anchor cannot already contain — strictly after its date, and only the two
+    # sides that are cash. `confirm` rows are R4 restating a share count and move no money.
+    cur.execute("""with anchor as (
+                     select distinct on (account) account, as_of from balances
+                      order by account, as_of desc, id desc)
+                   select t.account, coalesce(t.currency, 'USD'),
+                          sum(case when t.side = 'sell'
+                                     then  t.qty * t.price - coalesce(t.fees, 0)
+                                   when t.side = 'buy'
+                                     then -t.qty * t.price - coalesce(t.fees, 0)
+                                   else 0 end)
+                     from transactions t
+                     join anchor a on a.account = t.account
+                    where t.trade_date > a.as_of
+                    group by 1, 2""")
+    since = {}
+    for acct, ccy, delta in cur.fetchall():
+        since.setdefault(acct, {})[ccy] = float(delta or 0)
+
+    out = {}
+    for acct, b in bal.items():
+        moved = since.get(acct, {})
+        if b.get("cad") is not None or b.get("usd") is not None:
+            cad, usd = float(b.get("cad") or 0), float(b.get("usd") or 0)
+        else:
+            # the deprecated single column, kept readable for rows written before migration 016
+            cad, usd = float(b.get("cash") or 0), 0.0
+        out[acct] = dict(kind=b["kind"], as_of=b["as_of"], drawn=b["drawn"], limit=b["limit"],
+                         total=b["total"],
+                         cad=cad + moved.get("CAD", 0.0), usd=usd + moved.get("USD", 0.0),
+                         anchored_cad=cad, anchored_usd=usd,
+                         moved_since_anchor={k: round(v, 2) for k, v in moved.items() if v})
+    return out
+
+
 def nav_cad(cur):
     """NAV per §2.0 — balances are truth, prices are the extrapolation.
 
@@ -111,12 +174,7 @@ def nav_cad(cur):
         per_account[acct] = per_account.get(acct, 0.0) + cad
     book_equities = sum(per_account.values())
 
-    cur.execute("""select distinct on (b.account) b.account, a.kind, b.cash, b.cash_cad,
-                          b.cash_usd, b.drawn, b.credit_limit, b.total_value, b.as_of
-                   from balances b join accounts a on a.code=b.account
-                   order by b.account, b.as_of desc, b.id desc""")
-    bal = {r[0]: dict(kind=r[1], cash=r[2], cad=r[3], usd=r[4], drawn=r[5], limit=r[6],
-                      total=r[7], as_of=r[8]) for r in cur.fetchall()}
+    bal = cash_by_account(cur)          # the anchor, carried forward by the ledger (§2.0)
 
     assets = cash = debt = 0.0
     accounts = {}
@@ -125,18 +183,18 @@ def nav_cad(cur):
         if b.get("kind") == "facility":
             debt += float(b.get("drawn") or 0)      # facilities are CAD always
             continue
-        # cash per currency is the anchored truth; the USD sleeve reprices with FX daily.
-        # Falling back to the deprecated single `cash` column keeps older rows readable.
-        if b.get("cad") is not None or b.get("usd") is not None:
-            c_cad, c_usd = float(b.get("cad") or 0), float(b.get("usd") or 0)
-            c = c_cad + c_usd * fx
-        else:
-            c_cad, c_usd = float(b.get("cash") or 0), 0.0
-            c = c_cad
+        # cash per currency, so the USD sleeve reprices with FX daily
+        c_cad, c_usd = float(b.get("cad") or 0), float(b.get("usd") or 0)
+        c = c_cad + c_usd * fx
         value = c + per_account.get(acct, 0.0)      # §2.0: balances anchor, prices extrapolate
         stated = b.get("total")
         accounts[acct] = dict(value_cad=round(value, 2), cash_cad=round(c, 2),
                               cash_native={"CAD": round(c_cad, 2), "USD": round(c_usd, 2)},
+                              # what the anchor said, and what the ledger has done since — a
+                              # variance against a stated total is unreadable without both
+                              cash_anchored={"CAD": round(float(b.get("anchored_cad") or 0), 2),
+                                             "USD": round(float(b.get("anchored_usd") or 0), 2)},
+                              cash_moved_since_anchor=b.get("moved_since_anchor") or {},
                               book_equities_cad=round(per_account.get(acct, 0.0), 2),
                               stated_total=float(stated) if stated is not None else None,
                               variance_cad=(round(value - float(stated), 2)
@@ -342,10 +400,9 @@ def freshness(conn, *, stale_days=4):
         cur.execute("""select distinct on (job) job, status, detail from runs
                        where started_at > now() - interval '36 hours' order by job, id desc""")
         recent = [(j, s, d) for j, s, d in cur.fetchall()]
-        # every finished, non-dry run in the window — the ordering question is about runs, not jobs
+        # every non-dry run in the window — the ordering question is about runs, not jobs
         cur.execute("""select job, started_at, finished_at, coalesce(rows_written, 0) from runs
-                       where started_at > now() - interval '36 hours'
-                         and status <> 'running' and not dry_run""")
+                       where started_at > now() - interval '36 hours' and not dry_run""")
         timeline = cur.fetchall()
 
     status = {j: s for j, s, _ in recent}
@@ -368,10 +425,14 @@ def freshness(conn, *, stale_days=4):
         line += " · " + " · ".join(late)
 
     # §5.6's third condition: order. The chain is a data dependency (§4.2's `needs:`), so this
-    # should be impossible — which is exactly why it is asserted rather than assumed. Only an
-    # ingest that LANDED ROWS can leave a score behind: the monthly guard's own exit-clean run and
-    # the retry that finds the night already green both finish having written nothing, and neither
-    # makes a single derived number older than its source.
+    # should be impossible — which is exactly why it is asserted rather than assumed.
+    #
+    # Two asymmetries, both learned the hard way on the first night this ran. An ingest counts only
+    # once it has FINISHED and landed rows: the monthly guard's exit-clean run and the retry that
+    # finds the night already green both finish having written nothing, and neither makes a derived
+    # number older than its source. A score counts from the moment it STARTS, run in progress
+    # included — because the caller asking this question is usually that very run, and comparing
+    # against the previous score made every chained run report itself out of order.
     ingest_end = max((f for j, _, f, n in timeline if j in VERBS["ingest"] and f and n > 0),
                      default=None)
     score_start = max((s for j, s, _, _ in timeline if j in VERBS["score"]), default=None)
