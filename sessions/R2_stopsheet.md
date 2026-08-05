@@ -11,9 +11,10 @@ select freshness, body from briefs
  order by at desc limit 1;
 ```
 
-- **Row found → deliver `body` verbatim.** No re-derivation, no additions, no commentary — the
-  pipeline already spoke, and a deliverer that edits the words is a second author the audit
-  trail doesn't have. The composed line set is exactly §5.2's:
+- **Row found → deliver `body` with every line intact.** No re-derivation, no reordering, no
+  edits to any data line — the composed sheet is the record, and §5.2 is clinical by law, so at
+  most one §5.0 framing line may sit above it (and none on a red night — the voice goes flat).
+  The composed line set is exactly §5.2's:
   `✓ stops all placed correctly` · or one line per action, both prices
   (`NVDA · stop 176.20 / limit 170.90` · `AMD · blackout — cancel entry order`) · or
   `⚠️ pipeline red — touch nothing, GTCs stand as placed`.

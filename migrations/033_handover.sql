@@ -190,11 +190,9 @@ end $$;
 insert into config (key, value, note, set_by) values
  ('push_channel', '"cowork"',
   '§4.4/§4.7: notify''s delivery service. "cowork" = the scheduled Routines inside the Yuna '
-  'chat/cowork project deliver the composed words; notify verifies the payload exists and is '
-  'fresh, and goes red when it is missing — a missing message is itself the alarm', 'zak'),
- ('compose_model', '"claude-sonnet-5"',
-  '§4.2 compose: the model that writes the words. A config row, so changing it is a logged '
-  'decision, not code archaeology', 'yuna');
+  'chat/cowork project deliver the composed words — and apply the §5.0 voice on Zak''s Claude '
+  'plan, never a metered API key (ruled 2026-08-05); notify verifies the payload exists and is '
+  'fresh, and goes red when it is missing — a missing message is itself the alarm', 'zak');
 
 insert into observations (kind, ticker, body, detail)
 select 'note', null,

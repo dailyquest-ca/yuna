@@ -1,8 +1,9 @@
 name: compose
-# §4.2, verb four, first half: the pipeline writes the words. Runs after check, before notify —
-# dispatch is a sequence: score → check → compose → notify. Reads v_session_payload (the same
-# single read every session makes), renders the data mechanically, and asks the model for the
-# §5.0 voice layer; no key or a failed call ships the mechanical text as an amber, never silence.
+# §4.2, verb four, first half: the pipeline writes the words down. Runs after check, before
+# notify — dispatch is a sequence: score → check → compose → notify. Reads v_session_payload
+# (the same single read every session makes) and renders it mechanically. Deliberately keyless
+# (ruled 2026-08-05): the §5.0 voice layer is applied by the scheduled project sessions, which
+# run on Zak's Claude plan — never by a metered API key in this job.
 #
 # Nightly writes the stop sheet AND the next morning's brief: nothing touches the database
 # between tonight's check and the open, so tomorrow's words composed tonight are the same words,
@@ -42,7 +43,6 @@ jobs:
       - run: set -o pipefail; python src/compose.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
           COMPOSE_SLOT: ${{ inputs.slot || (github.event.schedule == '0 13 * * 6' && 'saturday' || 'nightly') }}
           SCHEDULED_UTC: ${{ github.event.schedule == '0 13 * * 6' && '13:00' || '04:05' }}

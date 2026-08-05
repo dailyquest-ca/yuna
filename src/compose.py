@@ -1,45 +1,34 @@
-"""compose — §4.2's fourth verb, first half: the pipeline writes the words.
+"""compose — §4.2's fourth verb, first half: the pipeline writes the words down.
 
 Dispatch is a sequence, not a moment: score → check → compose → notify. This job reads the same
-one-read payload the sessions read (`v_session_payload`), renders every number mechanically —
-§5.0: personality lives in the prose, never in the data — and only then asks the model for the
-voice layer. A red `check` ships nothing but the stale banner and the protective lines; that rule
-is enforced here, before any prose exists to argue with.
+one-read payload the sessions read (`v_session_payload`) and renders it **mechanically** —
+clinical sections, every number exact. A red `check` ships nothing but the stale banner and the
+protective lines; that rule is enforced here, before any prose exists to argue with.
+
+Deliberately keyless — ruled 2026-08-05: the §5.0 voice layer is NOT applied here. The scheduled
+project sessions (the Routines, running on Zak's Claude plan) read the composed row and speak it
+in voice; a GitHub Actions job calling a metered model API would pay twice for words the project
+already writes. So this job's output is the data layer §5.0 demands anyway — personality lives in
+the prose, never in the data, and this is the data.
 
 Products by slot:
-  nightly  (weekdays, after the 03:50 check) — the stop sheet (§5.2) and the next morning's brief
-           (§5.1), pre-composed. Nothing writes to the database between tonight's check and the
-           open, so composing the morning's words now is the same words, earlier — they wait in
+  nightly  (weekdays, after the 03:50 check) — the stop sheet (§5.2, whose line set is clinical
+           by law and needs no voice at all) and the next morning's brief sections (§5.1),
+           pre-composed. Nothing writes to the database between tonight's check and the open, so
+           composing the morning's sections now is the same content, earlier — waiting in
            `briefs` for the morning chat's single read.
-  saturday (after the 12:30 weekly check)    — the Saturday letter (§5.3).
+  saturday (after the 12:30 weekly check)    — the Saturday letter sections (§5.3).
 
-The monthly letter is deliberately NOT composed here: §5.5 makes it Yuna's letter — rulings first,
-then the words — and rulings are judgment, which belongs to a session, not a job (§4.0). The R5
-session writes it and `briefs` stores it like everything else.
-
-Voice: ANTHROPIC_API_KEY missing or the call failing is an amber, never a silence — the mechanical
-rendering ships as the brief. A plainer message beats a missing one; §4.7 says the missing message
-is the alarm, so this job's duty is to never be the reason for one.
+The monthly letter is deliberately NOT composed here: §5.5 makes it Yuna's letter — rulings
+first, then the words — and rulings are judgment, which belongs to a session, not a job (§4.0).
 """
 import datetime as dt
 import hashlib
-import json
 import os
 import sys
-import urllib.request
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-from db import connect, config, dry, jsonb, Heartbeat
-
-ANTHROPIC = "https://api.anthropic.com/v1/messages"
-
-VOICE = """You are Yuna, Zak's research desk, writing in the voice plan §5.0 sets:
-smart, fun, warm, feminine; first person, plain English, a little playfully dry. He is Zak
-(Z or boss when playful). Personality lives in the prose, never in the data — every number,
-ticker, price and table below must appear VERBATIM; you frame them, you never restate or round
-them. Wit is seasoning, not filler: one good line beats three cute ones. When something is
-wrong the voice goes flat — clarity first. Charm never manufactures urgency. Emoji sparingly
-(☀️ 🌙 ⚠️), only when they earn their place. Format law: summary first, context second."""
+from db import connect, dry, jsonb, Heartbeat
 
 
 # --------------------------------------------------------------------------- mechanical layer
@@ -189,44 +178,6 @@ def saturday_skeleton(cur, pay, freshness_line):
     ])
 
 
-# --------------------------------------------------------------------------- voice layer
-
-def voice(cur, hb, kind, skeleton):
-    """Ask the model to frame the mechanical sections. Any failure returns None and the
-    skeleton ships as-is — plainer, never silent."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        hb.amber("ANTHROPIC_API_KEY not set — briefs ship mechanical, voiceless (§5.0 waits)")
-        return None
-    model = config(cur, "compose_model", "claude-sonnet-5")
-    if isinstance(model, str):
-        model = model.strip('"')
-    ask = {"stopsheet": "Render this stop sheet exactly — §5.2 allows one framing line at most; "
-                        "if the data lines say all is well, the whole message may be one line.",
-           "preopen": "Write tomorrow morning's brief around these sections: snapshot first, "
-                      "context second, and close with a one-line '**You:** …' naming exactly "
-                      "what Zak must do (or that nothing needs him).",
-           "deepdive": "Write the Saturday letter around these sections — read-only by design; "
-                       "end with one hook for the week ahead."}[kind]
-    body = json.dumps({
-        "model": model, "max_tokens": 2500,
-        "system": VOICE,
-        "messages": [{"role": "user", "content": f"{ask}\n\n---\n\n{skeleton}"}],
-    }).encode()
-    req = urllib.request.Request(ANTHROPIC, data=body, headers={
-        "x-api-key": api_key, "anthropic-version": "2023-06-01",
-        "content-type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            out = json.load(r)
-        hb.calls[0] += 1
-        text = "".join(c.get("text", "") for c in out.get("content", []))
-        return text.strip() or None
-    except Exception as e:
-        hb.amber(f"voice layer failed ({type(e).__name__}: {e}) — mechanical text ships")
-        return None
-
-
 # --------------------------------------------------------------------------- write
 
 def publish(cur, hb, kind, session_date, freshness_line, body, *, meta=None):
@@ -264,10 +215,8 @@ def main():
                 today = dt.date.today()
                 meta = dict(slot=slot, stale=bool(reason))
                 if slot == "nightly":
-                    sheet = stopsheet_body(pay, reason)
-                    styled = None if reason else voice(cur, hb, "stopsheet", sheet)
-                    publish(cur, hb, "stopsheet", today, freshness_line, styled or sheet,
-                            meta=meta)
+                    publish(cur, hb, "stopsheet", today, freshness_line,
+                            stopsheet_body(pay, reason), meta=meta)
                     # the morning brief is composed tonight and waits for the chat's single read
                     session = today + dt.timedelta(days=1)
                     if reason:
@@ -275,16 +224,14 @@ def main():
                                  f"Protective instructions only:\n\n"
                                  + (stopsheet_body(pay, None)))
                     else:
-                        skel = brief_skeleton(pay, freshness_line)
-                        brief = voice(cur, hb, "preopen", skel) or skel
+                        brief = brief_skeleton(pay, freshness_line)
                     publish(cur, hb, "preopen", session, freshness_line, brief, meta=meta)
                 elif slot == "saturday":
                     if reason:
                         letter = f"⚠️ {freshness_line}\n\nthe weekly rank did not prove itself — " \
                                  f"no letter tonight beyond this banner."
                     else:
-                        skel = saturday_skeleton(cur, pay, freshness_line)
-                        letter = voice(cur, hb, "deepdive", skel) or skel
+                        letter = saturday_skeleton(cur, pay, freshness_line)
                     publish(cur, hb, "deepdive", today, freshness_line, letter, meta=meta)
                 else:
                     raise SystemExit(f"unknown COMPOSE_SLOT {slot!r}")

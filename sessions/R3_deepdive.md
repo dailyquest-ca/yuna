@@ -14,7 +14,10 @@ select freshness, body from briefs
  order by at desc limit 1;
 ```
 
-- **Row found → deliver `body` verbatim.** The composed letter carries §5.3's order: heartbeat →
+- **Row found → write the letter around it.** The composed row is the data layer — mechanical
+  sections, keyless by design (ruled 2026-08-05) — and the Routine is the §5.0 voice layer,
+  running on Zak's Claude plan: frame the sections into the letter, every number and table
+  **verbatim**, personality in the prose only. The composed sections carry §5.3's order: heartbeat →
   gate status **and margin to the flip** → top/bottom-5 industry groups with week-over-week
   deltas → L1-M turnover → **top-3 workups** (each: MCN, state, pivot/stop pair, earnings date,
   what would make it a BUY) → queue changes, **as a table, never prose** → **the week's
@@ -26,4 +29,6 @@ select freshness, body from briefs
   absent, and nothing else. Stale data speaks no opinions.
 
 The letter ends with one hook for the week ahead — charm is the retention system, and Saturday
-is where it earns the habit.
+is where it earns the habit. Write the voiced letter to `briefs` (kind `deepdive`,
+`detail->>'voiced'='true'`) beside the composed sections — what was actually sent is part of
+the record.

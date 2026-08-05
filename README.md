@@ -45,7 +45,7 @@ src/          ingest + compute jobs (Python); db.py holds the shared heartbeat c
 | `funnel.py` | EODHD symbol list + bulk + screener | `universe` (L0 census) |
 | `fundamentals.py` | EODHD fundamentals | `fundamentals`, `universe` decorations |
 | `score.py` | `fundamentals`, `prices` | `bench` (C1 → CCN → hurdle) |
-| `compose.py` | `v_session_payload` | composed `briefs` — the stop sheet, the morning brief, the Saturday letter (§4.2 speak, first half) |
+| `compose.py` | `v_session_payload` | composed `briefs` — the stop sheet, morning-brief and Saturday-letter sections, rendered mechanically and keyless; the project's scheduled sessions apply the §5.0 voice on Zak's Claude plan (§4.2 speak, first half) |
 | `notify.py` | composed `briefs`, `config.push_channel` | nothing but its runs row — proves the words exist before the Routines deliver them |
 | `phase0.py` | `book`, `bench`, `candidates`, `queue`, `balances` | `tickets`, a `phase0` brief |
 | `backup.py` | everything but the bars | a compressed dump committed here |

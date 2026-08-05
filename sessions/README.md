@@ -15,10 +15,12 @@ A session that did not write its `briefs` row did not happen.
 
 **The automated Claude sessions live inside the Yuna chat/cowork project** — ruled 2026-08-05.
 The Routines above fire fresh sessions in the project's environment, carrying its Supabase and
-EODHD connectors; `config.push_channel = 'cowork'` names them as `notify`'s delivery vehicle. The
-stop sheet and Saturday letter Routines are **deliverers, not authors**: one read of the composed
-`briefs` row, delivered verbatim (their runbooks say exactly what happens when the row is
-missing). The morning chat and Sunday/monthly sessions are where judgment happens.
+EODHD connectors; `config.push_channel = 'cowork'` names them as `notify`'s delivery vehicle,
+**and they are the §5.0 voice layer** — Claude runs here on Zak's plan, never on a metered API
+key, which is why `compose` renders mechanically and stops. The stop sheet and Saturday letter
+Routines author no data: one read of the composed `briefs` row, every number delivered intact,
+voice in the framing only (their runbooks say exactly what happens when the row is missing).
+The morning chat and Sunday/monthly sessions are where judgment happens.
 
 The jobs those sessions read, per §4.2 — the canonical schedule, all UTC; **nothing joins it
 without a plan edit**:
@@ -28,7 +30,7 @@ without a plan edit**:
 | `ingest-daily` | `0 2 * * 2-6` and `0 3 * * 2-6` | bars, FX, corporate actions, earnings calendar, quarantine. The second firing exits if the night is already green |
 | `score` | `30 3 * * 2-6` · `0 12 * * 6` | every derived number, one writer. Saturday is the full weekly rank |
 | `check` | `50 3 * * 2-6` · `30 12 * * 6` | every assertion plus the pre-flight; writes nothing but its report row |
-| `compose` | `5 4 * * 2-6` · `0 13 * * 6` | writes the words: the stop sheet + the next morning's brief nightly; the Saturday letter weekly. The monthly letter stays with the R5 session — rulings are judgment |
+| `compose` | `5 4 * * 2-6` · `0 13 * * 6` | writes the words down, mechanically and **keyless** (ruled 2026-08-05 — no metered model key, ever): the stop sheet + the next morning's brief sections nightly; the Saturday letter sections weekly. The monthly letter stays with the R5 session — rulings are judgment |
 | `notify` | `20 4 * * 2-6` · `15 13 * * 6` | proves the composed words exist before the doorbell rings; red when they don't (§4.7) |
 | `ingest-universe` | `0 10 * * 6` (1st Sat) | the L0 census |
 | `ingest-filings` | `0 11 * * 6` | the filings sweep |
