@@ -1,11 +1,13 @@
 name: check
-# §4.2, verb three: prove it is safe to speak. Runs after every score and at every session
-# dispatch. Writes nothing but its own report row — a checker that can edit what it checks is a
-# participant, not a witness. Ambers print at the top of the brief; a red blocks the dispatch.
+# §4.2, verb three: prove it is safe to speak. Writes nothing but its own report row — a checker
+# that can edit what it checks is a participant, not a witness. Ambers print at the top of the
+# brief; a red blocks the dispatch.
+#
+# It has no cron (ruled 2026-08-05). §4.2 gives it two triggers and both are events: chained to
+# every `score` by `needs:` — that copy lives in `pipeline.yml` — **and at every session dispatch**,
+# which is this file. Yuna triggers it through the Actions API when a session opens and wants the
+# numbers re-proved before it speaks.
 on:
-  schedule:
-    - cron: '50 3 * * 2-6'  # after score at 03:30, before R2 reads at 04:00
-    - cron: '30 12 * * 6'   # after the Saturday full rank
   workflow_dispatch:
 jobs:
   check:

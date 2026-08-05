@@ -45,6 +45,13 @@ def apply_fills(conn, hb):
                        where t.applied_at is null
                        order by t.trade_date, t.id""")
         rows = cur.fetchall()
+        if dry():
+            # §4.2: every job carries DRY_RUN, and DRY_RUN means compute everything and write
+            # nothing. This pass wrote the book regardless — so a rehearsal moved real positions,
+            # and the one job whose whole purpose is to be rehearsed (`fills`) inherited it.
+            hb.detail["fills_would_apply"] = [f"{r[3]} {float(r[4]):g} {r[1]} @ {float(r[5]):g}"
+                                              for r in rows]
+            return []
         for (tid, tk, acct, side, qty, price, ccy, tdate, step, ticket_id, sleeve, theme,
              stop, stop_limit, pivot, target_qty) in rows:
             qty, price = float(qty), float(price)
@@ -67,6 +74,20 @@ def apply_fills(conn, hb):
                                 (new_qty, new_cost, step, step, sleeve == "compounders",
                                  sleeve == "compounders", tdate, bid))
                 else:
+                    # §3.2: "Initial: higher of the base's final-contraction low, or entry − 8%.
+                    # Never wider than 8%." A ticket the machine armed carries that stop already.
+                    # A fill with no ticket behind it — Zak's own trade, reconciled later (R4) —
+                    # carries none, and the ratchet only ever moves an EXISTING stop upward: the
+                    # position would have opened unprotected and stayed that way, with nothing on
+                    # the stop sheet and nothing for §4.6's broker GTC to mirror.
+                    if stop is None and (sleeve or "momentum") == "momentum":
+                        cur.execute("select base_low from candidates where ticker=%s", (tk,))
+                        base = cur.fetchone()
+                        max_stop = float(config(cur, "momentum_max_stop", 0.08))
+                        stop = sg.initial_stop(price,
+                                               float(base[0]) if base and base[0] else None,
+                                               max_stop=max_stop)
+                        stop_limit = stop * (1 - float(config(cur, "stop_limit_buffer", 0.03)))
                     cur.execute("""insert into book(ticker,account,sleeve,lot,qty,avg_cost,currency,
                                      opened_at,stop,stop_limit,highest_close,trail_mode,
                                      pyramid_step,theme,pivot,target_qty,
@@ -103,23 +124,40 @@ def sync_fills_from_tickets(conn, hb):
     flip writes `fill_*` on the ticket and marks it provisional — and THIS job derives the
     transactions row, because §4.3 no longer lets a session touch the ledger. Sunday's
     confirmation flips the ticket to confirmed with trued numbers; the same pass here trues the
-    transaction. Both directions are idempotent: one transaction per ticket, updates by delta."""
+    transaction. Both directions are idempotent: one transaction per ticket, updates by delta.
+
+    A ticket written straight to `confirmed` is derived too. R4 step 2 routes a fill with no
+    ticket behind it — Zak's own discretionary trade — through exactly that shape, "so the nightly
+    job can carry it into the book". It could not: this pass only read `provisional`, and the
+    trueing pass below only UPDATES rows that already exist, so a settled discretionary fill
+    landed in no ledger and no book at all. Four of them did, on 2026-08-04.
+    """
     made, trued = [], []
     with conn.cursor() as cur:
         cur.execute("""select k.id, k.ticker, k.account, k.action, k.fill_qty, k.fill_price,
                               coalesce(k.currency, 'USD'), k.fill_fx, k.fill_fees,
-                              coalesce(k.fill_date, current_date)
+                              coalesce(k.fill_date, current_date), k.state
                        from tickets k
-                       where k.state = 'provisional' and k.fill_price is not null
+                       where k.state in ('provisional', 'confirmed') and k.fill_price is not null
                          and k.fill_qty is not null and k.account is not null
-                         and not exists (select 1 from transactions t where t.ticket_id = k.id)""")
-        for tid, tk, acct, action, qty, price, ccy, fxr, fees, tdate in cur.fetchall():
+                         and not exists (select 1 from transactions t where t.ticket_id = k.id)
+                       order by k.fill_date, k.id""")
+        pending = cur.fetchall()
+        if dry():
+            hb.detail["fills_would_derive"] = [f"{r[1]} {float(r[4]):g} @ {float(r[5]):g}"
+                                               for r in pending]
+            return []
+        for tid, tk, acct, action, qty, price, ccy, fxr, fees, tdate, state in pending:
             side = "sell" if action in ("sell", "exit") else "buy"
+            settled = state == "confirmed"
             cur.execute("""insert into transactions (ticket_id, ticker, account, side, qty,
-                             price, currency, fx_rate, fees, trade_date, confirmed)
-                           values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,false)""",
-                        (tid, tk, acct, side, qty, price, ccy, fxr, fees or 0, tdate))
-            made.append(f"{side} {float(qty):g} {tk} @ {float(price):g} (ticket {tid})")
+                             price, currency, fx_rate, fees, trade_date, confirmed, confirmed_at)
+                           values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                                   case when %s then now() else null end)""",
+                        (tid, tk, acct, side, qty, price, ccy, fxr, fees or 0, tdate,
+                         settled, settled))
+            made.append(f"{side} {float(qty):g} {tk} @ {float(price):g} (ticket {tid}"
+                        + (", settled)" if settled else ")"))
         cur.execute("""select k.id, k.fill_qty, k.fill_price, k.fill_fx, k.fill_fees, k.fill_date
                        from tickets k join transactions t on t.ticket_id = k.id
                        where k.state = 'confirmed' and not t.confirmed""")
@@ -489,6 +527,30 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                        group by 1""")
         group_count = {r[0]: r[1] for r in cur.fetchall()}
 
+        # A name the LEDGER has bought and not sold is a name we own, whatever the book says.
+        #
+        # The book is the book's opinion, and it is only as current as the last fill anyone told
+        # it about. On 2026-08-04 Zak filled RS.US at 419.83; no ticket carried the fill, so the
+        # book never saw it — and the next four briefs armed RS.US as a fresh momentum entry at
+        # trigger 419.83, offering him a position he already held. `already_owned` is derived from
+        # `transactions` instead, so a book that has fallen behind cannot manufacture an entry.
+        # R1's runbook carries the session-side check; this is the job side refusing to arm it.
+        cur.execute("""select ticker from transactions group by ticker
+                        having sum(case when side='buy' then qty
+                                        when side='sell' then -qty else 0 end) > 1e-6""")
+        ledger_owned = {r[0] for r in cur.fetchall()}
+
+        def already_owned(tk, sleeve, account=None):
+            """True when the ledger holds it and the book does not — armed as a `check` so the
+            discrepancy reaches the session rather than disappearing into a `continue`."""
+            if tk not in ledger_owned:
+                return False
+            arm.add("check", tk, "already_owned", sleeve=sleeve, account=account,
+                    note="the ledger holds this name and the book does not — a fill the book "
+                         "never digested. No entry is armed for a position we own (§4.5); "
+                         "reconcile the fill before anything is offered here.")
+            return True
+
         # incumbents and their current scores, per sleeve — §3.3 displacement is within-sleeve only
         cur.execute("""select b.ticker, c.mcn from book b left join candidates c on c.ticker=b.ticker
                        where b.status='open' and b.sleeve='momentum'""")
@@ -511,7 +573,7 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                              and q.trigger_price is not null
                            order by q.mcn desc nulls last""")
             for tk, trig, lim, stop, mcn, industry, report, held in cur.fetchall():
-                if held:
+                if held or already_owned(tk, "momentum", "TFSA"):
                     continue
                 # §3.2: "MCN < 70 never tickets — BUY-state names below 70 stay queued." Not a
                 # blocked_by, which still prints a ticket the session must reason about: the row is
@@ -647,6 +709,10 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                              + (f" · {engine_note}" if engine_note else ""),
                         detail=dict(entry_fill=float(entry_fill) if entry_fill else None,
                                     engine_provenance=provenance))
+                continue
+            if already_owned(tk, "compounders", hacct):
+                # not held by the book, so the add path above never ran — and an entry for a name
+                # the ledger owns would be a second full position, not an add
                 continue
             size_pct = caps["flat"]
             room = caps["ceilings"]["compounders"] * nav - exposure.get("compounders", 0.0)

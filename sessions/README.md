@@ -2,16 +2,29 @@
 
 The pipeline speaks first (§4.2: **ingest → score → check → speak**, where `compose` writes the
 words and `notify` proves they exist); judgment happens in two interactive chats and two letters
-(§4.4, 2026-08-04). Each runbook here is the session's code: same review, same care as a formula.
+(§4.4, 2026-08-04). Each runbook is that session's code: same review, same care as a formula.
 A session that did not write its `briefs` row did not happen.
 
-| Surface | When (PT) | Runbook | Routine | Cron (UTC) |
-|---|---|---|---|---|
-| Morning chat | ~06:00 Mon–Fri | `R1_preopen.md` | `trig_01W7BGqssY4sCztZp4L4H5ND` | `0 13 * * 1-5` |
-| Stop sheet (push) | ~20:30 Mon–Fri | `R2_stopsheet.md` | `trig_012LkXUzXqXwj2xD7Fqwqxxy` | `30 4 * * 2-6` |
-| Saturday letter (push) | ~08:00 Sat | `R3_deepdive.md` | `trig_01RKq8cdVHsnFvCUQY287KT6` | `0 16 * * 6` |
-| Sunday reconciliation | Sun morning | `R4_reconcile.md` | `trig_014bPbo18uPXJTWncvduwKTT` | `0 16 * * 0` |
-| Monthly letter | 1st weekend | `R5_approval.md` | `trig_01WSDzax7TCUeZrGPqWSurMs` | `0 17 * * 0` + guard |
+**The runbooks are not in this repo, and that is the design** (§4.8, ruled 2026-08-05): *the
+scheduled sessions have no repo checkout by design — a session that needs the repo to know the law
+has two laws.* R1–R5 are Project docs, read directly by the Cowork sessions that execute them. Copies
+lived here until 2026-08-05 and were deleted the day they were found a full ruling out of date,
+still quoting crons that no longer exist.
+
+What this file is instead: **the read-side contract this repo must satisfy.** `compose` writes what
+those sessions read. If it stops emitting `detail.composed='true'`, renames a `kind`, or misses its
+window, the session goes silent and the only symptom is a missing message.
+
+| Surface | When (PT) | Runbook (in the Project) | What it reads |
+|---|---|---|---|
+| Morning chat | ~06:00 Mon–Fri | R1 | `v_session_payload` — one row, everything on it |
+| Stop sheet (push) | ~midnight, after the chain | R2 | `briefs` `kind='stopsheet'`, `detail->>'composed'='true'`, within 3h |
+| Saturday letter (push) | ~10:00 Sat | R3 | `briefs` `kind='deepdive'`, composed, within 8h |
+| Sunday reconciliation | ~09:00 Sun · interactive | R4 | `v_session_payload` — one row |
+| Monthly letter | Sundays ~11:00, if the month has none | R5 | `briefs` `kind='monthly'` — and that row is the month guard |
+
+Change a `kind`, a composed flag or a window on the left, and a session on the right stops speaking.
+Nothing in CI can catch that, because the other half of the contract is not in this repository.
 
 **The automated Claude sessions live inside the Yuna chat/cowork project** — ruled 2026-08-05.
 The Routines above fire fresh sessions in the project's environment, carrying its Supabase and
@@ -23,27 +36,40 @@ voice in the framing only (their runbooks say exactly what happens when the row 
 The morning chat and Sunday/monthly sessions are where judgment happens.
 
 The jobs those sessions read, per §4.2 — the canonical schedule, all UTC; **nothing joins it
-without a plan edit**:
+without a plan edit**. **Only the ingests are scheduled** (ruled 2026-08-05): the four verbs behind
+them chain in `pipeline.yml` by `needs:`, so their ordering is a data dependency and cannot invert
+however late Actions queues the night.
 
-| Job | Cron | What it owns |
+| Job | When | What it owns |
 |---|---|---|
 | `ingest-daily` | `0 2 * * 2-6` and `0 3 * * 2-6` | bars, FX, corporate actions, earnings calendar, quarantine. The second firing exits if the night is already green |
-| `score` | `30 3 * * 2-6` · `0 12 * * 6` | every derived number, one writer. Saturday is the full weekly rank |
-| `check` | `50 3 * * 2-6` · `30 12 * * 6` | every assertion plus the pre-flight; writes nothing but its report row |
-| `compose` | `5 4 * * 2-6` · `0 13 * * 6` | writes the words down, mechanically and **keyless** (ruled 2026-08-05 — no metered model key, ever): the stop sheet + the next morning's brief sections nightly; the Saturday letter sections weekly. The monthly letter stays with the R5 session — rulings are judgment |
-| `notify` | `20 4 * * 2-6` · `15 13 * * 6` | proves the composed words exist before the doorbell rings; red when they don't (§4.7) |
-| `ingest-universe` | `0 10 * * 6` (1st Sat) | the L0 census |
+| `ingest-universe` | `0 10 * * 6` | the L0 census — **rebuilds if the month's universe is unbuilt, else exits** |
 | `ingest-filings` | `0 11 * * 6` | the filings sweep |
-| `backup` | `0 14 * * 6` (1st Sat) | the dump, minus daily bars |
+| `score` | chained to every ingest | every derived number, one writer. The Saturday chain is the full weekly rank |
+| `check` | chained to every `score`, and at every session dispatch | every assertion plus the pre-flight; writes nothing but its report row |
+| `compose` | chained to every `check` | writes the words down, mechanically and **keyless** (ruled 2026-08-05 — no metered model key, ever): the stop sheet + the next morning's brief sections nightly; the Saturday letter sections weekly. The monthly letter stays with the R5 session — rulings are judgment |
+| `notify` | chained to every `compose` | proves the composed words exist before the doorbell rings; red when they don't (§4.7) |
+| `backup` | `0 14 * * 6` (1st Sat) | the dump, minus daily bars — **and** GitHub's 60-day schedule keep-alive |
+| `fills` | dispatch only | folds a broker export in `data/fills/` into tickets → transactions → book, when the Sunday path missed one |
 
-## The Routines are part of the system — keep them in sync
+**Two clocks, and only one of them decides anything.** The chain has no clock; the sessions keep
+appointments. Each session fires at a fixed hour chosen to sit after the chain and opens with the
+freshness line — a session that beats the chain says so rather than speaking stale. `late: <job>
++NNNm` on that line is a queue note and **holds nothing** (§4.7): lateness is not staleness, and
+tickets are held only by old bars, a failed price-critical job, or a chain that ran out of order
+(§5.6).
 
-Each Routine's prompt points at `docs/yuna_plan.md` and the runbook beside it. The prompt is
+## The sessions are part of the system — keep them in sync
+
+Each session's prompt points at the plan and at its runbook, both Project docs. The prompt is
 deliberately a **pointer, not a copy**: the runbook is the code, and a prompt that restates it
 drifts from it — silently, and in the direction of whatever the prompt was written against.
 
-**So: any change to a runbook, to §4.4, or to §5 is not finished until the Routine prompt agrees
-with it.** Review it the way you review a migration.
+**So: any change to a runbook, to §4.4, or to §5 is not finished until the session prompt agrees
+with it.** Review it the way you review a migration. And the reverse edge is the one this
+repository owns: a change *here* to what `compose` writes — a `kind`, a composed flag, a window,
+a section — is not finished until the runbook that reads it agrees, and that document is not in
+this repository. It is the one dependency no test can hold.
 
 The prompts also carry one exclusivity rule, because a session that reaches outside this system
 cannot be audited: the plan, the runbooks and the Supabase project are the whole world. Anything
@@ -52,12 +78,16 @@ of this system, and the session says so in its output instead of using it.
 
 Cron is UTC and does not shift with daylight saving, so each pick is stated against both regimes
 and sits after the jobs it depends on. §4.2 makes the dependency a sequence — **ingest → score →
-check → compose → notify → the Routine** — so every delivery fires after the words it delivers
-exist, and every chat fires after a `check` has cleared the numbers it will read. R2 fires at
-04:30 UTC, after the whole nightly chain through `notify` (04:20). R3 fires at 16:00 UTC, after
-the Saturday chain through `notify` (13:15). R5 fires weekly and exits silently outside the first
-seven days of the month, because cron cannot express "first Sunday" (day-of-month and day-of-week
-are OR-ed, not AND-ed).
+check → compose → notify → the session** — so every delivery fires after the words it delivers
+exist, and every chat fires after a `check` has cleared the numbers it will read. The first four
+links are `needs:` edges inside `pipeline.yml` and hold by construction; the last is an
+appointment, and it can be beaten. A session that arrives before its words says so — the freshness
+line is the first thing it prints — rather than delivering yesterday's.
+
+**R5 fires every Sunday and exits if the month already has a `monthly` brief.** The guard keys on
+the work, never the date: cron cannot express "first Sunday" (day-of-month and day-of-week are
+OR-ed, not AND-ed), and the date-keyed version — "exit outside the first seven days" — skipped
+August 2026 in silence. `ingest-universe` carries the same work key, in code (`funnel.py`).
 
 **A red check blocks the brief.** §4.2: ambers print at the top of what you write; a red means a
 published number cannot be rebuilt from its own row, so nothing derived from it may be spoken.

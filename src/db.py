@@ -295,13 +295,42 @@ VERBS = {
 # "stale data ⇒ no new tickets, protective moves only" applies
 PRICE_CRITICAL = VERBS["ingest"] + VERBS["score"]
 
+# §4.7 (ruled 2026-08-05): schedule drift is not a half-failure and never turns a job amber. It
+# prints as `late: <job> +NNNm` and decides nothing. Below this many minutes it isn't worth the
+# ink — the floor is the old amber threshold, so exactly the drift that used to gag the desk is
+# now the drift that gets named and ignored.
+LATE_MINUTES_FLOOR = 30
+
+
+def late_minutes(detail):
+    """Minutes past slot recorded on a runs row, or None. Reads both shapes: `late_minutes` as
+    written today, and the `schedule.drift_minutes` older rows carry. Early starts are not late."""
+    if not isinstance(detail, dict):
+        return None
+    raw = detail.get("late_minutes")
+    if raw is None:
+        raw = (detail.get("schedule") or {}).get("drift_minutes")
+    try:
+        m = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return m if m > 0 else None
+
 
 def freshness(conn, *, stale_days=4):
     """The one-line answer to "is it safe to speak" (§4.2): `ingest ✓ score ✓ check ✓`.
 
-    Returns (line, tickets_allowed). Tickets are held when the bars are stale or when anything in
-    the price-critical domains ran red or amber; a failure confined to one other domain is named
-    but does not gag the desk.
+    Returns (line, tickets_allowed). §5.6, ruled 2026-08-05 — **stale means the bars, not the
+    clock**. Tickets are held on exactly three conditions:
+
+      * the bars are old,
+      * a price-critical job failed (red, or the half-failure §4.7 calls amber),
+      * the chain ran **out of order** — an ingest landed rows after the `score` beside it, so the
+        derived numbers ranked yesterday's world.
+
+    **Lateness alone holds nothing.** It rides the line as `late: <job> +NNNm` and decides nothing:
+    a job queued three hours behind its slot with current bars is a punctuality note, not a data
+    fault, and the whole desk used to go silent on it.
     """
     with conn.cursor() as cur:
         # stock bars only. FX and the index come from the same nightly pull, so in a clean run this
@@ -310,11 +339,16 @@ def freshness(conn, *, stale_days=4):
         cur.execute("""select max(p.d) from prices p join universe u on u.ticker = p.ticker
                        where u.kind = 'stock'""")
         last_bar = cur.fetchone()[0]
-        cur.execute("""select distinct on (job) job, status from runs
+        cur.execute("""select distinct on (job) job, status, detail from runs
                        where started_at > now() - interval '36 hours' order by job, id desc""")
-        recent = cur.fetchall()
+        recent = [(j, s, d) for j, s, d in cur.fetchall()]
+        # every finished, non-dry run in the window — the ordering question is about runs, not jobs
+        cur.execute("""select job, started_at, finished_at, coalesce(rows_written, 0) from runs
+                       where started_at > now() - interval '36 hours'
+                         and status <> 'running' and not dry_run""")
+        timeline = cur.fetchall()
 
-    status = {j: s for j, s in recent}
+    status = {j: s for j, s, _ in recent}
     marks = []
     for verb, jobs in VERBS.items():
         seen = [status[j] for j in jobs if j in status]
@@ -328,7 +362,22 @@ def freshness(conn, *, stale_days=4):
             marks.append(f"{verb} ✓")
     line = " · ".join(marks)
 
-    bad = [f"{j} {s}" for j, s in recent if s in ("red", "amber")]
+    late = sorted(f"late: {j} +{m:.0f}m" for j, _, d in recent
+                  if (m := late_minutes(d)) and m >= LATE_MINUTES_FLOOR)
+    if late:
+        line += " · " + " · ".join(late)
+
+    # §5.6's third condition: order. The chain is a data dependency (§4.2's `needs:`), so this
+    # should be impossible — which is exactly why it is asserted rather than assumed. Only an
+    # ingest that LANDED ROWS can leave a score behind: the monthly guard's own exit-clean run and
+    # the retry that finds the night already green both finish having written nothing, and neither
+    # makes a single derived number older than its source.
+    ingest_end = max((f for j, _, f, n in timeline if j in VERBS["ingest"] and f and n > 0),
+                     default=None)
+    score_start = max((s for j, s, _, _ in timeline if j in VERBS["score"]), default=None)
+    out_of_order = bool(ingest_end and score_start and ingest_end > score_start)
+
+    bad = [f"{j} {s}" for j, s, _ in recent if s in ("red", "amber")]
     price_bad = [x for x in bad if x.split()[0] in PRICE_CRITICAL]
     stale = (dt.date.today() - last_bar).days if last_bar else 999
     if stale > stale_days:
@@ -336,6 +385,11 @@ def freshness(conn, *, stale_days=4):
     if price_bad:
         return (f"⚠️ {', '.join(sorted(set(price_bad)))} — data {last_bar}, tickets held · {line}",
                 False)
+    if out_of_order:
+        return (f"⚠️ chain out of order — an ingest landed rows after the score beside it "
+                f"({ingest_end.astimezone(dt.timezone.utc):%H:%M} > "
+                f"{score_start.astimezone(dt.timezone.utc):%H:%M} UTC); data {last_bar}, "
+                f"tickets held · {line}", False)
     if bad:
         return (f"data {last_bar} close · {line} · {', '.join(sorted(set(bad)))} "
                 f"(that domain only)", True)
@@ -346,8 +400,6 @@ class Heartbeat:
     """with Heartbeat(conn, 'daily') as hb: ...  — opens a running row, closes it green,
     or red with the traceback if the body raises. hb.detail / hb.calls / hb.rows are yours."""
 
-    DRIFT_AMBER = dt.timedelta(minutes=30)
-
     def __init__(self, conn, job, dry_run=None, scheduled_utc=None):
         self.conn, self.job = conn, job
         self.dry_run = dry() if dry_run is None else dry_run
@@ -355,14 +407,17 @@ class Heartbeat:
         self.detail, self.calls, self.rows, self.status = {}, [0], 0, "green"
 
     def _drift(self):
-        """§4.2 gives each job a time; Actions gives it a queue. Record what was asked for against
-        what happened, and go amber past half an hour.
+        """§4.2 gives each job a time; Actions gives it a queue. Record the gap and nothing else.
 
-        A run late enough matters: `nightly-retry` fires an hour after the primary and the evening
-        stop sheet reads both windows, so a 3-hour slip silently inverts the ordering the plan
-        assumes. Production drifted to 05:23 UTC against an 02:00 spec and nothing said so — the
-        cron was right the whole time. Only scheduled runs are judged; a manual dispatch has no
-        appointment to be late for.
+        §4.7, ruled 2026-08-05: **schedule drift is not a half-failure and never turns a job
+        amber.** This used to amber past half an hour, and that one line gagged the desk: an
+        `ingest-daily` that started 194 minutes late with the bars perfectly current wrote amber,
+        `score` inherited it through `freshness()`, and every brief that day carried "tickets
+        held" while RS.US and CTS.US sat armed behind a clock. Order is guaranteed by the `needs:`
+        chain (§4.2) and currency by the bars; punctuality is guaranteed by nobody, so it is
+        recorded as `late_minutes`, printed as `late: <job> +NNNm`, and decides nothing.
+
+        Only scheduled runs are judged; a manual dispatch has no appointment to be late for.
         """
         if not self.scheduled_utc or os.environ.get("GITHUB_EVENT_NAME") != "schedule":
             return
@@ -376,12 +431,11 @@ class Heartbeat:
             due += dt.timedelta(days=1)
         elif due - now > dt.timedelta(hours=12):
             due -= dt.timedelta(days=1)
-        drift = now - due
+        drift = round((now - due).total_seconds() / 60, 1)
         self.detail["schedule"] = dict(due_utc=due.isoformat(), started_utc=now.isoformat(),
-                                       drift_minutes=round(drift.total_seconds() / 60, 1))
-        if drift > self.DRIFT_AMBER:
-            self.amber(f"started {drift.total_seconds() / 60:.0f} min after its "
-                       f"{self.scheduled_utc} UTC slot — Actions queueing, not a bad cron")
+                                       drift_minutes=drift)
+        if drift > 0:
+            self.detail["late_minutes"] = drift
 
     def __enter__(self):
         with self.conn.cursor() as cur:

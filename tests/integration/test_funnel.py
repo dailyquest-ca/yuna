@@ -27,7 +27,7 @@ def stub_vendor(monkeypatch, listed, priced):
             return [{"code": c, "close": 50.0, "volume": 2_000_000} for c in priced]
         return {"data": []}                     # the screener decorates; it is not the census
     monkeypatch.setattr(funnel, "get", fake_get)
-    monkeypatch.setattr(funnel, "FORCE", True)  # skip the 1st-Saturday guard
+    monkeypatch.setattr(funnel, "FORCE", True)  # rebuild whatever the month guard thinks
     monkeypatch.setattr(funnel, "K", "test-key", raising=False)
 
 
@@ -93,6 +93,58 @@ def test_the_census_records_what_it_did(db, monkeypatch):
                        order by id desc limit 1""")
         status, detail = cur.fetchone()
     assert status == "green" and detail["stage"] == "census"
+
+
+def test_the_month_guard_is_keyed_to_the_work_and_not_to_the_date(db, monkeypatch):
+    """§4.2, ruled 2026-08-05: monthly work is guarded by whether it has run, never by the date.
+
+    The old guard read `weekday==5 and day<=7` **before** opening the runs row, so a firing outside
+    that window vanished without trace — this job had never produced a single runs row and L0 had
+    never been rebuilt. Every firing now leaves a heartbeat, and the second firing of a month
+    rebuilds nothing.
+    """
+    stub_vendor(monkeypatch, listed=["ALIVE"], priced=["ALIVE"])
+    monkeypatch.setattr(funnel, "FORCE", False)          # the guard is what is under test
+    assert funnel.main() == 0                            # month unbuilt -> rebuild
+    assert funnel.main() == 0                            # same month -> exit clean
+
+    with db.cursor() as cur:
+        cur.execute("""select status, detail, rows_written from runs where job='ingest-universe'
+                       order by id""")
+        rows = cur.fetchall()
+    assert len(rows) == 2, "every firing writes a heartbeat, including the one that does nothing"
+    assert rows[0][0] == "green" and rows[0][1]["rebuilt"] is True and rows[0][2] > 0
+    assert rows[1][0] == "green" and rows[1][1]["rebuilt"] is False
+    assert rows[1][1]["month_built_at"], "the skip says which run did the month's work"
+
+
+def test_a_missed_firing_is_picked_up_the_following_week(db, monkeypatch):
+    """The failure the date key produced: a skipped firing lost the month. Here last month's
+    rebuild is the only one on the ledger, so this week's firing does the work."""
+    with db.cursor() as cur:
+        cur.execute("""insert into runs (job, status, started_at, finished_at, rows_written, detail)
+                       values ('ingest-universe','green', now() - interval '40 days',
+                               now() - interval '40 days', 2700, '{"rebuilt": true}'::jsonb)""")
+    db.commit()
+    stub_vendor(monkeypatch, listed=["ALIVE"], priced=["ALIVE"])
+    monkeypatch.setattr(funnel, "FORCE", False)
+    assert funnel.main() == 0
+    with db.cursor() as cur:
+        cur.execute("""select detail from runs where job='ingest-universe' order by id desc limit 1""")
+        assert cur.fetchone()[0]["rebuilt"] is True
+
+
+def test_a_dry_run_leaves_the_month_unbuilt(db, monkeypatch):
+    """A rehearsal is not the work — otherwise a DRY_RUN dispatch would skip the month for real."""
+    stub_vendor(monkeypatch, listed=["ALIVE"], priced=["ALIVE"])
+    monkeypatch.setattr(funnel, "FORCE", False)
+    monkeypatch.setattr(funnel, "DRY", True)
+    assert funnel.main() == 0
+    monkeypatch.setattr(funnel, "DRY", False)
+    assert funnel.main() == 0
+    with db.cursor() as cur:
+        cur.execute("""select detail from runs where job='ingest-universe' order by id desc limit 1""")
+        assert cur.fetchone()[0]["rebuilt"] is True
 
 
 def test_a_non_us_listing_survives_a_us_census(db, monkeypatch):

@@ -1,0 +1,154 @@
+name: pipeline
+# §4.2 (ruled 2026-08-05): **the chain has no clock; the sessions keep appointments.**
+#
+#   score → check → compose → notify
+#
+# These four lost their crons. They hang off the ingests here, and off each other by `needs:`, so
+# the ordering is a data dependency rather than four appointments that happen to be in the right
+# sequence. Production drifted 150–195 minutes past slot every night and the nightly sequence held
+# only by luck: `score` was scheduled 90 minutes after an `ingest-daily` that was itself running
+# three hours late. **Order and currency are the guarantees; punctuality is not.**
+#
+# Every ingest triggers it (§4.2: "chained to every ingest by `needs:`"). The retry ingest at 03:00
+# exits immediately when the night is already green and still fires the chain — every job here is
+# idempotent, and `compose` refuses to publish a kind twice for one session date, so a second pass
+# costs a few minutes and buys a second chance.
+#
+# `if: always()` on the tail is deliberate. When an upstream job dies the desk must still speak:
+# §4.2 gives a red `check` the power to ship nothing but the stale banner and the protective lines,
+# and §4.7 rules that a missing message is itself the alarm. Silence is the one outcome with no
+# reader.
+on:
+  workflow_run:
+    workflows: [ingest-daily, ingest-filings, ingest-universe]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: 'auto | nightly | saturday'
+        default: 'auto'
+      dry_run:
+        description: 'compute everything, write nothing'
+        default: 'false'
+
+jobs:
+  slot:
+    runs-on: ubuntu-latest
+    outputs:
+      slot: ${{ steps.pick.outputs.slot }}
+    steps:
+      - id: pick
+        # The weekly slot belongs to the weekly sweep, not to the calendar: `ingest-daily` fires
+        # Tue–Sat, so Saturday 02:00 UTC is Friday evening PT and composes the nightly stop sheet.
+        # The Saturday letter belongs to the chain behind `ingest-universe` / `ingest-filings`.
+        run: |
+          want='${{ inputs.slot }}'
+          trigger='${{ github.event.workflow_run.name }}'
+          if [ -z "$want" ] || [ "$want" = "auto" ]; then
+            if [ "$trigger" = "ingest-daily" ]; then
+              want=nightly
+            elif [ "$(date -u +%u)" = "6" ]; then
+              want=saturday
+            else
+              want=nightly
+            fi
+          fi
+          echo "slot=$want" >> "$GITHUB_OUTPUT"
+          echo "chain slot: $want (triggered by ${trigger:-dispatch})"
+
+  score:
+    # §4.2, verb two: the ONE writer of every derived number. A pure function of the database —
+    # it makes no vendor call at all. The Saturday chain runs the full weekly rank.
+    needs: slot
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: yuna-writes
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/score.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          # no SCHEDULED_UTC: this job has no appointment to be late for (§4.2)
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py score /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  check:
+    # §4.2, verb three: prove it is safe to speak, and write nothing but the report row.
+    needs: score
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/check.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py check /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  compose:
+    # §4.2, verb four, first half: write the words down, mechanically and keyless.
+    needs: [slot, check]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: yuna-writes
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/compose.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          COMPOSE_SLOT: ${{ needs.slot.outputs.slot }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py compose /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  notify:
+    # §4.2, verb four, second half: prove the composed rows exist and are deliverable.
+    needs: [slot, compose]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/notify.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PUSH_WEBHOOK_URL: ${{ secrets.PUSH_WEBHOOK_URL }}
+          NOTIFY_SLOT: ${{ needs.slot.outputs.slot }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py notify /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
