@@ -53,10 +53,14 @@ def db(migrated):
     """
     with psycopg.connect(migrated) as conn:
         with conn.cursor() as cur:
+            # `balances` joined this list on 2026-08-05. It is not guarded, so the schema test
+            # never demanded it — but it is an append ledger with a "latest row wins" read, so a
+            # row left behind by one test became the anchor every later test read, and a cash
+            # figure nobody wrote governed the funding checks and NAV.
             cur.execute("""truncate armed, candidates, queue, bench, book, tickets, transactions,
                                     observations, briefs, nav_snapshots, earnings, prices,
                                     gate_state, group_strength, quarantine, corporate_actions,
-                                    fundamentals, backtest_runs, backtest_trades,
+                                    fundamentals, balances, backtest_runs, backtest_trades,
                                     backtest_equity, runs restart identity cascade""")
             cur.execute("delete from universe")
             # config is append-only by design (§4.3), so a test that overrides a threshold leaves

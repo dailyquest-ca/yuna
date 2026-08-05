@@ -18,7 +18,7 @@ import datetime as dt
 
 import numpy as np
 
-from db import (config, dry, freshness, jsonb, load_bars, nav_cad, observe,
+from db import (cash_by_account, config, dry, freshness, jsonb, load_bars, nav_cad, observe,
                 valuation_canary, quantity_canary)
 import signals as sg
 
@@ -647,12 +647,12 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
         # adds are counted from the ledger inside a rolling 12 months, never from a stored counter:
         # a counter that only increments quietly becomes a permanent block after two adds ever.
         # per-account investable cash — §2.6's "one position, one account, one order" needs to know
-        # which account can fund a whole position before it names one
-        cur.execute("""select distinct on (b.account) b.account, a.kind,
-                              coalesce(b.cash_cad,0) + coalesce(b.cash_usd,0) * %s
-                         from balances b join accounts a on a.code=b.account
-                        order by b.account, b.as_of desc, b.id desc""", (fx,))
-        account_cash = {r[0]: float(r[2]) for r in cur.fetchall() if r[1] != "facility"}
+        # which account can fund a whole position before it names one. §2.0 says a ticket "is only
+        # written if that account holds the cash", so this is the anchor carried forward by the
+        # ledger, not the anchor alone: money the account spent on Tuesday is not available again
+        # on Wednesday because Sunday has not been round yet.
+        account_cash = {a: float(c["cad"]) + float(c["usd"]) * fx
+                        for a, c in cash_by_account(cur).items() if c["kind"] != "facility"}
 
         cur.execute("""select b.ticker, b.ccn, b.hurdle_price, b.last_close, b.gap_to_hurdle,
                               b.data_confidence, u.industry, e.report_date, k.id, k.qty,
