@@ -878,7 +878,17 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
             size_pct = caps["flat"]
             room = caps["ceilings"]["compounders"] * nav - exposure.get("compounders", 0.0)
             blocked, swap = None, None
-            if size_pct > caps["single_cap"]:
+            # §3.3's thresholds, which this path had never read: **55–69 is the hold zone — no new
+            # money** — and §3.1 gives no size band below 70 at all, so a sub-70 entry has no
+            # legislated size to be written at. Momentum enforces the same line (`min_mcn`) and so
+            # does the compounder ADD path (`compounder_add(enter=70)`); only the entry escaped,
+            # and it escaped invisibly because until 2026-08-07 every one of these rows was already
+            # blocked by a sign-off gate nothing could open. The night the gate opened, LMAT armed
+            # offerable at CCN 69.2.
+            if ccn_score is not None and ccn_score < caps["min_ccn"]:
+                blocked = (f"§3.3 — CCN {ccn_score:.1f} is in the hold zone (55–69): no new money. "
+                           f"Enterable starts at {caps['min_ccn']:.0f}")
+            elif size_pct > caps["single_cap"]:
                 blocked = f"§2.3 — exceeds the {caps['single_cap']:.0%} single-name entry cap"
             elif size_pct < caps["floor_pct"]:
                 blocked = f"§2.3 — below the {caps['floor_pct']:.0%} minimum position"
@@ -1349,10 +1359,13 @@ def run(conn, hb, *, held=frozenset(), apply_ledger_first=True):
             # theme — it ships the current theme weights on every armed row and R1 enforces
             # the 35% cap. Reading the config here would look like enforcement and be none.
             max_adds=int(config(cur, "max_adds_per_year", 2)),
-            # §3.2: BUY-state names under 70 stay queued and never ticket. The stored row spells
-            # this key `enter`; the code asked only for `enterable` and fell through to the same
-            # 70 by luck, so the config row was decorative — learnings #21, from the other side.
+            # §3.2 / §3.3: names under the enterable threshold stay queued and never ticket. The
+            # stored row spells this key `enter`; the code asked only for `enterable` and fell
+            # through to the same 70 by luck, so the config row was decorative — learnings #21,
+            # from the other side. One threshold, read once, applied to both sleeves.
             min_mcn=float((lambda t: t.get("enter", t.get("enterable", 70)))(
+                config(cur, "score_thresholds", {}) or {})),
+            min_ccn=float((lambda t: t.get("enter", t.get("enterable", 70)))(
                 config(cur, "score_thresholds", {}) or {})),
             # §2.6: a US compounder with a trailing-12-month yield at or above this prefers
             # the RRSP — US dividend withholding is treaty-exempt there and leaks 15% in the
