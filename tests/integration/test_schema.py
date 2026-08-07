@@ -24,6 +24,16 @@ def test_every_job_written_table_is_cleared_between_tests(db):
     missing = guarded - truncated - {"universe"}          # universe is deleted, not truncated
     assert not missing, f"tables a job writes but the harness never clears: {sorted(missing)}"
 
+    # The guard cannot be the whole answer, and 2026-08-07 proved it. §4.3's session write list is
+    # deliberately UNGUARDED, so `rulings` and `learnings` — both append ledgers, both read
+    # latest-wins, both now read by jobs — were invisible to the check above and leaked across
+    # pytest runs. A ledger a job reads must be cleared whoever writes it.
+    session_ledgers = {"rulings", "learnings", "observations", "briefs", "tickets"}
+    leaking = session_ledgers - truncated
+    assert not leaking, (
+        f"session-written ledgers the jobs now read, left standing between tests: {sorted(leaking)}"
+        f" — config is exempt because it is cleared by a targeted delete just below")
+
 
 def test_the_session_writable_tables_are_not_guarded(db):
     """§4.3's other half: the session write list must actually be writable by a session.

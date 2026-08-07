@@ -22,7 +22,7 @@ import os
 import sys
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-from db import (connect, config, dry, get, jsonb, load_bars, observe,
+from db import (connect, config, dry, fx_pair, get, jsonb, load_bars, observe,
                 stops_breached, Heartbeat)
 import signals as sg
 
@@ -38,7 +38,122 @@ CAL_DAYS = 45
 CAL_BACK = 400          # a full reporting year behind, so "already reported" is a fact, not a guess
 
 
+# --------------------------------------------------------------------------- FX (§4.1, §3.0)
+# §4.1's FX row reads "USDCAD for CAD NAV **+ statement currencies for foreign filers**
+# (fiscal-period-end rates)". Only USDCAD was ever pulled, so §3.0's one-currency test — a foreign
+# issuer is compounder-eligible only when FCF and market cap are expressed in one currency — had no
+# rates to convert with, and ~185 universe names were excluded rather than converted.
+def register_fx_pairs(conn, hb):
+    """Put every currency we must convert *out of* on the nightly feed, so its history is ours.
+
+    Registration only — the per-ticker pass below pulls the bars, which means a new currency
+    backfills its full history on the first night it appears and costs one incremental call every
+    night after. §4.1 keeps per-ticker calls for four cases and "names entering L0" is the shape of
+    this one: a currency entering the funnel.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""select distinct statement_currency from v_fundamentals_latest
+                        where statement_currency is not null and statement_currency <> 'USD'""")
+        wanted = {r[0] for r in cur.fetchall()}
+        cur.execute("""select distinct currency from universe
+                        where kind='stock' and status='active' and currency is not null""")
+        wanted |= {r[0] for r in cur.fetchall()}
+        pairs = {}
+        for ccy in sorted(wanted):
+            got = fx_pair(ccy)
+            if got:
+                pairs[got[0]] = ccy
+        if pairs and not dry():
+            cur.executemany("""insert into universe(ticker,name,kind,exchange,currency,status)
+                               values (%s,%s,'fx','FOREX',%s,'active')
+                               on conflict (ticker) do nothing""",
+                            [(t, t.split(".")[0], c) for t, c in pairs.items()])
+    conn.commit()
+    hb.detail["fx_pairs_tracked"] = sorted(pairs)
+    return sorted(pairs)
+
+
 # --------------------------------------------------------------------------- earnings (§4.1)
+def refresh_earnings_for_watched(conn, hb, *, batch_size, max_calls):
+    """§4.1 / WO-4 (obs 114): the names we are about to act on get their calendar checked by name.
+
+    The bulk calendar is a broad file and it is not complete. Arcosa reported on 2026-08-05 and no
+    row for it existed, so the blackout wall showed nothing and the nightly armed an ACA entry
+    through its own print on the 6th and again on the 7th — R1 caught it by hand and voided the
+    ticket (obs 117). A weekly-shaped feed is not enough coverage for a name we are about to arm.
+
+    So: holdings, the queue, every BUY-state candidate and every bench name at or within 10% of its
+    hurdle — the exact population the arming stage reaches for — are re-asked per name. EODHD takes
+    a `symbols` list, so a few dozen names cost one request, not one each; the cap is real and a
+    truncation is named rather than swallowed (§4.1).
+    """
+    today = dt.date.today()
+    with conn.cursor() as cur:
+        cur.execute("""select ticker from book where status='open' and qty > 0
+                        union select ticker from queue
+                        union select ticker from candidates where state='BUY'
+                        union select b.ticker from bench b
+                               where b.hurdle_price is not null and b.last_close is not null
+                                 and b.last_close <= b.hurdle_price * 1.10
+                        union select ticker from universe where is_holding""")
+        # no exchange filter: a holding is a holding, and CNQ.TO's blackout matters as much as
+        # ACA.US's. A batch the vendor rejects is caught per batch and named below.
+        names = sorted({r[0] for r in cur.fetchall()})
+    batches = [names[i:i + batch_size] for i in range(0, len(names), batch_size)]
+    dropped = [t for b in batches[max_calls:] for t in b]
+    batches, rows, errors = batches[:max_calls], [], {}
+    for batch in batches:
+        try:
+            data = get("calendar/earnings", hb.calls, symbols=",".join(batch),
+                       **{"from": (today - dt.timedelta(days=CAL_BACK)).isoformat(),
+                          "to": (today + dt.timedelta(days=CAL_DAYS)).isoformat()})
+        except Exception as e:
+            errors[batch[0] + f"+{len(batch) - 1}"] = f"{type(e).__name__}: {e}"
+            continue
+        got = (data or {}).get("earnings", []) if isinstance(data, dict) else (data or [])
+        wanted = set(batch)
+        for e in got:                   # pull broad, filter locally — the vendor's filter lies
+            code, rd = e.get("code"), (e.get("report_date") or e.get("date"))
+            if code in wanted and rd:
+                rows.append((code, rd, e.get("before_after_market"), e.get("estimate"),
+                             e.get("actual"), None, None))
+    if rows and not dry():
+        with conn.cursor() as cur:
+            cur.executemany("""insert into earnings(ticker,report_date,report_when,eps_est,
+                                 eps_actual,revenue_est,revenue_actual)
+                               values (%s,%s,%s,%s,%s,%s,%s)
+                               on conflict (ticker,report_date) do update set
+                                 report_when=excluded.report_when, eps_est=excluded.eps_est,
+                                 eps_actual=excluded.eps_actual, updated_at=now()""", rows)
+        conn.commit()
+    covered = sorted({r[0] for r in rows})
+    hb.detail["earnings_watched"] = dict(asked=len(names), calls=len(batches),
+                                         rows=len(rows), with_a_date=len(covered),
+                                         dropped_past_cap=dropped, errors=errors)
+    if dropped:
+        # §4.1: never a silent cap. A name we meant to verify and did not is the ACA case again.
+        hb.amber(f"{len(dropped)} watched name(s) past tonight's earnings-refresh cap of "
+                 f"{max_calls} request(s)")
+    if errors:
+        hb.amber(f"{len(errors)} targeted earnings request(s) failed")
+    # The blackout wall's own coverage report — a name in the watched set with no report date
+    # inside a quarter is exactly what the arming guard will refuse to arm clean.
+    with conn.cursor() as cur:
+        cur.execute("""select u.t from unnest(%s::text[]) u(t)
+                        where not exists (select 1 from earnings e
+                                           where e.ticker = u.t
+                                             and e.report_date > current_date - 110)""",
+                    (names,))
+        blind = [r[0] for r in cur.fetchall()]
+    hb.detail["earnings_blind_spots"] = blind
+    if blind:
+        hb.amber(f"{len(blind)} watched name(s) still carry no report date inside 110 days: "
+                 f"{', '.join(blind[:20])}")
+    print(f"ingest-daily: earnings refreshed by name for {len(names)} watched names "
+          f"({len(batches)} request(s), {len(rows)} rows, {len(blind)} still blind)")
+    return len(rows)
+
+
 def sync_earnings(conn, hb):
     today = dt.date.today()
     # Forward-only left the system unable to tell "already reported, next print is beyond the window"
@@ -207,10 +322,16 @@ def main():
                         print("ingest-daily (03:00): already green — nothing to redo")
                         return 0
 
+            # before the name list is read: a currency the funnel must convert out of is a name on
+            # the feed, and it backfills its history through the per-ticker pass below (§4.1)
+            register_fx_pairs(conn, hb)
+
             with conn.cursor() as cur:
                 years = int(config(cur, "bars_retention_years", 10))
                 threshold = float(config(cur, "quarantine_move_threshold", 0.40))
                 tolerance = float(config(cur, "quarantine_source_tolerance", 0.02))
+                earn_batch = int(config(cur, "earnings_refresh_batch", 50))
+                earn_calls = int(config(cur, "earnings_refresh_max_calls", 12))
                 cur.execute("select ticker, kind from universe where status='active'")
                 names = {r[0]: r[1] for r in cur.fetchall()}
                 cur.execute("select ticker, max(d) from prices group by ticker")
@@ -266,8 +387,12 @@ def main():
                     continue
                 repairs.append((ticker, why, have))
 
-            # corporate actions first: a stale split is the one that invents a crash
+            # Corporate actions first: a stale split is the one that invents a crash. Then everything
+            # the bulk file cannot carry — the index and the FX pairs — because the whole rest of
+            # the night is priced off them, and a new currency's cold start must not queue behind
+            # two hundred equity backfills and fall past the cap.
             repairs.sort(key=lambda r: (not r[1].startswith("corporate action"),
+                                        r[0].endswith(".US"),
                                         r[1] != "non-US listing"))
             skipped = repairs[REPAIR_CAP:]
             repairs = repairs[:REPAIR_CAP]
@@ -293,6 +418,8 @@ def main():
 
             # ---- 4. the earnings calendar (source data, so it belongs here, not in score)
             sync_earnings(conn, hb)
+            # ---- 4b. and by name, for everything we are about to act on (§3.3 blackout, obs 114)
+            refresh_earnings_for_watched(conn, hb, batch_size=earn_batch, max_calls=earn_calls)
 
             # ---- 5. quarantine: a print no second source will confirm must not drive a sell (§4.1)
             with conn.cursor() as cur:

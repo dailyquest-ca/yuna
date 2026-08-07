@@ -19,7 +19,7 @@ import datetime as dt
 import numpy as np
 
 from db import (cash_by_account, config, dry, freshness, jsonb, load_bars, nav_cad, observe,
-                valuation_canary, quantity_canary)
+                session_date_for, valuation_canary, quantity_canary)
 import signals as sg
 
 
@@ -335,6 +335,62 @@ def ratchet(conn, hb, bars, buffer_pct):
     return moves
 
 
+# --------------------------------------------------------------------------- the gates rulings open
+#
+# §3.3's data-confidence path caps an incompletely-scored name at the bottom of its size band and
+# "requires manual sign-off". Until 2026-08-06 nothing in the system could ever grant that sign-off,
+# so every growth-derived compounder — 13 of the 19 rows armed on the 6th — sat behind a gate with
+# no key. Zak ruled it: **for a growth-derived name the blind C2 PASS ruling IS the §3.3 sign-off**;
+# a name on the data-confidence route (2-of-3, or a statement currency we cannot resolve) still
+# needs an explicit `signoff` ruling, logged after the filing it is being scored on.
+#
+# Both readings are the same sentence — the sign-off is a judgment, and judgments live in `rulings`.
+
+CALENDAR_UNVERIFIED = "calendar unverified"
+
+
+def signoff_gate(*, confidence, provenance, verdict_canon, decides, signoff_current, filing_date):
+    """The §3.3 sign-off, read out of the rulings ledger. Returns a blocked_by string, or None.
+
+    Three states, and the plan gives each a different key:
+
+      * `full` confidence — no sign-off is owed at all.
+      * a growth-derived engine — §3.1 attaches §3.3's guardrails to the fallback, and the blind C2
+        PASS is what satisfies them (ruled 2026-08-06). A live PASS opens it; anything else, an
+        escalation included, keeps it shut.
+      * the data-confidence route (2-of-3, unresolved statement currency) — an explicit `signoff`
+        ruling, dated on or after the filing date of the fundamentals row being scored. An older
+        sign-off signed off on older numbers.
+    """
+    if confidence in ("full", None):
+        return None
+    if provenance == "growth-derived":
+        if decides and verdict_canon == "pass":
+            return None
+        state = ("ruled " + (verdict_canon or "?")) if verdict_canon else "never ruled"
+        return ("§3.3 — growth-derived engine needs its manual sign-off, and for a growth-derived "
+                "name the blind C2 PASS ruling IS that sign-off (§3.1, ruled 2026-08-06): "
+                f"{state}")
+    if signoff_current:
+        return None
+    since = f" dated on or after the filing {filing_date}" if filing_date else ""
+    return (f"§3.3 — scored {confidence}: manual sign-off before sizing — no `signoff` ruling"
+            f"{since}")
+
+
+def calendar_unverified(last_report, *, stale_days):
+    """§3.3 / WO-4: the blackout wall cannot enforce a date it never had (obs 114).
+
+    Arcosa reported on 2026-08-05 and the calendar carried nothing, so the wall showed nothing and
+    the nightly armed an entry straight through the print on the 6th and the 7th. A name whose
+    latest *known* report date is older than a quarter has plausibly missed one, and absence of a
+    date is not absence of an event — so it arms blocked rather than clean.
+    """
+    if last_report is None:
+        return True
+    return (dt.date.today() - last_report).days > stale_days
+
+
 # --------------------------------------------------------------------------- arming
 class Arm:
     """Collects the night's conclusions, then writes them as one overwrite set."""
@@ -562,17 +618,19 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
         # ---- momentum: a live trigger in BUY state, gate permitting
         if gate == "ON":
             cur.execute("""select q.ticker, q.trigger_price, q.limit_price, q.stop_suggest, q.mcn,
-                                  u.industry, e.report_date, b.id
+                                  u.industry, e.report_date, b.id, le.last_report
                            from queue q
                            join universe u on u.ticker=q.ticker
                            left join book b on b.ticker=q.ticker and b.status='open'
                            left join lateral (select report_date from earnings
                                               where ticker=q.ticker and report_date >= current_date
                                               order by report_date limit 1) e on true
+                           left join lateral (select max(report_date) as last_report
+                                                from earnings where ticker=q.ticker) le on true
                            where q.source='momentum' and q.state='BUY'
                              and q.trigger_price is not null
                            order by q.mcn desc nulls last""")
-            for tk, trig, lim, stop, mcn, industry, report, held in cur.fetchall():
+            for tk, trig, lim, stop, mcn, industry, report, held, last_report in cur.fetchall():
                 if held or already_owned(tk, "momentum", "TFSA"):
                     continue
                 # §3.2: "MCN < 70 never tickets — BUY-state names below 70 stay queued." Not a
@@ -617,6 +675,8 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                     blocked = f"§2.2 — already {caps['per_group']} names in {industry}"
                 elif sg.in_blackout(dt.date.today(), report, holidays=holidays):
                     blocked = f"§3.3 — earnings blackout ({report})"
+                elif calendar_unverified(last_report, stale_days=caps["calendar_stale_days"]):
+                    blocked = CALENDAR_UNVERIFIED
                 # §3.2: the first position is 50% of full size and pyramids to full. The ticket
                 # buys half; `target_qty` on the resulting book row is what steps 2 and 3 size off.
                 first = sg.entry_order(trig, stop, limit_over=caps["limit_over"],
@@ -637,11 +697,15 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                         blocked_by=blocked,
                         note=(f"MCN {score:.1f} · stop {dist:.1%} away · "
                               f"{first['fraction']:.0%} of a {size['size_pct']:.1%} full position"
-                              + (f" · swap out {swap['ticker']}" if swap else ""))
+                              + (f" · swap out {swap['ticker']}" if swap else "")
+                              + (f" · latest known report {last_report or 'never'} — the blackout "
+                                 f"wall cannot enforce a date it never had (§3.3, obs 114)"
+                                 if blocked == CALENDAR_UNVERIFIED else ""))
                         if score is not None else None,
                         detail=dict(theme_weights=theme_weight, industry=industry,
                                     full_size_pct=size["size_pct"], target_qty=full_qty,
-                                    pivot=trig, swap_out=swap["ticker"] if swap else None))
+                                    pivot=trig, swap_out=swap["ticker"] if swap else None,
+                                    last_known_report=str(last_report) if last_report else None))
 
         # ---- compounders: price at or below an approved bench name's hurdle
         # adds are counted from the ledger inside a rolling 12 months, never from a stored counter:
@@ -654,6 +718,10 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
         account_cash = {a: float(c["cad"]) + float(c["usd"]) * fx
                         for a, c in cash_by_account(cur).items() if c["kind"] != "facility"}
 
+        # §3.1's rulings law, read the way the desk writes it. Verdicts are prose — `PASS`,
+        # `QUARANTINE — owner-cash (§3.1) …` — so `v_rulings_latest_c2` canonicalises them and
+        # resolves latest-wins (migration 034); this query used to ask for `verdict in
+        # ('pass','fail')` and matched none of the sixty-eight rulings in the ledger.
         cur.execute("""select b.ticker, b.ccn, b.hurdle_price, b.last_close, b.gap_to_hurdle,
                               b.data_confidence, u.industry, e.report_date, k.id, k.qty,
                               k.avg_cost, b.engine_provenance, d.dps_ttm, k.entry_fill,
@@ -662,30 +730,55 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                                  where t.ticker = b.ticker and t.side='buy'
                                    and t.trade_date > current_date - interval '12 months'
                                    and t.trade_date > k.opened_at) as adds_12m,
-                              k.account, r.verdict, r.cooldown_until
+                              k.account, r.verdict_canon, r.cooldown_until, r.decides, r.ruling_id,
+                              -- §3.3's sign-off for the data-confidence route: a `signoff` ruling
+                              -- logged on or after the filing whose numbers we are scoring
+                              (sg.at is not null
+                               and (f.filing_date is null or sg.at >= f.filing_date)) as signoff_now,
+                              f.filing_date, le.last_report
                        from bench b
-                       left join lateral (select verdict, cooldown_until from rulings
-                                          where ticker = b.ticker and kind = 'c2'
-                                            and verdict in ('pass','fail')
-                                            and not exists (select 1 from rulings x
-                                                             where x.reverses = rulings.id)
-                                          order by at desc limit 1) r on true
+                       left join v_rulings_latest_c2 r on r.ticker = b.ticker
+                       left join lateral (select max(r2.at) as at from rulings r2
+                                           where r2.ticker = b.ticker and r2.kind = 'signoff'
+                                             and not exists (select 1 from rulings x
+                                                              where x.reverses = r2.id)) sg on true
+                       left join v_fundamentals_latest f on f.ticker = b.ticker
                        join universe u on u.ticker=b.ticker
                        left join book k on k.ticker=b.ticker and k.status='open'
                        left join v_dividend_ttm d on d.ticker=b.ticker
                        left join lateral (select report_date from earnings
                                           where ticker=b.ticker and report_date >= current_date
                                           order by report_date limit 1) e on true
+                       left join lateral (select max(report_date) as last_report
+                                            from earnings where ticker=b.ticker) le on true
                        where b.approved and b.c1_pass and b.hurdle_price is not null
                          and b.last_close is not null and b.last_close <= b.hurdle_price
                        order by b.ccn desc""")
         for (tk, ccn_score, hurdle, px, gap, confidence, industry, report, held, hqty, hcost,
              provenance, dps_ttm, entry_fill, owner_suspect, adds, hacct,
-             ruling, cooldown_until) in cur.fetchall():
+             ruling, cooldown_until, decides, ruling_id, signoff_now, filing_date,
+             last_report) in cur.fetchall():
             ccn_score = float(ccn_score) if ccn_score is not None else None
             px, hurdle = float(px), float(hurdle)
             in_bo = sg.in_blackout(dt.date.today(), report, holidays=holidays)
             price_cad = px * fx if fx else px
+
+            # §3.1 owner-cash quarantine (obs 97, ruling 66): "scored, ranked, watched, **never
+            # ticketed**". Never means never — not blocked-but-printed, which is a row a session
+            # still has to reason about, and not only for entries: an add is a ticket too. Ruling 66
+            # quarantined DLO on 2026-08-06 and the nightly armed it as an entry the same night,
+            # because the ledger read asked for a verdict vocabulary the desk does not use.
+            if owner_suspect or (decides and ruling == "quarantine"):
+                arm.add("check", tk, "owner_cash_quarantine", sleeve="compounders", account=hacct,
+                        score=ccn_score,
+                        note="§3.1 owner-cash quarantine — reported FCF is materially customer "
+                             "float or credit-book funding. Scored, ranked, watched, never "
+                             "ticketed: no entry and no add is armed until the balance-sheet "
+                             "treatment prices it on cash the owners actually keep."
+                             + (f" Latest c2 ruling {ruling_id}." if ruling_id else ""),
+                        detail=dict(ruling_id=ruling_id, verdict=ruling,
+                                    owner_fcf_suspect=bool(owner_suspect)))
+                continue
             # §3.1 marks growth-derived engines on every memo and ticket that cites them; the flag
             # rides on the armed row so no session has to remember, or free-text it wrong.
             engine_note = ("engine growth-derived (observed 3-yr revenue growth, capped) — measured "
@@ -697,7 +790,13 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                                         adds_this_year=adds or 0, max_adds=caps["max_adds"])
                 if not add:
                     continue
-                blocked = add["blocked"] or ("§3.3 — earnings blackout" if in_bo else None)
+                # §3.3's blackout covers "no new entries and no adds", so the calendar guard covers
+                # adds too — an add through an unseen print is the same mistake in a smaller size.
+                blocked = (add["blocked"] or ("§3.3 — earnings blackout" if in_bo else None)
+                           or (CALENDAR_UNVERIFIED
+                               if calendar_unverified(last_report,
+                                                      stale_days=caps["calendar_stale_days"])
+                               else None))
                 add_pct = caps["flat"] * (add["fraction"] or 0)
                 arm.add("add", tk, "hurdle", sleeve="compounders", account=hacct,
                         order_type="limit", limit_price=px, score=ccn_score,
@@ -708,7 +807,8 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                              f"{(add['fraction'] or 0):.0%} of original size"
                              + (f" · {engine_note}" if engine_note else ""),
                         detail=dict(entry_fill=float(entry_fill) if entry_fill else None,
-                                    engine_provenance=provenance))
+                                    engine_provenance=provenance,
+                                    last_known_report=str(last_report) if last_report else None))
                 continue
             if already_owned(tk, "compounders", hacct):
                 # not held by the book, so the add path above never ran — and an entry for a name
@@ -739,24 +839,23 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                 blocked = f"§2.2 — already {caps['per_group']} names in {industry}"
             elif in_bo:
                 blocked = f"§3.3 — earnings blackout ({report})"
-            elif confidence not in ("full", None):
-                blocked = f"§3.3 — scored {confidence}: manual sign-off before sizing"
+            elif calendar_unverified(last_report, stale_days=caps["calendar_stale_days"]):
+                blocked = CALENDAR_UNVERIFIED
+            else:
+                # §3.3's sign-off, now a gate the ledger can actually open (WO-1, ruled 2026-08-06)
+                blocked = signoff_gate(confidence=confidence, provenance=provenance,
+                                       verdict_canon=ruling, decides=decides,
+                                       signoff_current=bool(signoff_now), filing_date=filing_date)
             # §4.3: jobs read the rulings ledger — only ruled names ship entry tickets. A live
             # FAIL blocks outright (the 12-month cooldown, §3.1); a name never ruled still arms,
             # flagged, because §3.1's law is that the NEXT SESSION rules it blind before its GTC
-            # is placed — a row the session cannot see is a ruling that never happens.
-            unruled = ruling is None
-            if ruling == "fail" and not blocked:
+            # is placed — a row the session cannot see is a ruling that never happens. An
+            # ESCALATE is a question for Zak (§5.6), so it leaves the name unruled too.
+            unruled = ruling_id is None or not decides
+            if decides and ruling == "fail" and not blocked:
                 until = f" until {cooldown_until}" if cooldown_until else ""
                 blocked = (f"§3.1 — ruled FAIL, 12-month cooldown{until} "
                            f"(escape: new filing + CCN at rejection +10)")
-            if owner_suspect and not blocked:
-                # §3.1 owner-cash quarantine (2026-08-02): scored, ranked, watched — never
-                # ticketed. Reported FCF here is materially customer money, and no growth cap
-                # repairs a numerator.
-                blocked = ("§3.1 — owner-cash quarantine: reported FCF is materially customer "
-                           "float or credit-book funding; not entry-eligible until the "
-                           "balance-sheet treatment prices it on owner cash")
 
             # §3.1 sizing: whole shares that CEIL into the band — flooring lands the position below
             # its own target weight, which is outside the 12-15 band the plan sets.
@@ -791,13 +890,24 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                     currency=("CAD" if tk.endswith(".TO") else "USD"), fx_estimate=fx,
                     note=(f"CCN {ccn_score:.1f} · GTC limit at the hurdle {hurdle:.2f} · "
                           f"{abs(gap or 0):.0%} below"
-                          + (" · UNRULED — rule blind before the GTC ships (§3.1)"
-                             if unruled else "")
+                          + (" · ESCALATED — awaiting Zak, not a ruling Yuna may make (§5.6)"
+                             if ruling_id and not decides else
+                             " · UNRULED — rule blind before the GTC ships (§3.1)" if unruled else
+                             f" · c2 {(ruling or '').upper()} · ruling {ruling_id}")
                           + (f" · swap out {swap['ticker']}" if swap else "")
-                          + (f" · {engine_note}" if engine_note else ""))
+                          + (f" · {engine_note}" if engine_note else "")
+                          + (f" · latest known report {last_report or 'never'} — the blackout wall "
+                             f"cannot enforce a date it never had (§3.3, obs 114)"
+                             if blocked == CALENDAR_UNVERIFIED else ""))
                     if ccn_score else None,
                     detail=dict(theme_weights=theme_weight, industry=industry,
                                 needs_ruling=unruled,
+                                # the ruling that opened (or held) §3.3's sign-off, cited on the row
+                                # so a session never has to go looking for it — §5.6's one read
+                                ruling_id=ruling_id, verdict=ruling, ruling_decides=decides,
+                                signoff_current=bool(signoff_now),
+                                fundamentals_filing_date=str(filing_date) if filing_date else None,
+                                last_known_report=str(last_report) if last_report else None,
                                 swap_out=swap["ticker"] if swap else None,
                                 engine_provenance=provenance,
                                 dividend_yield_ttm=yield_ttm, prefers_rrsp=prefers_rrsp,
@@ -930,7 +1040,42 @@ def book_effective_bets(conn, bars, fx):
     return sg.effective_bets(weights, returns)
 
 
-def run(conn, hb, *, held=frozenset()):
+def apply_ledger(conn, hb):
+    """Fills, then splits — everything that changes what the book *is*, before anything derives
+    from it.
+
+    §4.2 orders the night "ingest → score", and inside `score` the same logic applies one level
+    down: a queue built before tonight's fills are folded in describes a book that no longer
+    exists. That is how VRT — closed on the 5th — kept a HOLD seat while NUE and RS, filled the
+    same week, had none (obs 116). `score` calls this first; every pass here is idempotent by
+    design, so `run()` calling it again below is a no-op and a direct caller still gets a complete
+    job.
+    """
+    sync_fills_from_tickets(conn, hb)
+    apply_fills(conn, hb)
+    rebase_for_splits(conn, hb)
+    if not dry():
+        with conn.cursor() as cur:
+            # §3.0: "membership lists never drop a name the book owns." `universe.is_holding` is
+            # that membership list for score, ingest and the census, and nothing was maintaining
+            # it — so it still said VRT and had never heard of NUE or RS. Derived from the book,
+            # it cannot drift from it.
+            cur.execute("""update universe u
+                              set is_holding = exists (select 1 from book b
+                                                        where b.ticker = u.ticker
+                                                          and b.status = 'open' and b.qty > 0)
+                            where u.kind = 'stock'
+                              and u.is_holding <> exists (select 1 from book b
+                                                           where b.ticker = u.ticker
+                                                             and b.status='open' and b.qty > 0)""")
+            changed = cur.rowcount
+        conn.commit()
+        if changed:
+            hb.detail["is_holding_resynced"] = changed
+    return True
+
+
+def run(conn, hb, *, held=frozenset(), apply_ledger_first=True):
     """Everything `score` derives about the book and the night's conclusions.
 
     Fills applied -> bases re-scanned -> breakouts classified -> stops ratcheted -> the book
@@ -974,6 +1119,9 @@ def run(conn, hb, *, held=frozenset()):
             confirm_sessions=int(config(cur, "confirmation_sessions", 3)),
             cushion=float(config(cur, "holdthrough_cushion", 1.08)),
             warn_bets=float(config(cur, "effective_bets_warn", 4)),
+            # §3.3 / WO-4: a name whose newest KNOWN report date is older than a quarter has
+            # plausibly missed one, so the blackout wall cannot vouch for it (obs 114).
+            calendar_stale_days=int(config(cur, "earnings_calendar_stale_days", 110)),
         )
         cur.execute("select state from gate_state order by id desc limit 1")
         gate = (cur.fetchone() or ["OFF"])[0]
@@ -982,9 +1130,8 @@ def run(conn, hb, *, held=frozenset()):
         first_fill = cur.fetchone()[0]
     caps["start_low"] = not first_fill or (dt.date.today() - first_fill).days <= 90
 
-    sync_fills_from_tickets(conn, hb)
-    apply_fills(conn, hb)
-    rebase_for_splits(conn, hb)
+    if apply_ledger_first:
+        apply_ledger(conn, hb)
 
     with conn.cursor() as cur:
         cur.execute("""select ticker from universe
@@ -1080,9 +1227,12 @@ def run(conn, hb, *, held=frozenset()):
                   balances_as_of=str(n["anchored"]) if n["anchored"] else None)
     if not dry():
         with conn.cursor() as cur:
+            # §4.2 / WO-6: `briefs.session_date` means the market session this output serves, and
+            # it means that in every writer — the nightly record included. `current_date` in UTC is
+            # the evening after the close it describes.
             cur.execute("""insert into briefs(kind,session_date,freshness,summary,detail)
-                           values ('nightly',current_date,%s,%s,%s)""",
-                        (fresh, summary, jsonb(detail)))
+                           values ('nightly',%s,%s,%s,%s)""",
+                        (session_date_for(cur), fresh, summary, jsonb(detail)))
             if bets is not None and bets < caps["warn_bets"]:
                 observe(cur, "breach",
                         f"Effective bets {bets:.2f} — below the §2.2 band of 4. "

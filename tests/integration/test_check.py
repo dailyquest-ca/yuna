@@ -114,6 +114,37 @@ def test_a_number_that_cannot_be_rebuilt_blocks_the_dispatch(db):
     assert "hurdle_reproduces_floor" in detail["blocks_dispatch"]
 
 
+def test_the_night_the_desk_caught_by_hand_is_now_a_standing_check(db):
+    """Every 2026-08-07 defect ran while `check` read green — learnings #19 exactly. Four of the
+    work orders' acceptance queries live here now, so the next one is caught by the machine.
+
+    Amber, never a gag: each says a name should not have been *offered*, not that a published
+    number cannot be rebuilt, and §4.2 keeps the blocking set to the second kind.
+    """
+    with db.cursor() as cur:
+        world.add_name(cur, "DLO.US", last_reported_days_ago=None)
+        world.flat_then_base(cur, "DLO.US")
+        world.gate(cur)
+        world.balances(cur)
+        world.add_name(cur, "NUE.US")
+        world.position(cur, "NUE.US")               # a live holding with no queue seat
+        cur.execute("""insert into rulings (ticker, kind, verdict)
+                       values ('DLO.US','c2',
+                               'QUARANTINE — owner-cash (§3.1), not entry-eligible')""")
+        cur.execute("""insert into armed (run_id, kind, ticker, sleeve, reason, urgency)
+                       values (1,'entry','DLO.US','compounders','hurdle','normal')""")
+    db.commit()
+    assert check.main() == 0
+    status, detail = report(db)
+
+    failing = {c["check"] for c in detail["checks"] if c["failures"]}
+    assert {"rulings_bind_the_arming_stage", "blackout_wall_has_its_dates",
+            "queue_matches_the_book"} <= failing
+    assert detail["ruled_but_armed"][0]["verdict"] == "quarantine"
+    assert not detail["blocks_dispatch"], "loud, and never a gag"
+    assert status == "amber"
+
+
 def test_a_calibration_gauge_is_loud_but_never_a_gag(db):
     """A gauge past its alarm is a finding about the SCREEN, not about tonight's arithmetic. It
     must not silence the desk — a system that stops speaking whenever it doubts its own strategy

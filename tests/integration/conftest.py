@@ -57,11 +57,18 @@ def db(migrated):
             # never demanded it — but it is an append ledger with a "latest row wins" read, so a
             # row left behind by one test became the anchor every later test read, and a cash
             # figure nobody wrote governed the funding checks and NAV.
+            # `rulings` and `learnings` joined this list on 2026-08-07, and they are the sharpest
+            # case yet: neither is guarded — §4.3 puts both on the session write list — so the
+            # schema test could not demand them, and both are append ledgers read latest-wins.
+            # A ruling written by one test therefore governed every later test AND every later
+            # pytest RUN, because the database outlives the process. Found the same day the jobs
+            # started reading the ledger, on a sign-off nobody in that test had logged.
             cur.execute("""truncate armed, candidates, queue, bench, book, tickets, transactions,
                                     observations, briefs, nav_snapshots, earnings, prices,
                                     gate_state, group_strength, quarantine, corporate_actions,
-                                    fundamentals, balances, backtest_runs, backtest_trades,
-                                    backtest_equity, runs restart identity cascade""")
+                                    fundamentals, balances, rulings, learnings, backtest_runs,
+                                    backtest_trades, backtest_equity, runs restart identity
+                                    cascade""")
             cur.execute("delete from universe")
             # config is append-only by design (§4.3), so a test that overrides a threshold leaves
             # its row behind and silently governs every later test — and every later *run*, since

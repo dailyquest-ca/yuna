@@ -14,7 +14,7 @@ STALE_ONLY=true refreshes only names whose earnings date has passed since their 
 import os, sys, json, math, datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 import psycopg
-from db import connect, config, get, dry, Heartbeat
+from db import connect, config, get, dry, FxRates, Heartbeat
 import signals as sg
 
 WORKERS = int(os.environ.get("WORKERS", "8"))
@@ -30,6 +30,53 @@ TOLERANCE = 0.05          # |engine - revenue CAGR| gap beyond which the engine 
 # vendor's own strings is the whole point; the previous keyword sweep excluded a ruled-in cohort.
 EXCLUDED_INDUSTRY_PREFIXES = ("banks - ", "insurance - ")
 EXCLUDED_INDUSTRY_EXACT = {"banks", "insurance"}
+
+
+# §3.0, the one-currency law: "foreign issuers are compounder-eligible only when FCF and market cap
+# are expressed in one currency — financials converted at fiscal-period-end FX". The market cap the
+# vendor serves is in the LISTING currency (USD for every US listing; CAD for CNQ.TO, checked), so
+# that is the currency the statements have to be restated into — for every US listing, USD.
+#
+# Only these fields are money. Share counts on the balance sheet are counts and must never be
+# touched; per-share EPS is left in its own currency on purpose, because M4 reads it as a YoY ratio
+# where the currency cancels, and §3.2 already rules that FX-flattered EPS is a judgment call for
+# the R3 workup rather than an arithmetic one.
+INCOME_MONETARY = frozenset({
+    "totalRevenue", "ebit", "ebitda", "netIncome", "incomeBeforeTax", "incomeTaxExpense",
+    "depreciationAndAmortization", "grossProfit", "operatingIncome", "costOfRevenue"})
+BALANCE_MONETARY = frozenset({
+    "totalStockholderEquity", "cashAndShortTermInvestments", "cash", "shortLongTermDebtTotal",
+    "longTermDebtTotal", "shortTermDebt", "netDebt", "goodWill", "totalAssets", "totalLiab"})
+CASHFLOW_MONETARY = frozenset({
+    "freeCashFlow", "totalCashFromOperatingActivities", "capitalExpenditures", "depreciation",
+    "changeInWorkingCapital", "stockBasedCompensation", "netIncome"})
+
+
+def convert_periods(table, fields, *, frm, to, fx, log):
+    """A copy of `table` whose monetary `fields` are restated at each period's OWN period-end rate.
+
+    The key of every statement table is its fiscal period end, which is exactly the date §3.0 names.
+    A period with no rate keeps its raw figures and says so in `log`, so the caller can refuse to
+    score a row rather than mixing two currencies inside one ratio.
+    """
+    if not table:
+        return table, True
+    out, all_exact = {}, True
+    for period, row in table.items():
+        rate, as_of, exact = fx.convert(frm, to, period)
+        log[str(period)] = dict(rate=rate, as_of=str(as_of) if as_of else None, exact=exact)
+        if rate is None or not isinstance(row, dict):
+            all_exact = False
+            out[period] = row
+            continue
+        all_exact = all_exact and exact
+        converted = dict(row)
+        for f in fields:
+            v = num(row.get(f))
+            if v is not None:
+                converted[f] = v * rate
+        out[period] = converted
+    return out, all_exact
 
 
 def excluded_industry(industry):
@@ -78,7 +125,7 @@ def cagr(new, old, years):
 
 
 # ------------------------------------------------------------------ extraction
-def extract(ticker, r, quote_ccy=None):
+def extract(ticker, r, quote_ccy=None, fx=None):
     G = r.get("General") or {}
     H = r.get("Highlights") or {}
     SS = r.get("SharesStats") or {}
@@ -122,6 +169,50 @@ def extract(ticker, r, quote_ccy=None):
     is_adr = bool(primary and code and primary.split(".")[0].upper() != str(code).upper())
     mcap = num(H.get("MarketCapitalization"))
     shares = num(SS.get("SharesOutstanding")) or num((bs_y.get(ys[0]) or {}).get("commonStockSharesOutstanding"))
+
+    # ---- §3.0: one currency, converted at fiscal-period-end FX --------------------------------
+    #
+    # TSM stored `statement_currency='TWD'` against a USD market cap, so its FCF yield, hurdle and
+    # gap were all wrong by roughly 30x — a P/FCF of 1.76 where the truth is in the fifties. About
+    # 185 more universe names carried the same defect and were simply excluded from the compounder
+    # funnel rather than converted, which is not what §3.0 says to do with them.
+    #
+    # Every statement is restated at the rate that stood when THAT period closed, into the currency
+    # the vendor's market cap uses. The market cap itself is never touched — §3.1 makes it the
+    # authority that "resolves ADR ratios, listing currency, and share class", and restating it
+    # would be converting a number that is already right.
+    target_ccy = (quote_ccy or "USD").upper()
+    fx_rate = fx_as_of = None
+    converted = False
+    fx_log = {}
+    if stmt_ccy and stmt_ccy.upper() != target_ccy and fx is not None:
+        rate, as_of, exact = fx.convert(stmt_ccy, target_ccy, ys[0])
+        if rate:
+            is_y, e1 = convert_periods(is_y, INCOME_MONETARY, frm=stmt_ccy, to=target_ccy,
+                                       fx=fx, log=fx_log.setdefault("income_yearly", {}))
+            bs_y, e2 = convert_periods(bs_y, BALANCE_MONETARY, frm=stmt_ccy, to=target_ccy,
+                                       fx=fx, log=fx_log.setdefault("balance_yearly", {}))
+            cf_y, e3 = convert_periods(cf_y, CASHFLOW_MONETARY, frm=stmt_ccy, to=target_ccy,
+                                       fx=fx, log=fx_log.setdefault("cash_yearly", {}))
+            bs_q, e4 = convert_periods(bs_q, BALANCE_MONETARY, frm=stmt_ccy, to=target_ccy,
+                                       fx=fx, log=fx_log.setdefault("balance_quarterly", {}))
+            cf_q, e5 = convert_periods(cf_q, CASHFLOW_MONETARY, frm=stmt_ccy, to=target_ccy,
+                                       fx=fx, log=fx_log.setdefault("cash_quarterly", {}))
+            converted, fx_rate, fx_as_of = True, rate, as_of
+            fx_log["latest_period_exact"] = exact
+            fx_log["all_periods_exact"] = bool(e1 and e2 and e3 and e4 and e5)
+            # the Highlights fallback for EBITDA is a vendor figure in the statement currency too
+            if num(H.get("EBITDA")) is not None:
+                H = dict(H, EBITDA=num(H["EBITDA"]) * rate)
+            if not exact:
+                # §3.0: "if conversion data is unavailable … → data-confidence path". A rate older
+                # than the period it prices is not the rate the plan asks for, so the row is flagged
+                # rather than quietly used.
+                flagged = True
+
+    # a name is priceable when its statements and its market cap are in one currency — after the
+    # conversion above, not before it. Unknown statement currency is never "fine" (§3.0).
+    one_currency = bool(stmt_ccy) and (stmt_ccy.upper() == target_ccy or converted)
 
     # ---- compounding engine
     ebit_3y = s([num(is_y[k].get("ebit")) for k in y3])
@@ -250,12 +341,22 @@ def extract(ticker, r, quote_ccy=None):
         dwc_ttm = num((cf_y.get(ys[0]) or {}).get("changeInWorkingCapital"))
     sbc_ttm = abs(sbc_ttm) if sbc_ttm is not None else None
 
-    # a quarterly TTM-FCF / shares series, so the funnel can build P/FCF history from our bars
+    # a quarterly TTM-FCF / shares series, so the funnel can build P/FCF history from our bars.
+    #
+    # The series is priced against OUR bars, which quote the listed security — and for a depositary
+    # receipt that is a bundle of ordinary shares. The balance sheet counts ordinary shares while
+    # SharesStats counts the listed line (TSM: 25.9bn against 5.19bn, and the vendor cap ÷ its close
+    # agrees with SharesStats to eight figures), so the per-quarter count is bridged onto the listed
+    # basis. Un-bridged, an ADR's own median multiple is wrong by its ADR ratio — which the 30x
+    # ceiling hides rather than fixes.
+    bs_latest_count = num((bs_y.get(ys[0]) or {}).get("commonStockSharesOutstanding"))
+    listing_ratio = (shares / bs_latest_count) if shares and bs_latest_count else 1.0
     qseries = []
     for i in range(len(qs) - 3):
         window = qs[i:i + 4]
         v = s([fcf_of(cf_q[k]) for k in window])
-        sh = num((bs_q.get(qs[i]) or {}).get("commonStockSharesOutstanding")) or shares
+        q_count = num((bs_q.get(qs[i]) or {}).get("commonStockSharesOutstanding"))
+        sh = (q_count * listing_ratio) if q_count else shares
         if v is not None and sh:
             qseries.append([qs[i], v, sh, day((cf_q.get(qs[i]) or {}).get("filing_date"))])
     qseries = qseries[:24]                      # six years of quarters — the hurdle's history
@@ -322,11 +423,16 @@ def extract(ticker, r, quote_ccy=None):
               (y0 is not None and y1 is not None and y0 > y1 and y0 >= 0.15))
 
     have = sum(x is not None for x in (engine, cash_conv, mcap))
-    # §3.0, hardened 2026-08-01: a foreign issuer is compounder-eligible only when FCF and market cap
-    # are expressed in one currency — "if conversion data is unavailable **or the statement currency
-    # is unknown** → data-confidence path". Unknown is not the same as matching; 24 names were being
-    # scored as though a currency we never read agreed with the one we quote in.
-    confidence = ("flagged" if flagged or have < 2 or stmt_ccy is None
+    # §3.0, hardened 2026-08-01 and again 2026-08-07: a foreign issuer is compounder-eligible only
+    # when FCF and market cap are expressed in one currency — "if conversion data is unavailable
+    # **or the statement currency is unknown** → data-confidence path". Unknown is not the same as
+    # matching, and unconvertible is not the same as unknown.
+    #
+    # The two flags now agree by construction, which is the other half of the TSM row's defect: it
+    # carried quote_ok=false beside data_confidence='full', so the currency mismatch was visible to
+    # the scorer and invisible to the guardrails. A name we cannot price in one currency is on the
+    # data-confidence path, full stop.
+    confidence = ("flagged" if flagged or have < 2 or not one_currency
                   else ("full" if have == 3 else "2of3"))
 
     # §3.1: cap at price P uses effective shares = vendor cap / the close on the cap's `as_of` date,
@@ -341,8 +447,13 @@ def extract(ticker, r, quote_ccy=None):
         gic_sector=gic_s, gic_industry=gic_i,
         ipo_date=day(G.get("IPODate")), is_financial=is_fin,
         industry_missing=industry_missing,
-        primary_ticker=primary, statement_currency=stmt_ccy, is_adr=is_adr,
-        quote_ok=(not is_adr and stmt_ccy is not None and stmt_ccy == quote_ccy),
+        primary_ticker=primary, statement_currency=stmt_ccy,
+        # §3.0's one-currency test, and nothing else. The depositary-receipt veto that used to ride
+        # here was the interim measure migration 011 called "deliberately deferred rather than
+        # approximated" — §3.1 gives the vendor's cap the job of resolving ADR ratios, listing
+        # currency and share class, and with the statements converted it now does it.
+        quote_ok=one_currency,
+        converted_to_usd=converted, statement_fx_rate=fx_rate, statement_fx_as_of=fx_as_of,
         market_cap=mcap, shares_out=shares, fiscal_years=n_years,
         ebit_3y=ebit_3y, tax_rate=tax_rate, nopat_3y=nopat_3y,
         invested_capital=ic_avg, invested_capital_ex_gw=ic_avg_ex,
@@ -367,6 +478,14 @@ def extract(ticker, r, quote_ccy=None):
         raw_doc=json.dumps(r, default=str),
         raw=json.dumps({
             "quarterly_fcf": qseries,
+            # the restatement, auditable from the row: which currency, into which, at what rate,
+            # per period. §3.0 asks for fiscal-period-end FX and this is the receipt for it.
+            "fx": ({"from": stmt_ccy, "to": target_ccy, "rate_latest": fx_rate,
+                    "as_of": str(fx_as_of) if fx_as_of else None,
+                    "is_depositary_receipt": is_adr, "listing_share_ratio": listing_ratio,
+                    "periods": fx_log} if converted else
+                   {"from": stmt_ccy, "to": target_ccy, "converted": False,
+                    "one_currency": one_currency}),
             # Point-in-time history. Every statement EODHD returns carries its own filing_date,
             # so a past date's CCN can be rebuilt from only what had been filed by then. This is
             # the asset §4.8 assumed could not be bought — it was in the document all along.
@@ -407,7 +526,8 @@ COLS = ["ticker", "filing_date", "period_end", "currency", "sector", "industry",
         "ebitda", "net_debt_ebitda", "debt_grows_faster", "goodwill", "goodwill_jump", "c1_pass",
         "c1_fail_reason", "pfcf_current", "pfcf_median", "pfcf_obs", "eps_yoy_latest",
         "eps_yoy_prev", "m4_pass", "data_confidence", "primary_ticker", "statement_currency",
-        "quote_ok", "cap_as_of", "cap_close", "effective_shares",
+        "quote_ok", "converted_to_usd", "statement_fx_rate", "statement_fx_as_of",
+        "cap_as_of", "cap_close", "effective_shares",
         "growth_consistency", "roic_worst_year", "roic_years_reported",
         "fcf_ttm_reported", "sbc_ttm", "dwc_ttm", "sbc_missing", "raw", "raw_doc"]
 JSON_COLS = {"raw", "raw_doc"}
@@ -489,6 +609,30 @@ def flush(conn, rows, errors):
         return ok
 
 
+def fx_coverage(cur, fx, hb):
+    """Which statement currencies this sweep must convert out of, and which it cannot yet.
+
+    The pairs are registered and backfilled by `ingest-daily` (§4.2 gives it the FX feed), so a
+    filings sweep that runs before the first nightly after a new currency appears will find no
+    rates for it. That is a one-run gap and it is named rather than survived quietly: those names
+    stay on §3.3's data-confidence path until the bars land, which is the correct outcome and an
+    invisible one without this line.
+    """
+    cur.execute("""select distinct f.statement_currency from v_fundamentals_latest f
+                     join universe u on u.ticker = f.ticker
+                    where f.statement_currency is not null
+                      and upper(f.statement_currency) <> upper(coalesce(u.currency, 'USD'))""")
+    need = sorted({str(r[0]).upper() for r in cur.fetchall()})
+    missing = [c for c in need if not fx.series.get(c)]
+    hb.detail["fx_coverage"] = dict(needed=need, missing=missing,
+                                    have=sorted(fx.series))
+    if missing:
+        hb.amber(f"no FX bars yet for {', '.join(missing)} — those statements stay unconverted and "
+                 f"on the data-confidence path (§3.0). `ingest-daily` registers and backfills the "
+                 f"pairs; re-run this sweep after the next nightly.")
+    return need, missing
+
+
 def reextract(conn, hb):
     """Re-derive every stored row from the raw filing document already in the database.
 
@@ -499,6 +643,8 @@ def reextract(conn, hb):
     with conn.cursor() as cur:
         cur.execute("select ticker, currency from universe where kind='stock'")
         quote = {r[0]: r[1] for r in cur.fetchall()}
+        fx = FxRates.load(cur)
+        fx_coverage(cur, fx, hb)
     done, fail, errors, last = 0, 0, {}, ""
     while True:
         with conn.cursor() as cur:
@@ -512,7 +658,7 @@ def reextract(conn, hb):
         for tk, doc in page:
             last = tk
             try:
-                row = extract(tk, doc, quote.get(tk))
+                row = extract(tk, doc, quote.get(tk), fx=fx)
             except Exception as e:
                 fail += 1
                 if len(errors) < 40:
@@ -541,6 +687,7 @@ def main():
     with connect() as conn:
         with Heartbeat(conn, "ingest-filings") as hb:
             with conn.cursor() as cur:
+                missing_cap = int(config(cur, "fundamentals_missing_cap", 300))
                 if only:
                     targets = only
                 else:
@@ -557,6 +704,37 @@ def main():
                                            and e.report_date <= current_date)""")
                         fresh = {r[0] for r in cur.fetchall()}
                         targets = [t for t in targets if t not in fresh]
+
+                        # ---- WO-8: the standing backlog, metered ------------------------------
+                        # 298 universe names hold no fundamentals row at all. They are invisible
+                        # to C1 and the CCN and they auto-fail M4 — "not wrong, just dark" — and
+                        # the staleness pass leaves them in the target list where the quota cap
+                        # then truncates them away alphabetically, every week, forever.
+                        #
+                        # So they are separated out and taken in a bounded slice, largest first,
+                        # skipping the names the vendor has already told us it has nothing for.
+                        # Two weekly runs clear the backlog; a permanent gap costs one pull once.
+                        cur.execute("""select u.ticker from universe u
+                                        where u.kind='stock' and u.status='active'
+                                          and (u.in_l0 or u.is_holding) and not u.no_vendor_data
+                                          and not exists (select 1 from fundamentals f
+                                                           where f.ticker = u.ticker)
+                                        order by u.market_cap_usd desc nulls last
+                                        limit %s""", (missing_cap,))
+                        missing = [r[0] for r in cur.fetchall()]
+                        # a row whose filing document was never stored cannot be re-derived, so it
+                        # is not point-in-time history and WO-2's currency backfill cannot reach it
+                        # from disk — one pull makes it auditable and re-derivable forever after
+                        cur.execute("""select ticker from v_fundamentals_latest
+                                        where raw_doc is null order by ticker limit %s""",
+                                    (missing_cap,))
+                        no_doc = [r[0] for r in cur.fetchall()]
+                        stale_n = len(targets)
+                        seen = set(targets)
+                        targets += [t for t in missing + no_doc if not (t in seen or seen.add(t))]
+                        hb.detail["sweep_plan"] = dict(stale=stale_n, missing_row=len(missing),
+                                                       missing_raw_doc=len(no_doc),
+                                                       total=len(targets))
                 if SWEEP_LIMIT and len(targets) > SWEEP_LIMIT:
                     # the largest names first — a partial sweep should be a defensible universe,
                     # not an alphabetical accident
@@ -566,15 +744,30 @@ def main():
                     targets = [r[0] for r in cur.fetchall()]
                 cur.execute("select ticker, currency from universe where kind='stock'")
                 quote = {r[0]: r[1] for r in cur.fetchall()}
+                ceiling = float(config(cur, "api_quota_ceiling", 0.70))
+                fx = FxRates.load(cur)
+                fx_coverage(cur, fx, hb)
             # We have run out of daily quota twice. Ask before spending, and truncate the
             # sweep rather than dying two-thirds through it.
+            #
+            # §4.1 sets the bar in words — "every run meters its calls via EODHD's usage endpoint;
+            # the brief alarms past ~70% of daily quota" — so the sweep stops at that fraction of
+            # the budget rather than at a fixed reserve that happened to be 3,000 calls. Whichever
+            # of the two bites first wins; the nightly jobs are the reason the reserve exists.
             try:
-                used = get("user", hb.calls).get("apiRequests", 0)
-                limit = get("user", hb.calls).get("dailyRateLimit", 100000)
-                afford = max(0, int((limit - RESERVE - used) / UNITS_PER_CALL))
-                hb.detail["quota"] = dict(used=used, limit=limit, affordable_names=afford)
+                usage = get("user", hb.calls)
+                used = float(usage.get("apiRequests") or 0)
+                limit = float(usage.get("dailyRateLimit") or 100000)
+                budget = max(0.0, min(limit * ceiling, limit - RESERVE) - used)
+                afford = max(0, int(budget / UNITS_PER_CALL))
+                hb.detail["quota"] = dict(used=used, limit=limit, ceiling=ceiling,
+                                          affordable_names=afford)
                 if len(targets) > afford:
-                    hb.amber(f"quota allows {afford} of {len(targets)} names today")
+                    # never a silent cap (§4.1): the names dropped are named, so next week's run
+                    # and tonight's reader both know exactly what was not swept
+                    hb.amber(f"quota allows {afford} of {len(targets)} names today "
+                             f"(stop at {ceiling:.0%} of the daily budget, §4.1)")
+                    hb.detail["quota_deferred"] = targets[afford:afford + 200]
                     targets = targets[:afford]
             except Exception as e:
                 hb.detail["quota_check_failed"] = f"{type(e).__name__}: {e}"
@@ -583,7 +776,7 @@ def main():
 
             done = fail = 0
             errors = {}
-            buf = []
+            buf, barren = [], []
 
             def fetch_one(t):
                 try:
@@ -599,7 +792,7 @@ def main():
                             errors[t] = err or "unexpected payload"
                         continue
                     try:
-                        row = extract(t, doc, quote.get(t))
+                        row = extract(t, doc, quote.get(t), fx=fx)
                     except Exception as e:
                         fail += 1
                         if len(errors) < 40:
@@ -607,6 +800,7 @@ def main():
                         continue
                     if row is None:
                         fail += 1
+                        barren.append(t)
                         if len(errors) < 40:
                             errors[t] = "no fiscal years"
                         continue
@@ -615,6 +809,16 @@ def main():
                         done += flush(conn, buf, errors); buf = []
                         print(f"  {done} written, {fail} failed, {hb.calls[0]} calls")
             done += flush(conn, buf, errors)
+            # WO-8: a name the vendor served with no fiscal years is not a gap to retry — it is a
+            # fact about the security (SPACs, trusts, preferreds). Marked once, it stops costing ten
+            # units a week; a full sweep (STALE_ONLY=false) still re-asks, because listings change.
+            if barren and not dry():
+                with conn.cursor() as cur:
+                    cur.execute("""update universe set no_vendor_data = true,
+                                     no_vendor_data_at = coalesce(no_vendor_data_at, current_date)
+                                   where ticker = any(%s)""", (barren,))
+                conn.commit()
+            hb.detail["no_vendor_data_marked"] = sorted(barren)[:100]
             frozen = freeze_effective_shares(conn, targets)
             hb.detail["effective_shares_frozen"] = frozen
 

@@ -28,7 +28,7 @@ import os
 import sys
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-from db import connect, dry, jsonb, Heartbeat
+from db import connect, data_date, dry, jsonb, session_date_for, Heartbeat
 
 
 # --------------------------------------------------------------------------- mechanical layer
@@ -114,10 +114,22 @@ def brief_skeleton(pay, freshness_line):
         "**Armed but held back (context, never tickets):**\n"
         + _table(held, ["kind", "ticker", "score", "blocked_by"],
                  ["kind", "name", "score", "blocked by"]),
+        # §3.1's docket, and only the docket. Until migration 034 this listed every name at the
+        # line whether or not the desk had already ruled it — 44 of them on 2026-08-07, nearly all
+        # carrying blind C2 rulings from the day before (obs 113). The ruled ones now sit in their
+        # own section, with the verdict and the ruling id, so R1 cites instead of re-deciding.
         "**Unruled at the line (§3.1 — rule blind before any GTC ships):**\n"
         + _table(pay.get("unruled_at_the_line") or [],
-                 ["ticker", "ccn", "hurdle_price", "last_close"],
-                 ["name", "CCN", "hurdle", "close"]),
+                 ["ticker", "ccn", "hurdle_price", "last_close", "engine_provenance"],
+                 ["name", "CCN", "hurdle", "close", "engine"]),
+        "**Ruled at the line (cite the ruling — §3.1 binds later sessions):**\n"
+        + _table(pay.get("ruled_at_the_line") or [],
+                 ["ticker", "ccn", "verdict", "ruling_id", "ruled_at", "blind"],
+                 ["name", "CCN", "verdict", "ruling", "ruled", "blind"]),
+        "**Escalated — awaiting Zak (§5.6, not a ruling Yuna may make):**\n"
+        + _table(pay.get("escalated_awaiting_zak") or [],
+                 ["ticker", "ccn", "verdict", "ruling_id", "escalated_at"],
+                 ["name", "CCN", "verdict", "ruling", "escalated"]),
         "**Queue:**\n" + _table((pay.get("queue") or [])[:12],
                                 ["rank", "ticker", "state", "trigger_price", "mcn", "away_pct"],
                                 ["#", "name", "state", "trigger", "MCN", "away %"]),
@@ -244,12 +256,19 @@ def main():
                 if reason:
                     hb.amber(f"stale dispatch — {reason}; stale banner and protective lines only")
                 today = dt.date.today()
-                meta = dict(slot=slot, stale=bool(reason))
+                # §4.2's clock convention: the chain has no clock, so neither does its output. Both
+                # nightly products describe the SAME upcoming session — the stop sheet says what to
+                # place before it opens, the brief says what to do in it — so both carry its date.
+                # `now()::date` in UTC is an evening in New York, and stamped the brief a session
+                # ahead of the market it was written for (WO-6).
+                session = session_date_for(cur)
+                hb.detail.update(session_date=str(session), data_date=str(data_date(cur)),
+                                 slot=slot)
+                meta = dict(slot=slot, stale=bool(reason), session_date=str(session))
                 if slot == "nightly":
-                    publish(cur, hb, "stopsheet", today, freshness_line,
+                    publish(cur, hb, "stopsheet", session, freshness_line,
                             stopsheet_body(pay, reason), meta=meta)
                     # the morning brief is composed tonight and waits for the chat's single read
-                    session = today + dt.timedelta(days=1)
                     if reason:
                         brief = (f"⚠️ {freshness_line}\n\nstale data ⇒ no new tickets (§5.6). "
                                  f"Protective instructions only:\n\n"

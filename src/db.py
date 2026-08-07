@@ -3,7 +3,7 @@
 Kept deliberately thin — the jobs stay readable, and the heartbeat contract (one runs row
 per job, green | amber | red, tracebacks embedded on death) lives in exactly one place.
 """
-import os, sys, json, time, traceback, urllib.request, urllib.error
+import bisect, os, sys, json, time, traceback, urllib.request, urllib.error
 import datetime as dt
 import psycopg
 
@@ -323,6 +323,102 @@ def load_bars(cur, tickers):
     return out
 
 
+# --------------------------------------------------------------------------- FX (§4.1, §3.0)
+# The vendor's convention, in one place: majors quote as XXXUSD, everything else as USDXXX. Both
+# carry the same fact and only the direction differs, so `fx_pair` and `fx_pair_currency` are
+# inverses of each other and nothing else in the system has to know which way round a pair reads.
+BASE_QUOTED = frozenset({"EUR", "GBP", "AUD", "NZD", "IEP"})
+
+
+def fx_pair(currency):
+    """(ticker, invert) for a currency, or None. `invert` means the close is units per USD."""
+    c = (currency or "").strip().upper()
+    if len(c) != 3 or not c.isalpha() or c == "USD":
+        return None
+    return (f"{c}USD.FOREX", False) if c in BASE_QUOTED else (f"USD{c}.FOREX", True)
+
+
+def fx_pair_currency(ticker):
+    """(currency, invert) for a FOREX ticker, or (None, False) for anything else."""
+    code = str(ticker or "").split(".")[0].upper()
+    if len(code) != 6 or not code.isalpha():
+        return None, False
+    base, quote = code[:3], code[3:]
+    if quote == "USD" and base != "USD":
+        return base, False              # close is USD per unit of base
+    if base == "USD" and quote != "USD":
+        return quote, True              # close is units of quote per USD
+    return None, False
+
+
+class FxRates:
+    """Fiscal-period-end FX, read out of our own bars (§3.0, §4.1).
+
+    §3.0 makes a foreign issuer compounder-eligible "only when FCF and market cap are expressed in
+    one currency — financials converted at **fiscal-period-end FX**". So the rate a statement gets
+    is the last bar at or before the day that period closed, never tonight's: a five-year-old
+    income statement restated at today's rate is a number about today's currency, not about that
+    year's business.
+    """
+
+    def __init__(self, series=None):
+        # sorted per currency, because two tickers can legitimately map to one — and because the
+        # lookup below bisects. A full re-extract does tens of thousands of these.
+        self.series = {c: sorted(rows) for c, rows in (series or {}).items()}
+
+    @classmethod
+    def load(cls, cur):
+        cur.execute("""select u.ticker, p.d, p.close from prices p
+                       join universe u on u.ticker = p.ticker
+                       where u.kind = 'fx' and p.close is not null and p.close > 0
+                       order by u.ticker, p.d""")
+        out = {}
+        for tk, d, close in cur.fetchall():
+            ccy, invert = fx_pair_currency(tk)
+            if not ccy:
+                continue
+            out.setdefault(ccy, []).append((d, (1.0 / float(close)) if invert else float(close)))
+        return cls(out)
+
+    def usd_per(self, ccy, on):
+        """(rate, as_of, exact) — USD per unit of `ccy` on `on`. `exact` is False when the date
+        predates every bar we hold and the oldest observation stood in for it."""
+        c, on = (ccy or "").upper(), _as_date(on)
+        if on is None:
+            return None, None, False
+        if c == "USD":
+            return 1.0, on, True
+        rows = self.series.get(c)
+        if not rows:
+            return None, None, False
+        i = bisect.bisect_right(rows, (on, float("inf")))
+        if i == 0:
+            # older than anything we hold. The closest observation is the honest substitute and it
+            # travels marked, so a name whose LATEST period needed one is flagged rather than used.
+            d, rate = rows[0]
+            return rate, d, False
+        d, rate = rows[i - 1]
+        return rate, d, True
+
+    def convert(self, frm, to, on):
+        """(rate, as_of, exact) to restate a figure from `frm` into `to` on `on`."""
+        a, a_on, a_ok = self.usd_per(frm, on)
+        b, b_on, b_ok = self.usd_per(to, on)
+        if not a or not b:
+            return None, None, False
+        newest = max(x for x in (a_on, b_on) if x is not None)
+        return a / b, newest, (a_ok and b_ok)
+
+
+def _as_date(value):
+    if isinstance(value, dt.date):
+        return value
+    try:
+        return dt.date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
 def stops_breached(cur, bars):
     """Names whose standing stop was touched by tonight's bar (§4.1 sell-side quarantine trigger).
 
@@ -455,6 +551,103 @@ def freshness(conn, *, stale_days=4):
         return (f"data {last_bar} close · {line} · {', '.join(sorted(set(bad)))} "
                 f"(that domain only)", True)
     return f"data {last_bar} close · {line}", True
+
+
+def data_date(cur):
+    """The date the world is on — the newest stock bar (§5.6: stale means the bars, not the clock).
+
+    Stock bars only, for the same reason `freshness` reads them: FX and the index ride the same
+    nightly pull, so a half-failed ingest that landed USDCAD and no equities would otherwise report
+    a date the equities never reached.
+    """
+    cur.execute("""select max(p.d) from prices p join universe u on u.ticker = p.ticker
+                   where u.kind = 'stock'""")
+    return cur.fetchone()[0]
+
+
+def next_session(after):
+    """The next NYSE session strictly after `after`, weekends removed.
+
+    Deliberately weekend-only, exactly like `signals.trading_days_between`: we hold no holiday
+    calendar, and inventing one here would silently narrow §3.3's blackout somewhere else. Naming a
+    market holiday as the served session is cosmetic — the next chain re-derives it — while a
+    narrowed blackout is real money.
+    """
+    d = after + dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d += dt.timedelta(days=1)
+    return d
+
+
+def session_date_for(cur):
+    """The market session an output composed now actually serves (§4.2 clock convention, WO-6).
+
+    `now()::date` in UTC is not that session. The chain runs at 02:00–03:00 UTC, which is the
+    previous evening in New York and in Vancouver: on 2026-08-06 at 05:22 UTC the last close was
+    2026-08-05 and the brief served the 2026-08-06 open — and it was stamped 2026-08-07, one
+    session ahead of the market it was written for. The data date knows what the brief serves; the
+    wall clock does not.
+    """
+    dd = data_date(cur)
+    return next_session(dd) if dd is not None else dt.date.today()
+
+
+def chain_already_current(conn, hb, job, *, must_match=()):
+    """§4.2 / WO-6 — a chained job verifies and exits when its own last word still stands.
+
+    The 03:00 ingest correctly reads the runs table and exits when the night is already green
+    (§4.2), and then the chain behind it recomputed the whole world anyway: a second full `score`
+    and a second `preopen` row, 17 minutes apart, describing an identical universe. Idempotent is
+    not the same as free.
+
+    The test is the one §4.2 already uses, one level down: this job has a green non-dry run whose
+    **data date** is the data date now, and no ingest has landed a row since that run began. Either
+    condition failing means the world moved and the recompute is owed — which is what keeps the
+    Saturday chain honest, where `ingest-filings` lands fundamentals against yesterday's bars.
+
+    Only fires on a chained run (`workflow_run`). A human dispatching the chain by hand wants it
+    to run; so does a local test, so does the scheduled ingest itself.
+    """
+    with conn.cursor() as cur:
+        today = data_date(cur)
+    hb.detail["data_date"] = str(today) if today else None
+    if dry() or today is None:
+        return False
+    forced = os.environ.get("CHAIN_SKIP_IF_CURRENT", "").lower() in ("1", "true", "yes")
+    if not forced and os.environ.get("GITHUB_EVENT_NAME") != "workflow_run":
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""select id, started_at, detail from runs
+                        where job=%s and status='green' and not dry_run
+                          and finished_at is not null and id <> %s
+                        order by id desc limit 1""", (job, hb.id))
+        row = cur.fetchone()
+        if not row:
+            return False
+        prev_id, prev_started, detail = row
+        detail = detail if isinstance(detail, dict) else {}
+        if detail.get("data_date") != str(today):
+            return False
+        if any(detail.get(k) != v for k, v in dict(must_match).items()):
+            return False
+        cur.execute("""select count(*) from runs
+                        where job = any(%s) and not dry_run and finished_at is not null
+                          and coalesce(rows_written, 0) > 0 and finished_at > %s""",
+                    (list(VERBS["ingest"]), prev_started))
+        if cur.fetchone()[0]:
+            return False
+    hb.detail["skipped"] = (f"data {today} was already scored by run {prev_id}, and no ingest has "
+                            f"landed a row since — verified and exited rather than recomputing an "
+                            f"unchanged world (§4.2, WO-6)")
+    hb.detail["verified_against_run"] = prev_id
+    # Carry the previous run's answers forward. `v_session_payload` reads the NEWEST row of a job,
+    # so a skip row that says nothing would blank the freshness line and the pre-flight for every
+    # reader downstream — a quiet exit must not be quieter than the run it stands in for.
+    for k in ("freshness", "blocks_dispatch", "preflight", "amber", "session_date"):
+        if k in detail:
+            hb.detail.setdefault(k, detail[k])
+    print(f"{job}: green — data {today} already current (run {prev_id}); nothing to redo")
+    return True
 
 
 class Heartbeat:

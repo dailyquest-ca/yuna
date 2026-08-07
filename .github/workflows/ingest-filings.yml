@@ -3,7 +3,19 @@ name: ingest-filings
 # shares frozen (§3.1). Runs with the weekly sweep and on filing detection.
 #
 # STALE_ONLY skips names that have filed nothing since their last pull; a name with no
-# fundamentals row at all is never skipped, so a cold start still sweeps everything once.
+# fundamentals row at all is never skipped, so a cold start still sweeps everything once. On top of
+# the staleness pass it fills up to `fundamentals_missing_cap` names that hold no row at all (the
+# standing backlog — 298 of them on 2026-08-07) and any row whose filing document was never stored,
+# then meters itself out at `api_quota_ceiling` of the daily budget (§4.1).
+#
+# **Ordering, once:** §3.0's foreign-statement conversion reads FX bars, and `ingest-daily` is what
+# registers and backfills those pairs (§4.2 gives it the FX feed). So the first sweep after a new
+# statement currency appears must run *after* a nightly, or those names stay on the data-confidence
+# path — the job says so on its heartbeat rather than converting with rates it does not have.
+#
+# `reextract: true` re-derives every stored row from the filing documents already in the database,
+# with zero vendor calls — which is how a law change to the extraction (the FX restatement, SBC net
+# of FCF) re-prices the whole archive instead of buying the same facts twice.
 on:
   schedule:
     - cron: '0 11 * * 6'   # Sat 11:00 UTC — after ingest-universe, before score's weekly rank
