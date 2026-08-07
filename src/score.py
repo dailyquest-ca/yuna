@@ -347,73 +347,70 @@ def apply_rulings_to_bench(conn, hb):
     which §4.0 does not allow: sessions judge, jobs compute, and a judgment the jobs never read is
     a judgment that did not happen.
 
-    So a live c2 QUARANTINE **sets** the flag, every run, latest-ruling-wins.
+    Five columns on `bench` used to be kept by hand and read by the machine — `c2_status`,
+    `c2_memo`, `c2_confidence`, `approved`, `owner_fcf_suspect`. Every one is a copy of something
+    already in `rulings`, and every one is destroyed the moment this job rebuilds that row, which
+    it does whenever a name fails C1 for a quarter. A hand-kept copy of a ledger is a countdown.
 
-    It does not clear it, and that asymmetry is the whole design. The quarantine is a finding about
-    the *balance sheet* — "reported FCF is materially customer float or credit-book funding" — and
-    the C2 verdict is a finding about the *business*. They are orthogonal, which is why the desk's
-    own DLO ruling reads "QUARANTINE … PASS/FAIL deferred to R5", and why AXP, HQY, PCTY and SCHW
-    all sit flagged today with a live PASS beside them: a card issuer, an HSA custodian, a payroll
-    processor and a broker are exactly the businesses §3.1 names, and every one of them can be a
-    fine business holding other people's money. A later PASS is not a statement about the float, so
-    treating it as one would have quietly un-quarantined four names nobody re-examined.
+    So all five are derived here, every run, in two plain sentences:
 
-    Clearing takes an explicit word — a c2 ruling reading RELEASE — because §3.1 only lifts the
-    quarantine "until the balance-sheet treatment prices it on cash the owners actually keep", and
-    that is a judgment. Flags with no quarantine ruling behind them are reported, not overwritten:
-    they survive only as long as their bench row does, and a logged ruling makes them permanent.
+      * **A name is approved when the desk's most recent C2 verdict on it is a blind PASS.**
+      * **A name is quarantined while a live quarantine ruling stands on it.**
 
-    A live FAIL withdraws approval — §3.1's 12-month cooldown — and only a newer ruling restores
-    it, because the escape clause (new filing + CCN at rejection +10) is judgment too.
+    The two are deliberately separate questions, because the desk's own DLO ruling says they are:
+    "QUARANTINE — owner-cash (§3.1) … **PASS/FAIL deferred to R5**". A card issuer can be a
+    wonderful business and still report other people's money as free cash flow, which is why AXP,
+    HQY, PCTY and SCHW sit quarantined today with a live PASS beside them. Reading both facts out
+    of one verdict slot would have quietly un-quarantined all four.
 
-    Approval is never *granted* here. §3.1 has PASS join the bench, but widening what may ship a
-    ticket is a risk decision and §4.5 makes those Zak's; this job only ever takes approval away.
+    `blind` is load-bearing on the approval side. §3.1's whole rulings law is that the business
+    verdict is recorded before price, gap or CCN is revealed — a verdict the number got to argue
+    with does not open the gate.
     """
     if dry():
         return {}
     with conn.cursor() as cur:
-        cur.execute("""update bench b set owner_fcf_suspect = true
-                         from v_rulings_latest_c2 r
-                        where r.ticker = b.ticker and r.decides
-                          and r.verdict_canon = 'quarantine' and not b.owner_fcf_suspect
-                    returning b.ticker""")
-        quarantined = [r[0] for r in cur.fetchall()]
-        cur.execute("""update bench b set owner_fcf_suspect = false
-                         from v_rulings_latest_c2 r
-                        where r.ticker = b.ticker and r.decides
-                          and r.verdict_canon = 'release' and b.owner_fcf_suspect
-                    returning b.ticker""")
-        released = [r[0] for r in cur.fetchall()]
-        cur.execute("""update bench b set approved = false, approved_at = null
-                         from v_rulings_latest_c2 r
-                        where r.ticker = b.ticker and r.decides and r.verdict_canon = 'fail'
-                          and b.approved
-                    returning b.ticker, r.cooldown_until""")
-        unapproved = [dict(ticker=t, cooldown_until=str(c) if c else None)
-                      for t, c in cur.fetchall()]
-        # A mark with no ruling behind it lives exactly as long as its bench row: `score` deletes
-        # and rebuilds rows that fail C1, and the default is false. Named here so R5 can log the
-        # ruling that makes it durable, rather than discovered the night it disappears.
-        cur.execute("""select b.ticker from bench b
-                        where b.owner_fcf_suspect
-                          and not exists (select 1 from v_rulings_latest_c2 r
-                                           where r.ticker = b.ticker and r.decides
-                                             and r.verdict_canon = 'quarantine')
-                        order by b.ticker""")
-        unlogged = [r[0] for r in cur.fetchall()]
+        # §3.1: approved ⇔ the latest live c2 verdict is a blind PASS. Both directions, every run —
+        # a withdrawal is as automatic as a grant, and the 12-month cooldown on a FAIL is simply
+        # the absence of a newer PASS.
+        cur.execute("""update bench b
+                          set approved = coalesce(r.verdict_canon = 'pass' and r.blind, false),
+                              approved_at = case
+                                when coalesce(r.verdict_canon = 'pass' and r.blind, false)
+                                then coalesce(b.approved_at, now()) else null end,
+                              c2_status = coalesce(r.verdict_canon, 'pending'),
+                              c2_confidence = r.confidence,
+                              c2_memo = coalesce(r.memo, b.c2_memo)
+                         from (select b2.ticker, r2.verdict_canon, r2.blind, r2.confidence, r2.memo
+                                 from bench b2
+                                 left join v_rulings_latest_c2 r2
+                                        on r2.ticker = b2.ticker and r2.decides) r
+                        where r.ticker = b.ticker
+                          and (b.approved is distinct from
+                               coalesce(r.verdict_canon = 'pass' and r.blind, false)
+                            or b.c2_status is distinct from coalesce(r.verdict_canon, 'pending'))
+                    returning b.ticker, b.approved""")
+        approval = [dict(ticker=t, approved=a) for t, a in cur.fetchall()]
+        # §3.1 owner-cash quarantine, from its own ledger (migration 036). Lifting one is a logged
+        # reversal — §3.1's only route for overturning a verdict — so there is no second vocabulary.
+        cur.execute("""update bench b
+                          set owner_fcf_suspect = exists (select 1 from v_quarantine_live q
+                                                           where q.ticker = b.ticker)
+                        where b.owner_fcf_suspect is distinct from
+                              exists (select 1 from v_quarantine_live q where q.ticker = b.ticker)
+                    returning b.ticker, b.owner_fcf_suspect""")
+        quarantine = [dict(ticker=t, quarantined=q) for t, q in cur.fetchall()]
     conn.commit()
-    hb.detail["rulings_applied"] = dict(owner_cash_quarantined=sorted(quarantined),
-                                        owner_cash_released=sorted(released),
-                                        owner_cash_unlogged=unlogged,
-                                        approval_withdrawn=unapproved)
-    if unlogged:
-        hb.amber(f"{len(unlogged)} bench row(s) carry an owner-cash quarantine with no c2 ruling "
-                 f"behind it — the mark dies with the row: {', '.join(unlogged[:20])}")
-    if quarantined or released or unapproved:
-        print(f"score/rulings: {len(quarantined)} quarantined, {len(released)} released, "
-              f"{len(unapproved)} approval(s) withdrawn")
-    return dict(quarantined=quarantined, released=released, unapproved=unapproved,
-                unlogged=unlogged)
+    granted = sorted(a["ticker"] for a in approval if a["approved"])
+    withdrawn = sorted(a["ticker"] for a in approval if not a["approved"])
+    marked = sorted(q["ticker"] for q in quarantine if q["quarantined"])
+    lifted = sorted(q["ticker"] for q in quarantine if not q["quarantined"])
+    hb.detail["rulings_applied"] = dict(approved=granted, approval_withdrawn=withdrawn,
+                                        quarantined=marked, quarantine_lifted=lifted)
+    if approval or quarantine:
+        print(f"score/rulings: approved {len(granted)}, withdrew {len(withdrawn)}, "
+              f"quarantined {len(marked)}, lifted {len(lifted)}")
+    return dict(approved=granted, withdrawn=withdrawn, quarantined=marked, lifted=lifted)
 
 
 def main():

@@ -183,6 +183,13 @@ def brief_skeleton(pay, freshness_line):
         + _table(pay.get("ruled_at_the_line") or [],
                  ["ticker", "ccn", "verdict", "ruling_id", "ruled_at", "blind"],
                  ["name", "CCN", "verdict", "ruling", "ruled", "blind"]),
+        # §3.1: a quarantined name is "scored, ranked, **watched**, never ticketed". It no longer
+        # reaches the arming stage at all, so watched has to mean listed — otherwise the desk's
+        # only clue that MELI is cheap and untouchable would be its absence.
+        "**Owner-cash quarantine (§3.1 — watched, never ticketed):**\n"
+        + _table(pay.get("quarantined_watchlist") or [],
+                 ["ticker", "ccn", "hurdle_price", "last_close", "ruling_id"],
+                 ["name", "CCN", "hurdle", "close", "ruling"]),
         "**Escalated — awaiting Zak (§5.6, not a ruling Yuna may make):**\n"
         + _table(pay.get("escalated_awaiting_zak") or [],
                  ["ticker", "ccn", "verdict", "ruling_id", "escalated_at"],

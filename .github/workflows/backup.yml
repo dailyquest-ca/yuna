@@ -1,7 +1,7 @@
 name: backup
 on:
   schedule:
-    - cron: '0 14 * * 6'   # weekly Sat 14:00 UTC; in-job guard keeps real runs to the 1st Saturday
+    - cron: '0 14 * * 6'   # every Sat 14:00 UTC; the job backs up if the month has none, else exits
   workflow_dispatch:
     inputs:
       force:
@@ -19,22 +19,16 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - name: 1st-Saturday guard
-        id: guard
-        run: |
-          # GitHub cron ORs dom and dow — never trust '1-7 * 6'. Guard the date here.
-          if [ "${{ inputs.force }}" = "true" ] || [ "$(date -u +%d)" -le 07 ]; then
-            echo "run=true" >> $GITHUB_OUTPUT
-          else
-            echo "run=false" >> $GITHUB_OUTPUT; echo "not the 1st Saturday — backup skipped"
-          fi
+      # The guard moved INTO the job (§4.2, ruled 2026-08-05): monthly work is guarded by whether
+      # it has run, never by the date. As a shell step it ran before the heartbeat opened, so a
+      # firing outside the first seven days left no trace at all — the same shape that hid
+      # `ingest-universe`'s absence for a month.
       - name: dump
-        if: steps.guard.outputs.run == 'true'
         run: set -o pipefail; python src/backup.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FORCE: ${{ inputs.force || 'false' }}
       - name: commit
-        if: steps.guard.outputs.run == 'true'
         run: |
           git config user.name  "yuna-backup[bot]"
           git config user.email "yuna-backup@users.noreply.github.com"

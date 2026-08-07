@@ -39,8 +39,11 @@ def rule(cur, ticker, verdict, *, kind="c2", at=None, blind=True, reverses=None,
     return cur.fetchone()[0]
 
 
-def bench_row(cur, ticker, *, ccn=78.0, hurdle=100.0, close=95.0, approved=True,
+def bench_row(cur, ticker, *, ccn=78.0, hurdle=100.0, close=95.0, approved=False,
               provenance="growth-derived", confidence="flagged", suspect=False):
+    """A bench row. `approved` is seeded only so a test can prove the job CORRECTS it — the live
+    value is derived from the ruling every run (migration 036), so a test that wants an armable
+    name logs a blind PASS rather than setting a flag."""
     cur.execute("""insert into bench (ticker, rank, cohort, ccn, engine, cash_conv, durability,
                                       engine_provenance, hurdle_price, last_close, gap_to_hurdle,
                                       fcf_yield, engine_growth, fair_multiple, c1_pass, approved,
@@ -146,12 +149,13 @@ def test_a_growth_derived_name_with_a_blind_c2_pass_arms_unblocked(db, fx):
     assert entry[0]["detail"]["ruling_id"] is not None, "the row cites the ruling that opened it"
 
 
-def test_only_a_blind_pass_is_the_sign_off(db, fx):
+def test_only_a_blind_pass_counts(db, fx):
     """§3.3 (2026-08-06) says the **blind** C2 PASS ruling is the sign-off, and the adjective is
     load-bearing. §3.1's rulings law exists so the business verdict is recorded before price, gap
-    or CCN is revealed — a verdict the number got to argue with is not the one §3.3 accepts as a
-    waiver of its own guardrails. Free today (every live PASS on the bench is blind) and a real
-    guard the first time one is not."""
+    or CCN is revealed — a verdict the number got to argue with is not one the machine acts on.
+
+    Since migration 036 that bites a level earlier than the sign-off: a non-blind PASS does not
+    approve the name at all, so it never reaches the arming stage. One rule, enforced once."""
     with db.cursor() as cur:
         world.add_name(cur, "SGT.US")
         world.flat_then_base(cur, "SGT.US", level=95.0)
@@ -162,14 +166,17 @@ def test_only_a_blind_pass_is_the_sign_off(db, fx):
         rule(cur, "SGT.US", "PASS", blind=False)
     db.commit()
     run()
-    entry = armed(db, "SGT.US", "entry")[0]
-    assert "sign-off" in entry["blocked_by"] and "not blind" in entry["blocked_by"]
+    assert armed(db, "SGT.US", "entry") == []
+    with db.cursor() as cur:
+        cur.execute("select approved, c2_status from bench where ticker='SGT.US'")
+        assert cur.fetchone() == (False, "pass"), (
+            "the verdict is recorded faithfully; it just does not open the gate")
 
 
-def test_a_growth_derived_name_with_no_ruling_still_waits_for_one(db, fx):
-    """The gate opens on a ruling, not on nothing. §3.1's guardrails on the fallback are real —
-    bottom of the band and a manual sign-off — and the sign-off is now obtainable rather than
-    imaginary."""
+def test_a_name_with_no_ruling_never_reaches_the_arming_stage(db, fx):
+    """§3.1: "No ticket ever ships for an unruled name." Approval is derived from the ruling now
+    (migration 036), so an unruled name is not approved and never arms — it reaches the desk on
+    the docket instead, which is the route §3.1 actually names."""
     with db.cursor() as cur:
         world.add_name(cur, "NRL.US")
         world.flat_then_base(cur, "NRL.US", level=95.0)
@@ -180,10 +187,11 @@ def test_a_growth_derived_name_with_no_ruling_still_waits_for_one(db, fx):
     db.commit()
     run()
 
-    entry = armed(db, "NRL.US", "entry")[0]
-    assert "sign-off" in entry["blocked_by"]
-    assert "never ruled" in entry["blocked_by"]
-    assert entry["detail"]["needs_ruling"] is True
+    assert armed(db, "NRL.US", "entry") == []
+    assert {u["ticker"] for u in payload(db, "unruled_at_the_line")} == {"NRL.US"}
+    with db.cursor() as cur:
+        cur.execute("select approved from bench where ticker='NRL.US'")
+        assert cur.fetchone()[0] is False, "no ruling, no approval — the job derives it"
 
 
 def test_a_growth_derived_name_ruled_escalate_is_not_signed_off(db, fx):
@@ -199,9 +207,8 @@ def test_a_growth_derived_name_ruled_escalate_is_not_signed_off(db, fx):
     db.commit()
     run()
 
-    entry = armed(db, "ESC.US", "entry")[0]
-    assert "sign-off" in entry["blocked_by"] and "escalate" in entry["blocked_by"]
-    assert "ESCALATED" in entry["note"]
+    assert armed(db, "ESC.US", "entry") == [], "a question is not a PASS, so nothing is approved"
+    assert {u["ticker"] for u in payload(db, "escalated_awaiting_zak")} == {"ESC.US"}
 
 
 def test_a_two_of_three_name_needs_an_explicit_signoff_ruling(db, fx):
@@ -215,7 +222,7 @@ def test_a_two_of_three_name_needs_an_explicit_signoff_ruling(db, fx):
         world.balances(cur)
         filing(cur, "TOT.US", filed="2026-05-01")
         bench_row(cur, "TOT.US", provenance="measured", confidence="2of3")
-        rule(cur, "TOT.US", "PASS")                       # a C2 pass is not this sign-off
+        rule(cur, "TOT.US", "PASS")     # approves the name — but a C2 pass is not THIS sign-off
         rule(cur, "TOT.US", "SIGNOFF", kind="signoff", at="2026-04-01")   # and this one is stale
     db.commit()
     run()
@@ -244,15 +251,16 @@ def test_a_quarantined_name_arms_no_entry_and_no_add(db, fx):
         world.balances(cur)
         filing(cur, "DLO.US")
         bench_row(cur, "DLO.US", ccn=86.0)
-        rule(cur, "DLO.US",
-             "QUARANTINE — owner-cash (§3.1), not entry-eligible; PASS/FAIL deferred to R5")
+        rule(cur, "DLO.US", "PASS")                        # a fine business…
+        rule(cur, "DLO.US", "QUARANTINE — owner-cash (§3.1): reported FCF is customer float",
+             kind="quarantine", blind=False)               # …whose cash is not the owners'
     db.commit()
     run()
 
-    assert armed(db, "DLO.US", "entry") == [], "the acceptance query counts armed rows, not clean ones"
+    assert armed(db, "DLO.US", "entry") == [], "§3.1: scored, ranked, watched, never ticketed"
     assert armed(db, "DLO.US", "add") == []
-    check = armed(db, "DLO.US", "check")
-    assert check and "owner-cash quarantine" in check[0]["note"], "and the desk still hears about it"
+    # …and watched means listed, because a name that never arms is otherwise just absent
+    assert {w["ticker"] for w in payload(db, "quarantined_watchlist")} == {"DLO.US"}
 
 
 def test_the_bench_learns_the_quarantine_from_the_ledger(db, fx):
@@ -272,7 +280,7 @@ def test_the_bench_learns_the_quarantine_from_the_ledger(db, fx):
         assert cur.fetchone()[0] is True
 
 
-def test_a_later_pass_does_not_lift_an_owner_cash_quarantine(db, fx):
+def test_a_later_pass_does_not_lift_a_quarantine_but_a_reversal_does(db, fx):
     """The asymmetry that matters, and the one that would have done damage.
 
     The quarantine is a finding about the balance sheet; the C2 verdict is a finding about the
@@ -283,22 +291,22 @@ def test_a_later_pass_does_not_lift_an_owner_cash_quarantine(db, fx):
     """
     with db.cursor() as cur:
         world.add_name(cur, "AXP.US")
-        bench_row(cur, "AXP.US", suspect=True)          # marked at R5, no ruling logged yet
+        bench_row(cur, "AXP.US")
+        quarantine = rule(cur, "AXP.US", "QUARANTINE — owner-cash: the credit book is the cash",
+                          kind="quarantine", blind=False)
         rule(cur, "AXP.US", "PASS — a wonderful business that holds other people's money")
     db.commit()
-    hb = _hb()
     with score.connect() as conn:
-        score.apply_rulings_to_bench(conn, hb)
+        score.apply_rulings_to_bench(conn, _hb())
     with db.cursor() as cur:
-        cur.execute("select owner_fcf_suspect from bench where ticker='AXP.US'")
-        assert cur.fetchone()[0] is True, "a PASS says nothing about the float"
-    assert hb.detail["rulings_applied"]["owner_cash_unlogged"] == ["AXP.US"]
-    assert any("no c2 ruling behind it" in a for a in hb.detail["amber"]), (
-        "a mark that dies with its row should be named while it is still there")
+        cur.execute("select owner_fcf_suspect, approved from bench where ticker='AXP.US'")
+        assert cur.fetchone() == (True, True), (
+            "two questions, two answers: a fine business whose cash is not the owners'")
 
-    # and the one word that does lift it, because §3.1 says the balance sheet has to be priced
+    # §3.1's only route for overturning a verdict — no second vocabulary to remember
     with db.cursor() as cur:
-        rule(cur, "AXP.US", "RELEASE — float priced on the balance sheet, owner cash confirmed")
+        rule(cur, "AXP.US", "REVERSAL — float now priced on the balance sheet",
+             kind="quarantine", blind=False, reverses=quarantine)
     db.commit()
     with score.connect() as conn:
         score.apply_rulings_to_bench(conn, _hb())
@@ -307,23 +315,30 @@ def test_a_later_pass_does_not_lift_an_owner_cash_quarantine(db, fx):
         assert cur.fetchone()[0] is False
 
 
-def test_a_live_fail_withdraws_approval_but_a_pass_never_grants_it(db, fx):
-    """§3.1's 12-month cooldown, enforced on the row the arming stage reads. Approval is only ever
-    taken away here: widening what may ship a ticket is a risk decision, and §4.5 makes those Zak's.
-    """
+def test_approval_follows_the_ruling_in_both_directions(db, fx):
+    """The bench maintains itself (migration 036). Approval is not a flag anybody keeps — it is
+    "the desk's most recent verdict on this name is a blind PASS", recomputed every run. A FAIL
+    withdraws it; §3.1's 12-month cooldown is simply the absence of a newer PASS."""
     with db.cursor() as cur:
-        world.add_name(cur, "FLD.US")
-        bench_row(cur, "FLD.US", approved=True)
-        world.add_name(cur, "PSD.US")
-        bench_row(cur, "PSD.US", approved=False)
+        for tk in ("FLD.US", "PSD.US", "BLD.US", "NIL.US"):
+            world.add_name(cur, tk)
+        bench_row(cur, "FLD.US", approved=True)      # stale flag the job must correct
+        bench_row(cur, "PSD.US", approved=False)     # stale flag the job must correct
+        bench_row(cur, "BLD.US", approved=True)
+        bench_row(cur, "NIL.US", approved=True)
         rule(cur, "FLD.US", "FAIL — the moat is a price umbrella")
         rule(cur, "PSD.US", "PASS")
+        rule(cur, "BLD.US", "PASS", blind=False)     # the number got to argue with the judgment
     db.commit()
     with score.connect() as conn:
         score.apply_rulings_to_bench(conn, _hb())
     with db.cursor() as cur:
-        cur.execute("select ticker, approved from bench order by ticker")
-        assert dict(cur.fetchall()) == {"FLD.US": False, "PSD.US": False}
+        cur.execute("select ticker, approved, c2_status from bench order by ticker")
+        rows = {t: (a, s) for t, a, s in cur.fetchall()}
+    assert rows["PSD.US"] == (True, "pass"), "a blind PASS approves — nobody has to remember to"
+    assert rows["FLD.US"] == (False, "fail")
+    assert rows["BLD.US"] == (False, "pass"), "§3.1: the verdict has to be blind"
+    assert rows["NIL.US"] == (False, "pending"), "never ruled, never approved"
 
 
 # --------------------------------------------------------------- WO-3 · the docket (obs 113)
