@@ -434,7 +434,36 @@ class Arm:
         return len(self.rows)
 
 
-def arm_exits(conn, arm, bars, gate, breakouts, cushion, holidays, held=()):
+def exit_order(bars, ticker, *, inside, urgent):
+    """How a sell ships (§4.5, ruled 2026-08-06): a **marketable limit**, unless it is urgent.
+
+    "0.3% inside the last print, recomputed at placement — gap drills stay market-at-open." A
+    marketable limit fills like a market order in any normal tape and refuses one bad print on a
+    thin open; a market order accepts whatever the book offers. So the question per exit is only
+    ever *how much does one more minute cost*.
+
+    Urgent, and therefore market: a gap through the stop-limit (§4.6 names market-at-open in so
+    many words), the market gate shutting (§3.3's crash protocol — the sleeve goes to cash), and
+    the unconfirmed-breakout hair-trigger. Everything else is a conclusion drawn from a weekly
+    ranking and acted on the next morning; a name that failed its trend template last Friday is
+    not getting worse in the ninety seconds a limit costs.
+
+    The price is computed from the last close so the ticket carries a number, and the note says to
+    recompute at placement — which is what the ruling asks for and what Zak actually does.
+    """
+    if urgent:
+        return dict(order_type="market", limit_price=None, note=None)
+    b = bars.get(ticker) or []
+    px = float(b[-1]["close"]) if b and b[-1]["close"] is not None else None
+    if px is None:
+        return dict(order_type="market", limit_price=None,
+                    note="no last print to price a limit against — market")
+    return dict(order_type="limit", limit_price=round(px * (1 - inside), 2),
+                note=f"marketable limit — {inside:.1%} inside the last print {px:.2f}; "
+                     f"recompute at placement (§4.5, ruled 2026-08-06)")
+
+
+def arm_exits(conn, arm, bars, gate, breakouts, cushion, holidays, held=(), exit_inside=0.003):
     """Every exit §3.2 and §3.3 name, in the order they can fire.
 
     Protective conclusions carry urgency='protective' so a stale night cannot suppress them.
@@ -503,22 +532,31 @@ def arm_exits(conn, arm, bars, gate, breakouts, cushion, holidays, held=()):
 
                 # ---- relative exits (§3.2). Weekly numbers, acted on nightly.
                 if m2 is False:
-                    arm.add("exit", tk, "template", order_type="market",
-                            note="trend template failed", **common)
+                    o = exit_order(bars, tk, inside=exit_inside, urgent=False)
+                    arm.add("exit", tk, "template", order_type=o["order_type"],
+                            limit_price=o["limit_price"],
+                            note="trend template failed"
+                                 + (f" · {o['note']}" if o["note"] else ""), **common)
                     continue
                 if mcn is not None and float(mcn) < 55:
-                    arm.add("exit", tk, "score", order_type="market",
+                    o = exit_order(bars, tk, inside=exit_inside, urgent=False)
+                    arm.add("exit", tk, "score", order_type=o["order_type"],
+                            limit_price=o["limit_price"],
                             note=f"MCN {float(mcn):.1f} — others got stronger, which is the "
-                                 f"thesis decaying", **common)
+                                 f"thesis decaying" + (f" · {o['note']}" if o["note"] else ""),
+                            **common)
                     continue
 
                 # ---- holding through a print needs a cushion (§3.3)
                 if report and sg.trading_days_between(dt.date.today(), report,
                                                       holidays=holidays) <= 1:
                     if sg.holds_through_earnings(px, cost, cushion=cushion) is False:
-                        arm.add("exit", tk, "earnings", order_type="market",
+                        o = exit_order(bars, tk, inside=exit_inside, urgent=False)
+                        arm.add("exit", tk, "earnings", order_type=o["order_type"],
+                                limit_price=o["limit_price"],
                                 note=f"reports {report} without the {cushion:.2f}x cushion — "
-                                     f"exit this evening, stops stay placed either way",
+                                     f"exit this evening, stops stay placed either way"
+                                     + (f" · {o['note']}" if o["note"] else ""),
                                 detail=dict(report=str(report), close=px,
                                             avg_cost=float(cost) if cost else None), **common)
                         continue
@@ -536,9 +574,12 @@ def arm_exits(conn, arm, bars, gate, breakouts, cushion, holidays, held=()):
                                 note="pyramid stalled four weeks — a new valid base completes it "
                                      "to full size rather than exiting (§3.2)")
                     else:
-                        arm.add("exit", tk, "stall", order_type="market",
+                        o = exit_order(bars, tk, inside=exit_inside, urgent=False)
+                        arm.add("exit", tk, "stall", order_type=o["order_type"],
+                                limit_price=o["limit_price"],
                                 note="pyramid stalled below full size for 4 weeks and no new base "
-                                     "— no permanent sub-scale positions", **common)
+                                     "— no permanent sub-scale positions"
+                                     + (f" · {o['note']}" if o["note"] else ""), **common)
 
 
 def arm_pyramid(conn, arm, bars, ceiling):
@@ -670,10 +711,14 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                     swap = sg.displaceable(score, momentum_incumbents,
                                            margin=caps["displace_margin"])
                     if swap:
+                        o = exit_order(bars, swap["ticker"], inside=caps["exit_inside"],
+                                       urgent=False)
                         arm.add("exit", swap["ticker"], "swap", sleeve="momentum",
-                                order_type="market", score=swap["score"],
+                                order_type=o["order_type"], limit_price=o["limit_price"],
+                                score=swap["score"],
                                 note=f"displaced by {tk} — {score:.1f} vs {swap['score']:.1f}, "
-                                     f"+{swap['margin']:.1f} clears the §3.3 margin")
+                                     f"+{swap['margin']:.1f} clears the §3.3 margin"
+                                     + (f" · {o['note']}" if o["note"] else ""))
                     else:
                         full = (f"§2.1 — {positions} positions open"
                                 if positions >= caps["max_positions"]
@@ -841,10 +886,13 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                 swap = sg.displaceable(ccn_score, compounder_incumbents,
                                        margin=caps["displace_margin"])
                 if swap:
+                    o = exit_order(bars, swap["ticker"], inside=caps["exit_inside"], urgent=False)
                     arm.add("exit", swap["ticker"], "swap", sleeve="compounders",
-                            order_type="market", score=swap["score"],
+                            order_type=o["order_type"], limit_price=o["limit_price"],
+                            score=swap["score"],
                             note=f"displaced by {tk} — CCN {ccn_score:.1f} vs "
-                                 f"{swap['score']:.1f}, +{swap['margin']:.1f} clears §3.3")
+                                 f"{swap['score']:.1f}, +{swap['margin']:.1f} clears §3.3"
+                                 + (f" · {o['note']}" if o["note"] else ""))
                 else:
                     full = (f"§2.1 — {positions} positions open"
                             if positions >= caps["max_positions"]
@@ -1322,6 +1370,9 @@ def run(conn, hb, *, held=frozenset(), apply_ledger_first=True):
             # §3.3 / WO-4: a name whose newest KNOWN report date is older than a quarter has
             # plausibly missed one, so the blackout wall cannot vouch for it (obs 114).
             calendar_stale_days=int(config(cur, "earnings_calendar_stale_days", 110)),
+            # §4.5 (ruled 2026-08-06): a non-urgent exit ships as a marketable limit this far
+            # inside the last print. Gap drills stay market-at-open (§4.6).
+            exit_inside=float(config(cur, "exit_limit_inside", 0.003)),
         )
         cur.execute("select state from gate_state order by id desc limit 1")
         gate = (cur.fetchone() or ["OFF"])[0]
@@ -1383,7 +1434,8 @@ def run(conn, hb, *, held=frozenset(), apply_ledger_first=True):
         arm.add("stop_move", m["ticker"], "trail", urgency="protective",
                 stop=m["stop"], stop_limit_price=m["limit"],
                 note=f"{m['mode']}{euphoria}{was}")
-    arm_exits(conn, arm, bars, gate, breakouts, caps["cushion"], (), held=held)
+    arm_exits(conn, arm, bars, gate, breakouts, caps["cushion"], (), held=held,
+              exit_inside=caps["exit_inside"])
     arm_pyramid(conn, arm, bars, caps["ceiling"])
     arm_entries(conn, arm, bars, nav, fx, gate, caps, ())
     arm_housekeeping(conn, arm, ())

@@ -592,6 +592,19 @@ def session_date_for(cur):
     return next_session(dd) if dd is not None else dt.date.today()
 
 
+def scheduled_run():
+    """True only when GitHub's clock started this run.
+
+    Every work-guard in the system exists for one reason: to stop a *scheduled* firing from
+    redoing work that is already done. None of them exists to argue with a person. So a hand
+    dispatch is never guarded — pressing "Run workflow" means run it, and having to remember a
+    `force` checkbox first is the guard thwarting the human it was built to serve.
+
+    Local runs and tests report no event at all, and they are hand runs too.
+    """
+    return os.environ.get("GITHUB_EVENT_NAME") == "schedule"
+
+
 def chain_already_current(conn, hb, job, *, must_match=()):
     """§4.2 / WO-6 — a chained job verifies and exits when its own last word still stands.
 

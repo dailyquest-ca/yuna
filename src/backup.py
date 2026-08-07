@@ -5,7 +5,7 @@ Bars are a vendor-re-pullable cache; the decisions are not. The commit doubles a
 """
 import os, sys, gzip, json, datetime as dt
 import psycopg
-from db import connect, Heartbeat
+from db import connect, scheduled_run, Heartbeat
 
 SKIP = {"prices"}
 OUT = "backups"
@@ -43,7 +43,8 @@ def main():
             # exit green, saying which run did it. A missed Saturday is picked up the following
             # week instead of skipping the month in silence.
             with conn.cursor() as cur:
-                done = None if FORCE else month_backed_up(cur)
+                # a hand dispatch is never guarded — see db.scheduled_run()
+                done = month_backed_up(cur) if scheduled_run() and not FORCE else None
             if done:
                 hb.detail.update(stage="guard", backed_up=False, month_backed_up_at=str(done))
                 print(f"backup: green — this month was backed up {done}; nothing to do")

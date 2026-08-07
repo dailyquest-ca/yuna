@@ -769,3 +769,46 @@ def test_short_history_multiple_can_never_exceed_the_hard_ceiling():
         assert fair <= 30.0
         h = s.hurdle_price(fcf_ttm=100.0, shares=10.0, growth=0.25, fair_multiple=fair)
         assert h is not None and h <= fair * 10.0 + 1e-9
+
+
+# ---------------------------------------------------------------- §4.5 · how a sell ships
+
+def test_a_non_urgent_exit_ships_as_a_marketable_limit():
+    """Ruled 2026-08-06 and asked about again on the 7th: "sometimes it seems like it always just
+    says market sell." It did — six of the machine's eight exits were market orders.
+
+    A marketable limit fills like a market order in any normal tape and refuses one bad print on a
+    thin open, so the only question per exit is what one more minute costs. A trend template that
+    failed last Friday is not getting worse in ninety seconds.
+    """
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+    import arming
+
+    bars = {"AAA.US": [{"close": 100.0}]}
+    calm = arming.exit_order(bars, "AAA.US", inside=0.003, urgent=False)
+    assert calm["order_type"] == "limit"
+    assert calm["limit_price"] == pytest.approx(99.70)
+    assert "recompute at placement" in calm["note"]
+
+
+def test_an_urgent_exit_is_still_a_market_order():
+    """Urgency is the only thing that buys a market order: a gap through the stop-limit (§4.6 says
+    market-at-open in so many words), the gate shutting (§3.3's crash protocol), and the
+    unconfirmed-breakout hair-trigger."""
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+    import arming
+
+    urgent = arming.exit_order({"AAA.US": [{"close": 100.0}]}, "AAA.US", inside=0.003, urgent=True)
+    assert urgent["order_type"] == "market" and urgent["limit_price"] is None
+
+
+def test_an_exit_with_no_last_print_falls_back_to_market_and_says_so():
+    """§3.3: never assume a missing value. A limit needs a price to be inside of."""
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+    import arming
+
+    blind = arming.exit_order({}, "AAA.US", inside=0.003, urgent=False)
+    assert blind["order_type"] == "market" and "no last print" in blind["note"]
