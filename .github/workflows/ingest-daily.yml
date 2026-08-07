@@ -3,6 +3,15 @@ name: ingest-daily
 # the quarantine — source-of-truth tables only. Everything derived from these rows belongs to
 # `score`, which runs next.
 #
+# FX is the whole of §4.1's row, not just USDCAD: every statement currency a foreign filer reports
+# in gets a pair registered here and backfilled by the per-ticker pass, because §3.0 converts
+# financials at fiscal-period-end rates and cannot do it with rates we never pulled.
+#
+# The earnings calendar runs twice — the broad file, and then a per-name refresh of everything the
+# arming stage is about to reach for. The broad file is not complete: Arcosa's 2026-08-05 report
+# was missing from it, so the blackout wall showed nothing and the nightly armed straight through
+# the print, twice (obs 114).
+#
 # Scheduled TWICE on purpose. §4.2: "the second run reads the runs table and exits if the night
 # is already green". That is the retry, and it is the same job with the same name rather than a
 # separate one, so `runs` reads as one job with two appointments.

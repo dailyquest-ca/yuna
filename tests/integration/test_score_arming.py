@@ -531,6 +531,13 @@ def bench_row(cur, ticker, *, ccn=80.0, hurdle=100.0, last_close=95.0, approved=
                    values (%s,1,'large',%s,true,%s,%s,%s,%s,%s)""",
                 (ticker, ccn, hurdle, last_close, (last_close - hurdle) / hurdle, approved,
                  confidence))
+    # Approval is derived from the ledger now (migration 036) — "the desk's most recent verdict on
+    # this name is a blind PASS" — so a test that wants an armable name logs the ruling that makes
+    # it one. Setting the flag alone would be corrected by the job on the way past, which is the
+    # entire point of the change.
+    if approved:
+        cur.execute("""insert into rulings (ticker, kind, verdict, blind)
+                       values (%s, 'c2', 'PASS', true)""", (ticker,))
 
 
 def test_an_unapproved_bench_name_at_its_hurdle_arms_nothing(db, fx):

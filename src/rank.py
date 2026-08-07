@@ -20,9 +20,15 @@ SCOREABLE_BARS = 210        # 200-day average + the t-10 offset needs this much 
 
 
 def load_bars(cur):
+    # §3.0: "membership lists never drop a name the book owns", so the book is read directly rather
+    # than through `universe.is_holding` — a flag is a copy, and a copy can be wrong. NUE and RS
+    # were filled on 2026-08-04 and `is_holding` had never heard of either (obs 116).
     cur.execute("""select p.ticker, p.d, p.high, p.low, p.close, p.adj_close, p.volume
                    from prices p join universe u on u.ticker = p.ticker
-                   where u.kind='stock' and u.status='active' and (u.in_l0 or u.is_holding)
+                   where u.kind='stock' and u.status='active'
+                     and (u.in_l0 or u.is_holding
+                          or exists (select 1 from book b where b.ticker = p.ticker
+                                       and b.status='open' and b.qty > 0))
                    order by p.ticker, p.d""")
     data = {}
     for t, d, hi, lo, cl, ac, vol in cur.fetchall():
@@ -138,8 +144,18 @@ def run(conn, hb):
                          gate["sma_lookback"], gate["flipped"]))
             conn.commit()
 
-        cur.execute("""select ticker, industry, is_holding, in_l0 from universe
-                       where kind='stock' and status='active'""")
+        # `hold` is derived from the BOOK, at run time. §3.0 makes holdings permanent queue
+        # residents and §4.3 makes the book the record of what we own; `universe.is_holding` is a
+        # denormalized copy of that fact and it had drifted in both directions at once — VRT closed
+        # on 2026-08-05 still printed a HOLD seat, and NUE and RS, the two live momentum
+        # positions, had no seat at all (obs 116). A closed position now leaves the queue the
+        # night it closes, because the queue asks the book instead of asking a flag.
+        cur.execute("""select u.ticker, u.industry,
+                              exists (select 1 from book b where b.ticker = u.ticker
+                                        and b.status='open' and b.qty > 0) as holds,
+                              u.in_l0
+                         from universe u
+                        where u.kind='stock' and u.status='active'""")
         meta = {r[0]: dict(industry=r[1], hold=r[2], l0=r[3]) for r in cur.fetchall()}
         cur.execute("select ticker, m4_pass from v_fundamentals_latest")
         m4 = {r[0]: r[1] for r in cur.fetchall()}
@@ -209,6 +225,10 @@ def run(conn, hb):
                        where hurdle_price is not null and last_close is not null
                          and last_close <= hurdle_price * %s""", (1 + hurdle_near,))
         near_hurdle = cur.fetchall()
+        # the live book, at run time — not a flag, not a snapshot from the last census
+        cur.execute("""select distinct ticker from book
+                        where status='open' and qty > 0 order by ticker""")
+        live_holdings = [r[0] for r in cur.fetchall()]
 
     by_ticker = {r["t"]: r for r in rows}
     seats, seen = [], set()
@@ -223,7 +243,11 @@ def run(conn, hb):
         seats.append(dict(ticker=ticker, source=source, state=state, trig=trigger,
                           lim=limit, stop=stop, prox=prox, mcn=score, note=note))
 
-    for t in [t for t in feats if meta[t]["hold"]]:
+    # §3.0: holdings are always seated, whether or not they scored, whether or not they have enough
+    # bars, whether or not they are still in L0 — "membership lists never drop a name the book
+    # owns." Iterating `feats` instead meant a holding the ranker could not score never reached the
+    # queue at all, which is a silent version of the same defect.
+    for t in live_holdings:
         r = by_ticker.get(t, {})
         seat(t, "holding", "HOLD", score=r.get("mcn"), note="book")
 

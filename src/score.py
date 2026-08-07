@@ -16,7 +16,7 @@ threshold is config (`hurdle_fair_history_min_quarters`), so moving it is a logg
 """
 import os, sys, json, math, statistics as st, datetime as dt
 import psycopg
-from db import connect, config, dry, Heartbeat
+from db import chain_already_current, connect, config, dry, Heartbeat
 import signals as sg
 import rank
 import arming
@@ -213,10 +213,15 @@ def score_bench(conn, hb):
             # so every C1 rejection reached the bench mute: AVGO's fundamentals row read
             # "net issuance 4.7%/yr" while its bench row read nothing at all. §3.1 requires
             # the gap to be named on the C2 memo, and a memo cannot name what was discarded.
+            # §3.0's one-currency test, now that the conversion exists: a name is only unpriceable
+            # when we do not know what currency it reports in, or hold no fiscal-period-end rate to
+            # restate it with. "Reports in a foreign currency" stopped being a reason on 2026-08-07
+            # — that is what the FX pass converts.
             c1_fail_reason=(None if c1 else c1why) if quote_ok is True else
                 ((c1why + " · " if c1why else "") +
-                 "reports in a foreign currency or trades as a depositary receipt — "
-                 "excluded pending the §3.0 one-currency conversion (roadmap Part 4)"),
+                 "statements and market cap are not in one currency — the statement currency is "
+                 "unknown, or no fiscal-period-end FX rate was available to convert it (§3.0 "
+                 "data-confidence path)"),
             cohort=("large" if (mcap or 0) >= boundary else "small"),
             # §3.1: "FCF yield = TTM FCF ÷ market cap at P" — and the cap at P uses the FROZEN
             # effective shares, so the yield stored beside last_close must be priced AT last_close.
@@ -333,6 +338,81 @@ def score_bench(conn, hb):
 
 
 
+def apply_rulings_to_bench(conn, hb):
+    """§3.1's rulings law, written onto the rows the arming stage reads (WO-7, obs 97).
+
+    Ruling 66 quarantined DLO's owner cash on 2026-08-06 — §3.1: *scored, ranked, watched, never
+    ticketed* — and `bench.owner_fcf_suspect` went on reading false, because nothing in the system
+    ever wrote it. The flag was legislated in migration 031 and left for a session to set by hand,
+    which §4.0 does not allow: sessions judge, jobs compute, and a judgment the jobs never read is
+    a judgment that did not happen.
+
+    Five columns on `bench` used to be kept by hand and read by the machine — `c2_status`,
+    `c2_memo`, `c2_confidence`, `approved`, `owner_fcf_suspect`. Every one is a copy of something
+    already in `rulings`, and every one is destroyed the moment this job rebuilds that row, which
+    it does whenever a name fails C1 for a quarter. A hand-kept copy of a ledger is a countdown.
+
+    So all five are derived here, every run, in two plain sentences:
+
+      * **A name is approved when the desk's most recent C2 verdict on it is a blind PASS.**
+      * **A name is quarantined while a live quarantine ruling stands on it.**
+
+    The two are deliberately separate questions, because the desk's own DLO ruling says they are:
+    "QUARANTINE — owner-cash (§3.1) … **PASS/FAIL deferred to R5**". A card issuer can be a
+    wonderful business and still report other people's money as free cash flow, which is why AXP,
+    HQY, PCTY and SCHW sit quarantined today with a live PASS beside them. Reading both facts out
+    of one verdict slot would have quietly un-quarantined all four.
+
+    `blind` is load-bearing on the approval side. §3.1's whole rulings law is that the business
+    verdict is recorded before price, gap or CCN is revealed — a verdict the number got to argue
+    with does not open the gate.
+    """
+    if dry():
+        return {}
+    with conn.cursor() as cur:
+        # §3.1: approved ⇔ the latest live c2 verdict is a blind PASS. Both directions, every run —
+        # a withdrawal is as automatic as a grant, and the 12-month cooldown on a FAIL is simply
+        # the absence of a newer PASS.
+        cur.execute("""update bench b
+                          set approved = coalesce(r.verdict_canon = 'pass' and r.blind, false),
+                              approved_at = case
+                                when coalesce(r.verdict_canon = 'pass' and r.blind, false)
+                                then coalesce(b.approved_at, now()) else null end,
+                              c2_status = coalesce(r.verdict_canon, 'pending'),
+                              c2_confidence = r.confidence,
+                              c2_memo = coalesce(r.memo, b.c2_memo)
+                         from (select b2.ticker, r2.verdict_canon, r2.blind, r2.confidence, r2.memo
+                                 from bench b2
+                                 left join v_rulings_latest_c2 r2
+                                        on r2.ticker = b2.ticker and r2.decides) r
+                        where r.ticker = b.ticker
+                          and (b.approved is distinct from
+                               coalesce(r.verdict_canon = 'pass' and r.blind, false)
+                            or b.c2_status is distinct from coalesce(r.verdict_canon, 'pending'))
+                    returning b.ticker, b.approved""")
+        approval = [dict(ticker=t, approved=a) for t, a in cur.fetchall()]
+        # §3.1 owner-cash quarantine, from its own ledger (migration 036). Lifting one is a logged
+        # reversal — §3.1's only route for overturning a verdict — so there is no second vocabulary.
+        cur.execute("""update bench b
+                          set owner_fcf_suspect = exists (select 1 from v_quarantine_live q
+                                                           where q.ticker = b.ticker)
+                        where b.owner_fcf_suspect is distinct from
+                              exists (select 1 from v_quarantine_live q where q.ticker = b.ticker)
+                    returning b.ticker, b.owner_fcf_suspect""")
+        quarantine = [dict(ticker=t, quarantined=q) for t, q in cur.fetchall()]
+    conn.commit()
+    granted = sorted(a["ticker"] for a in approval if a["approved"])
+    withdrawn = sorted(a["ticker"] for a in approval if not a["approved"])
+    marked = sorted(q["ticker"] for q in quarantine if q["quarantined"])
+    lifted = sorted(q["ticker"] for q in quarantine if not q["quarantined"])
+    hb.detail["rulings_applied"] = dict(approved=granted, approval_withdrawn=withdrawn,
+                                        quarantined=marked, quarantine_lifted=lifted)
+    if approval or quarantine:
+        print(f"score/rulings: approved {len(granted)}, withdrew {len(withdrawn)}, "
+              f"quarantined {len(marked)}, lifted {len(lifted)}")
+    return dict(approved=granted, withdrawn=withdrawn, quarantined=marked, lifted=lifted)
+
+
 def main():
     """§4.2: the one writer of every derived number.
 
@@ -344,7 +424,17 @@ def main():
     """
     with connect() as conn:
         with Heartbeat(conn, "score", scheduled_utc=SCHEDULED_UTC) as hb:
+            # §4.2 / WO-6: the 03:00 retry exits when the night is already green, and the chain
+            # behind it should verify and exit for the same reason rather than recompute a world
+            # that has not moved. `check` and `notify` still run — they are the verification, and
+            # they write nothing but their own rows.
+            if chain_already_current(conn, hb, "score"):
+                return 0
+            # Fills and splits first: everything below derives from the book, and a book that has
+            # not digested last night's fills describes a portfolio we do not own (obs 116).
+            arming.apply_ledger(conn, hb)
             score_bench(conn, hb)
+            apply_rulings_to_bench(conn, hb)
             rank.run(conn, hb)
             # §4.1: prints `ingest` could not confirm tonight must not drive a sell.
             with conn.cursor() as cur:
@@ -352,7 +442,7 @@ def main():
                                where (status='held' and reason='move')
                                   or (status='cleared' and resolved_at::date = current_date)""")
                 held = {r[0] for r in cur.fetchall()}
-            arming.run(conn, hb, held=held)
+            arming.run(conn, hb, held=held, apply_ledger_first=False)
     return 0
 
 

@@ -100,3 +100,29 @@ is `roadmap-2026-07-31.md`.
 24. **Verify magnitudes, not just status.** A green census with 688 names was wrong three times
     before it was right at 2,783. Broker screenshot beats stored records; reconcile against
     reality, then migrate the correction (`003_seed_fix.sql` is the precedent).
+27. **A human writes prose; a job reads tokens. Canonicalise once, in the database.** Yuna logs
+    verdicts the way a person does — `PASS`, `ESCALATE`,
+    `QUARANTINE — owner-cash (§3.1), not entry-eligible; PASS/FAIL deferred to R5` — and every
+    reader asked `verdict in ('pass','fail')`. Sixty-eight rulings were invisible on 2026-08-07:
+    the payload called 44 already-ruled names unruled, the nightly armed a name ruling 66 had
+    quarantined, and every growth-derived candidate sat behind a §3.3 sign-off the ledger had
+    already granted. The verdict should stay prose — the memo is the point — so the parsing lives
+    in `yuna_verdict()` and `v_rulings_latest`, once, where every reader must pass through it.
+    **Corollary:** when a job starts reading a table a session writes, the interface between them
+    is now load-bearing and needs a test that writes the way the session actually writes.
+28. **A gate nothing can open is worse than no gate.** §3.3 capped incompletely-scored names and
+    "required manual sign-off", and no path in the system could ever grant one — so 13 of 19 armed
+    rows were parked behind it indefinitely, which reads to the desk as the machine being broken
+    rather than as the machine being careful. Every blocking condition needs a named key and
+    someone who holds it; if the key is a judgment, the judgment needs a row a job can read.
+29. **The clean-slate list must cover ledgers the jobs *read*, not just the ones they write.** The
+    harness derives its truncate list from the guard triggers, which by construction only cover
+    job-written tables. `rulings` is session-written and therefore unguarded — so a ruling from one
+    test governed every later test *and every later pytest run*, since the database outlives the
+    process. Found on a sign-off no test in that file had logged. Ledgers leak in the direction
+    nobody is watching.
+30. **A denormalized membership flag will drift, in both directions at once.** `universe.is_holding`
+    still said VRT (closed 2026-08-05) and had never heard of NUE or RS (filled 2026-08-04),
+    because nothing maintained it — so the queue seated a position we had sold and dropped two we
+    owned. §3.0 says membership lists never drop a name the book owns; the way to keep that true is
+    to ask the book at run time and re-derive the flag from it, never to remember separately.

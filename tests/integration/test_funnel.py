@@ -105,6 +105,7 @@ def test_the_month_guard_is_keyed_to_the_work_and_not_to_the_date(db, monkeypatc
     """
     stub_vendor(monkeypatch, listed=["ALIVE"], priced=["ALIVE"])
     monkeypatch.setattr(funnel, "FORCE", False)          # the guard is what is under test
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")  # …and a guard only guards the clock
     assert funnel.main() == 0                            # month unbuilt -> rebuild
     assert funnel.main() == 0                            # same month -> exit clean
 
@@ -116,6 +117,27 @@ def test_the_month_guard_is_keyed_to_the_work_and_not_to_the_date(db, monkeypatc
     assert rows[0][0] == "green" and rows[0][1]["rebuilt"] is True and rows[0][2] > 0
     assert rows[1][0] == "green" and rows[1][1]["rebuilt"] is False
     assert rows[1][1]["month_built_at"], "the skip says which run did the month's work"
+
+
+def test_a_hand_dispatch_is_never_thwarted_by_the_guard(db, monkeypatch):
+    """Ruled by Zak, 2026-08-07: "I want to be able to manually run everything, and allow it to
+    work OK. I don't want a manual run to be thwarted by the day."
+
+    Every work-guard in the system exists to stop a duplicate SCHEDULED firing. None of them exists
+    to argue with a person, and a `force` checkbox you have to remember is the guard defeating the
+    human it was built for. So the guard reads the clock only when the clock started the run.
+    """
+    stub_vendor(monkeypatch, listed=["ALIVE"], priced=["ALIVE"])
+    monkeypatch.setattr(funnel, "FORCE", False)          # no checkbox ticked, deliberately
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
+    assert funnel.main() == 0                            # the month's work is now done
+
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    assert funnel.main() == 0                            # a person pressed the button
+    with db.cursor() as cur:
+        cur.execute("""select detail->>'rebuilt' from runs where job='ingest-universe'
+                       order by id desc limit 1""")
+        assert cur.fetchone()[0] == "true", "a hand run does the work, checkbox or not"
 
 
 def test_a_missed_firing_is_picked_up_the_following_week(db, monkeypatch):

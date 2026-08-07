@@ -28,7 +28,7 @@ import os
 import sys
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-from db import connect, dry, jsonb, Heartbeat
+from db import connect, data_date, dry, jsonb, session_date_for, Heartbeat
 
 
 # --------------------------------------------------------------------------- mechanical layer
@@ -87,6 +87,62 @@ def _table(rows, cols, headers):
     return "\n".join(out)
 
 
+def money(x):
+    return f"C${float(x):,.0f}" if x is not None else "—"
+
+
+def levered_line(pay):
+    """§2.5's levered status line — required on the brief whether or not the cycle is armed.
+
+    "Until set, the brief carries a levered status line (utilization per facility, headroom,
+    holdings) and proposes nothing." Headroom is to the plan's utilization cap, never to the credit
+    limit: printing the limit would offer room on a callable facility that may not draw it.
+    """
+    lev = pay.get("levered") or {}
+    if not lev:
+        return "**Levered pool (§2.5):** _not computed — the nightly job has not run_"
+    bits = []
+    # the facility carrying money leads; an unopened line is named and not dressed up with a 0%
+    # utilization and C$0 of headroom, which reads like a facility standing ready
+    for f in sorted(lev.get("facilities") or [],
+                    key=lambda f: (not (f.get("limit") or 0) > 0, -(f.get("drawn") or 0), f["code"])):
+        if not (f.get("limit") or 0) > 0:
+            bits.append(f"{f['code']} not opened")
+            continue
+        util = f"{f['utilization']:.0%}" if f.get("utilization") is not None else "—"
+        cap = (f" of a {f['max_utilization']:.0%} cap"
+               if f.get("max_utilization") is not None else " (full line, §2.5)")
+        flag = " ⚠️ OVER CAP" if f.get("over_cap") else ""
+        bits.append(f"{f['code']} drawn {money(f.get('drawn'))} — {util}{cap} · "
+                    f"headroom {money(f.get('headroom'))}{flag}")
+    held = []
+    for h in lev.get("holdings") or []:
+        rel = h.get("relative")
+        vs = f" · {rel['lead_pp']:+.1f}pp vs index/{rel['window']}d" if rel else ""
+        held.append(f"{h['ticker']} {money(h.get('value_cad'))}"
+                    f"{' (resting ETF)' if h.get('is_etf') else ''}{vs}")
+    etf = (lev.get("etf") or {}).get("ticker")
+    lines = ["**Levered pool (§2.5):** " + (" · ".join(bits) if bits else "_no facilities on file_"),
+             "Holdings: " + (" · ".join(held) if held else "_none — the pool is undrawn_")
+             + (f" · resting state {etf}" if etf else " · resting ETF not configured")]
+    if lev.get("disqualified"):
+        # not a proposal — a fact. §2.5's score-break revert applies regardless of relative
+        # position, so the desk hears about it even while the cycle is locked.
+        lines.append("No longer qualifying: "
+                     + " · ".join(f"{d['ticker']} — {d['why']}" for d in lev["disqualified"]))
+    if lev.get("qualified"):
+        lines.append("Qualified for the pool (§2.5 bar): " + " · ".join(
+            f"{q['ticker']} CCN {q['ccn']:.0f}"
+            + (f" {q['relative']['lead_pp']:+.1f}pp" if q.get("relative") else "")
+            for q in lev["qualified"][:6]))
+    if lev.get("proposals"):
+        lines.append("**Cycle proposals (Zak places both legs):** " + " · ".join(
+            f"{p['kind']} {p['ticker']} — {p['detail']}" for p in lev["proposals"]))
+    elif lev.get("note"):
+        lines.append(f"_{lev['note']}_")
+    return "\n".join(lines)
+
+
 def brief_skeleton(pay, freshness_line):
     """§5.1 step 9's snapshot, rendered mechanically. The session (or the voice layer) frames
     this; nothing may alter it. Gaps are named, never papered over (§5.6 no-improvise)."""
@@ -102,6 +158,7 @@ def brief_skeleton(pay, freshness_line):
         f"{', provisional' if nav.get('provisional') else ''})" if nav.get("nav_cad")
         else "**NAV:** not stored — say so, don't guess",
         f"**Gate:** {gate.get('state', 'unknown')} (week ending {gate.get('week_end')})",
+        levered_line(pay),
         "**Blackout wall (holdings included, in full):**\n"
         + _table(pay.get("blackout_wall") or [], ["ticker", "report_date", "report_when"],
                  ["name", "reports", "when"]),
@@ -114,10 +171,29 @@ def brief_skeleton(pay, freshness_line):
         "**Armed but held back (context, never tickets):**\n"
         + _table(held, ["kind", "ticker", "score", "blocked_by"],
                  ["kind", "name", "score", "blocked by"]),
+        # §3.1's docket, and only the docket. Until migration 034 this listed every name at the
+        # line whether or not the desk had already ruled it — 44 of them on 2026-08-07, nearly all
+        # carrying blind C2 rulings from the day before (obs 113). The ruled ones now sit in their
+        # own section, with the verdict and the ruling id, so R1 cites instead of re-deciding.
         "**Unruled at the line (§3.1 — rule blind before any GTC ships):**\n"
         + _table(pay.get("unruled_at_the_line") or [],
-                 ["ticker", "ccn", "hurdle_price", "last_close"],
-                 ["name", "CCN", "hurdle", "close"]),
+                 ["ticker", "ccn", "hurdle_price", "last_close", "engine_provenance"],
+                 ["name", "CCN", "hurdle", "close", "engine"]),
+        "**Ruled at the line (cite the ruling — §3.1 binds later sessions):**\n"
+        + _table(pay.get("ruled_at_the_line") or [],
+                 ["ticker", "ccn", "verdict", "ruling_id", "ruled_at", "blind"],
+                 ["name", "CCN", "verdict", "ruling", "ruled", "blind"]),
+        # §3.1: a quarantined name is "scored, ranked, **watched**, never ticketed". It no longer
+        # reaches the arming stage at all, so watched has to mean listed — otherwise the desk's
+        # only clue that MELI is cheap and untouchable would be its absence.
+        "**Owner-cash quarantine (§3.1 — watched, never ticketed):**\n"
+        + _table(pay.get("quarantined_watchlist") or [],
+                 ["ticker", "ccn", "hurdle_price", "last_close", "ruling_id"],
+                 ["name", "CCN", "hurdle", "close", "ruling"]),
+        "**Escalated — awaiting Zak (§5.6, not a ruling Yuna may make):**\n"
+        + _table(pay.get("escalated_awaiting_zak") or [],
+                 ["ticker", "ccn", "verdict", "ruling_id", "escalated_at"],
+                 ["name", "CCN", "verdict", "ruling", "escalated"]),
         "**Queue:**\n" + _table((pay.get("queue") or [])[:12],
                                 ["rank", "ticker", "state", "trigger_price", "mcn", "away_pct"],
                                 ["#", "name", "state", "trigger", "MCN", "away %"]),
@@ -244,12 +320,19 @@ def main():
                 if reason:
                     hb.amber(f"stale dispatch — {reason}; stale banner and protective lines only")
                 today = dt.date.today()
-                meta = dict(slot=slot, stale=bool(reason))
+                # §4.2's clock convention: the chain has no clock, so neither does its output. Both
+                # nightly products describe the SAME upcoming session — the stop sheet says what to
+                # place before it opens, the brief says what to do in it — so both carry its date.
+                # `now()::date` in UTC is an evening in New York, and stamped the brief a session
+                # ahead of the market it was written for (WO-6).
+                session = session_date_for(cur)
+                hb.detail.update(session_date=str(session), data_date=str(data_date(cur)),
+                                 slot=slot)
+                meta = dict(slot=slot, stale=bool(reason), session_date=str(session))
                 if slot == "nightly":
-                    publish(cur, hb, "stopsheet", today, freshness_line,
+                    publish(cur, hb, "stopsheet", session, freshness_line,
                             stopsheet_body(pay, reason), meta=meta)
                     # the morning brief is composed tonight and waits for the chat's single read
-                    session = today + dt.timedelta(days=1)
                     if reason:
                         brief = (f"⚠️ {freshness_line}\n\nstale data ⇒ no new tickets (§5.6). "
                                  f"Protective instructions only:\n\n"

@@ -16,7 +16,7 @@ FORCE=true rebuilds regardless (manual runs)."""
 import os, sys, json, time, urllib.request, urllib.error
 import psycopg
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent))
-from db import db_url, key, Heartbeat
+from db import db_url, key, Heartbeat, scheduled_run
 
 DRY = os.environ.get("DRY_RUN","false").lower() in ("1","true","yes")
 FORCE = os.environ.get("FORCE","false").lower() in ("1","true","yes")
@@ -57,7 +57,9 @@ def main():
         with Heartbeat(conn, "ingest-universe", dry_run=DRY) as hb:
             hb.calls = calls
             with conn.cursor() as cur:
-                built = None if FORCE else month_built_at(cur)
+                # a hand dispatch is never guarded (§4.2: the guard is against a
+                # duplicate SCHEDULED firing, never against a person)
+                built = month_built_at(cur) if scheduled_run() and not FORCE else None
             if built:
                 # exits clean, and says which run did the work — a silent skip is what hid this
                 # job's absence for a month

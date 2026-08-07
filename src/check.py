@@ -185,6 +185,69 @@ def check_one_row_per_name(cur):
     return doubled + orphans
 
 
+def check_rulings_are_honoured(cur):
+    """§3.1's rulings law, asserted against what the machine actually armed (WO-7, obs 97).
+
+    Ruling 66 quarantined DLO's owner cash and the nightly armed it as an entry the same night, and
+    nothing in the system noticed — the acceptance query that would have caught it existed only in
+    a work order. It runs every night now: a name whose newest live c2 ruling is a quarantine is
+    *scored, ranked, watched, never ticketed*, and a name ruled FAIL is inside its cooldown.
+    """
+    cur.execute("""select a.ticker, r.verdict_canon, r.ruling_id, a.kind
+                     from v_armed_latest a
+                     join v_rulings_latest_c2 r on r.ticker = a.ticker and r.decides
+                    where a.kind in ('entry', 'add')
+                      and r.verdict_canon in ('quarantine', 'fail')
+                      and a.blocked_by is null""")
+    return [dict(ticker=t, verdict=v, ruling_id=i, kind=k) for t, v, i, k in cur.fetchall()]
+
+
+def check_blackout_wall_has_its_dates(cur, stale_days):
+    """§3.3 / WO-4: the wall cannot enforce a date it never had (obs 114).
+
+    Every offerable entry must sit behind a report date inside a plausible quarter. This is the
+    work order's own acceptance SQL, standing — because ACA's case was invisible until R1 caught it
+    by hand and voided the ticket.
+    """
+    cur.execute("""select a.ticker from v_armed_latest a
+                    where a.kind = 'entry' and a.blocked_by is null
+                      and not exists (select 1 from earnings e where e.ticker = a.ticker
+                                        and e.report_date > current_date - %s)""", (stale_days,))
+    return [r[0] for r in cur.fetchall()]
+
+
+def check_queue_matches_the_book(cur):
+    """§3.0: membership lists never drop a name the book owns, and never keep one it has sold."""
+    cur.execute("""select 'missing_holding' as why, b.ticker from book b
+                    where b.status='open' and b.qty > 0
+                      and not exists (select 1 from queue q where q.ticker = b.ticker)
+                   union all
+                   select 'ghost_row', q.ticker from queue q
+                    where q.note = 'book'
+                      and not exists (select 1 from book b where b.ticker = q.ticker
+                                        and b.status='open' and b.qty > 0)""")
+    return [dict(why=w, ticker=t) for w, t in cur.fetchall()]
+
+
+def check_one_currency(cur):
+    """§3.0 / WO-2: no non-USD figure feeds a score.
+
+    A name the funnel reads must have its statements and its market cap in one currency — converted
+    at fiscal-period-end FX, or excluded. TSM stored TWD statements against a USD cap and scored an
+    implied P/FCF of 1.76x, which is not a multiple, it is a category error.
+    """
+    cur.execute("""select b.ticker, f.statement_currency, f.converted_to_usd
+                     from bench b join v_fundamentals_latest f on f.ticker = b.ticker
+                    where b.hurdle_price is not null
+                      and (f.quote_ok is not true
+                           or (upper(coalesce(f.statement_currency,'')) <> 'USD'
+                               and not f.converted_to_usd
+                               and upper(coalesce(f.statement_currency,''))
+                                   <> upper(coalesce((select currency from universe u
+                                                       where u.ticker = b.ticker), 'USD'))))""")
+    return [dict(ticker=t, statement_currency=c, converted=bool(k)) for t, c, k in cur.fetchall()]
+
+
 def preflight(cur, quota):
     """Everything a session must know before it speaks (§4.2, 2026-08-02).
 
@@ -278,6 +341,11 @@ def main():
                 buyable_max = float(config(cur, "verify_buyable_share_max", 0.60))
                 gauges = calibration_gauges(cur, knife_max, buyable_max)
                 doubled = check_one_row_per_name(cur)
+                calendar_stale = int(config(cur, "earnings_calendar_stale_days", 110))
+                ruled = check_rulings_are_honoured(cur)
+                blind = check_blackout_wall_has_its_dates(cur, calendar_stale)
+                queue_gaps = check_queue_matches_the_book(cur)
+                mixed_ccy = check_one_currency(cur)
 
                 # §4.1: "the brief alarms past ~70% of daily quota". The reading lives here rather
                 # than in `score`, which §4.2 keeps a pure function of the database.
@@ -339,12 +407,36 @@ def main():
                                 "row — any join written against the history table instead of "
                                 "v_fundamentals_latest counts it that many times (§4.3)",
                          names=[b["ticker"] for b in doubled][:20]),
+                    # The four work-order acceptances from 2026-08-07, standing rather than
+                    # one-off. Each of them describes something the machine did while every
+                    # existing check read green, which is learnings #19 in its purest form.
+                    dict(check="rulings_bind_the_arming_stage", failures=len(ruled),
+                         detail="an offerable entry or add on a name whose newest live c2 ruling "
+                                "is a QUARANTINE or a FAIL — §3.1: scored, ranked, watched, never "
+                                "ticketed",
+                         names=[f"{b['ticker']}({b['verdict']})" for b in ruled][:20]),
+                    dict(check="blackout_wall_has_its_dates", failures=len(blind),
+                         detail=f"an offerable entry with no report date inside {calendar_stale} "
+                                f"days — the wall cannot enforce a date it never had (§3.3, obs "
+                                f"114)", names=blind[:20]),
+                    dict(check="queue_matches_the_book", failures=len(queue_gaps),
+                         detail="a live holding missing from the queue, or a queue seat for a "
+                                "position the book has closed — §3.0: membership lists never drop "
+                                "a name the book owns",
+                         names=[f"{g['why']}:{g['ticker']}" for g in queue_gaps][:20]),
+                    dict(check="scores_read_one_currency", failures=len(mixed_ccy),
+                         detail="a bench name carrying a hurdle whose statements and market cap "
+                                "are not in one currency — §3.0 converts at fiscal-period-end FX "
+                                "or routes to the data-confidence path, never scores raw",
+                         names=[b["ticker"] for b in mixed_ccy][:20]),
                 ]
                 failed = [c for c in checks if c["failures"]]
                 findings = dict(hurdle_mismatches=hurdles, gap_mismatches=gaps,
                                 ccn_mismatches=ccns, provenance_gaps=prov, share_drift=drift,
                                 top_of_bench=top, doubled_rows=doubled,
                                 engineless_in_top=engineless, gauges=gauges,
+                                ruled_but_armed=ruled, calendar_blind=blind,
+                                queue_book_gaps=queue_gaps, mixed_currency=mixed_ccy,
                                 preflight=flight, freshness=line,
                                 tickets_allowed=tickets_allowed,
                                 checks=checks, causes=[c["check"] for c in failed])

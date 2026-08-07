@@ -25,6 +25,12 @@ is the scar tissue: facts this build paid for, worth reading before touching any
 - **Yuna never executes.** She reads, computes, and writes briefs. Zak places every order.
 - Every job is idempotent, carries `DRY_RUN`, and writes a heartbeat row. A missing message *is* the alarm.
 - Computation never calls the API — every score reads the database.
+- **Verdicts are prose; jobs read them through `yuna_verdict()`.** Yuna writes `PASS`, `ESCALATE`,
+  `QUARANTINE — owner-cash (§3.1) …` because the memo is the point. Every job resolves them through
+  `v_rulings_latest_c2` (latest-wins, reversals excluded) and never by matching strings itself —
+  the day a reader guessed the vocabulary, sixty-eight rulings went invisible.
+- **`briefs.session_date` is the market session an output serves**, derived from the newest bar, not
+  from `now()::date` in UTC — the chain runs in the evening of the session it reports on.
 
 ## Layout
 
@@ -39,12 +45,12 @@ src/          ingest + compute jobs (Python); db.py holds the shared heartbeat c
 
 | Job | Reads | Writes |
 |---|---|---|
-| `ingest.py` | EODHD bulk + per-ticker EOD | `prices` |
+| `ingest.py` | EODHD bulk + per-ticker EOD · the earnings calendar, broad **and** by name for whatever the arming stage is about to reach for | `prices`, `corporate_actions`, `earnings`, `quarantine`, and the FX pairs on `universe` — USDCAD plus every statement currency a foreign filer reports in (§4.1) |
 | `daily.py` | earnings calendar, `prices`, `book`, `bench`, `queue` | stops/trails, `nav_snapshots`, a `preopen` brief |
 | `rank.py` | `prices`, `universe`, `v_fundamentals_latest` | `gate_state`, `candidates`, `queue` |
 | `funnel.py` | EODHD symbol list + bulk + screener | `universe` (L0 census) |
-| `fundamentals.py` | EODHD fundamentals | `fundamentals`, `universe` decorations |
-| `score.py` | `fundamentals`, `prices` | `bench` (C1 → CCN → hurdle) |
+| `fundamentals.py` | EODHD fundamentals · our own FX bars, for §3.0's fiscal-period-end restatement | `fundamentals` (converted into the market cap's currency, with the rate and its `as_of`), `universe` decorations |
+| `score.py` | `fundamentals`, `prices`, `v_rulings_latest_c2` | `bench` (C1 → CCN → hurdle), and the §3.1 rulings the bench must reflect — an owner-cash quarantine sets, only a logged RELEASE clears |
 | `compose.py` | `v_session_payload` | composed `briefs` — the stop sheet, morning-brief and Saturday-letter sections, rendered mechanically and keyless; the project's scheduled sessions apply the §5.0 voice on Zak's Claude plan (§4.2 speak, first half) |
 | `notify.py` | composed `briefs`, `config.push_channel` | nothing but its runs row — proves the words exist before the Routines deliver them |
 | `phase0.py` | `book`, `bench`, `candidates`, `queue`, `balances` | `book.sleeve` (§6 Step 2a), `tickets`, a `phase0` brief |

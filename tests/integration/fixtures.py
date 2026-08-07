@@ -19,13 +19,23 @@ def trading_days(n=SESSIONS, end=None):
     return list(reversed(days))
 
 
-def add_name(cur, ticker, *, industry="Semiconductors", in_l0=True, holding=False, cap=5e9):
+def add_name(cur, ticker, *, industry="Semiconductors", in_l0=True, holding=False, cap=5e9,
+             last_reported_days_ago=40):
+    """A listed name, with a report date behind it.
+
+    The report date is not decoration. §3.3's blackout wall can only enforce dates it has, so the
+    arming stage refuses to arm a name whose latest known report is older than a quarter (WO-4,
+    obs 114) — and a listed company that has never reported is the exception, not the default.
+    `last_reported_days_ago=None` stages exactly that exception.
+    """
     cur.execute("""insert into universe (ticker,name,kind,exchange,currency,status,in_l0,
                                          is_holding,sector,industry,market_cap_usd)
                    values (%s,%s,'stock','US','USD','active',%s,%s,'Technology',%s,%s)
                    on conflict (ticker) do update set in_l0=excluded.in_l0,
                      is_holding=excluded.is_holding, industry=excluded.industry""",
                 (ticker, ticker.split(".")[0], in_l0, holding, industry, cap))
+    if last_reported_days_ago is not None:
+        earnings_on(cur, ticker, dt.date.today() - dt.timedelta(days=last_reported_days_ago))
 
 
 def flat_then_base(cur, ticker, *, level=100.0, pivot=110.0, pivot_ago=40, volume=2_000_000,
@@ -75,6 +85,21 @@ def rising_series(cur, ticker, *, start=50.0, end=120.0, days=None, volume=2_000
 def gate(cur, state="ON"):
     cur.execute("""insert into gate_state (week_end,state,spx_close,sma30,sma30_4w_ago,flipped)
                    values (current_date,%s,7400,7100,7000,false)""", (state,))
+
+
+def index_history(cur, ticker="GSPC.INDX", level=7000.0, days=None):
+    """The index M1 actually reads. §3.2's gate needs 30 weekly closes plus a 4-week lookback, so
+    a `gate_state` row alone is a stored answer with no question behind it — `rank` recomputes the
+    latch from these bars and raises without them."""
+    days = days or trading_days()
+    cur.execute("""insert into universe (ticker,name,kind,exchange,currency,status)
+                   values (%s,%s,'index','INDX','USD','active')
+                   on conflict (ticker) do nothing""", (ticker, ticker.split(".")[0]))
+    cur.executemany("""insert into prices (ticker,d,close,adj_close,volume)
+                       values (%s,%s,%s,%s,0)
+                       on conflict (ticker,d) do update set close=excluded.close""",
+                    [(ticker, d, level * (1 + 0.0004 * i), level * (1 + 0.0004 * i))
+                     for i, d in enumerate(days)])
 
 
 def candidate(cur, ticker, *, mcn=80.0, state="BUY", pivot=110.0, stop=101.2, m2=True, m4=True,
