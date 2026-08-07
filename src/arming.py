@@ -349,15 +349,23 @@ def ratchet(conn, hb, bars, buffer_pct):
 CALENDAR_UNVERIFIED = "calendar unverified"
 
 
-def signoff_gate(*, confidence, provenance, verdict_canon, decides, signoff_current, filing_date):
+def signoff_gate(*, confidence, provenance, verdict_canon, decides, blind, signoff_current,
+                 filing_date):
     """The §3.3 sign-off, read out of the rulings ledger. Returns a blocked_by string, or None.
+
+    §3.3, as amended 2026-08-06: "the sign-off is a logged ruling … for a growth-derived name the
+    blind C2 PASS ruling itself is the sign-off; for a name scored on 2 of 3 it is an explicit
+    sign-off ruling by the session that writes or arms its ticket. The pipeline arms a flagged name
+    unblocked only when its sign-off exists in `rulings`."
 
     Three states, and the plan gives each a different key:
 
       * `full` confidence — no sign-off is owed at all.
-      * a growth-derived engine — §3.1 attaches §3.3's guardrails to the fallback, and the blind C2
-        PASS is what satisfies them (ruled 2026-08-06). A live PASS opens it; anything else, an
-        escalation included, keeps it shut.
+      * a growth-derived engine — §3.1 attaches §3.3's guardrails to the fallback, and the **blind**
+        C2 PASS is what satisfies them. `blind` is load-bearing rather than decorative: §3.1's whole
+        rulings law is that the business verdict is recorded before price, gap or CCN is revealed,
+        and a verdict the number got to argue with is not the one §3.3 accepts as a guardrail
+        waiver. Anything else — a FAIL, a quarantine, an escalation, silence — keeps it shut.
       * the data-confidence route (2-of-3, unresolved statement currency) — an explicit `signoff`
         ruling, dated on or after the filing date of the fundamentals row being scored. An older
         sign-off signed off on older numbers.
@@ -365,9 +373,10 @@ def signoff_gate(*, confidence, provenance, verdict_canon, decides, signoff_curr
     if confidence in ("full", None):
         return None
     if provenance == "growth-derived":
-        if decides and verdict_canon == "pass":
+        if decides and verdict_canon == "pass" and blind:
             return None
-        state = ("ruled " + (verdict_canon or "?")) if verdict_canon else "never ruled"
+        state = ("ruled " + (verdict_canon or "?") + ("" if blind else ", not blind")) \
+            if verdict_canon else "never ruled"
         return ("§3.3 — growth-derived engine needs its manual sign-off, and for a growth-derived "
                 "name the blind C2 PASS ruling IS that sign-off (§3.1, ruled 2026-08-06): "
                 f"{state}")
@@ -730,11 +739,18 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                                  where t.ticker = b.ticker and t.side='buy'
                                    and t.trade_date > current_date - interval '12 months'
                                    and t.trade_date > k.opened_at) as adds_12m,
-                              k.account, r.verdict_canon, r.cooldown_until, r.decides, r.ruling_id,
+                              k.account, r.verdict_canon, r.cooldown_until, r.decides,
+                              r.ruling_id, r.blind,
                               -- §3.3's sign-off for the data-confidence route: a `signoff` ruling
-                              -- logged on or after the filing whose numbers we are scoring
+                              -- logged on or after the filing whose numbers we are scoring.
+                              -- Compared as UTC dates, explicitly: `timestamptz >= date` casts the
+                              -- date at midnight in the SESSION timezone, and the store's tzdata is
+                              -- a known limitation now — it still models the pre-2026 B.C. rule.
+                              -- §4.7 makes every stamp UTC, so the comparison says UTC out loud.
                               (sg.at is not null
-                               and (f.filing_date is null or sg.at >= f.filing_date)) as signoff_now,
+                               and (f.filing_date is null
+                                    or (sg.at at time zone 'UTC')::date >= f.filing_date))
+                                as signoff_now,
                               f.filing_date, le.last_report
                        from bench b
                        left join v_rulings_latest_c2 r on r.ticker = b.ticker
@@ -756,7 +772,7 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                        order by b.ccn desc""")
         for (tk, ccn_score, hurdle, px, gap, confidence, industry, report, held, hqty, hcost,
              provenance, dps_ttm, entry_fill, owner_suspect, adds, hacct,
-             ruling, cooldown_until, decides, ruling_id, signoff_now, filing_date,
+             ruling, cooldown_until, decides, ruling_id, ruling_blind, signoff_now, filing_date,
              last_report) in cur.fetchall():
             ccn_score = float(ccn_score) if ccn_score is not None else None
             px, hurdle = float(px), float(hurdle)
@@ -845,6 +861,7 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                 # §3.3's sign-off, now a gate the ledger can actually open (WO-1, ruled 2026-08-06)
                 blocked = signoff_gate(confidence=confidence, provenance=provenance,
                                        verdict_canon=ruling, decides=decides,
+                                       blind=bool(ruling_blind),
                                        signoff_current=bool(signoff_now), filing_date=filing_date)
             # §4.3: jobs read the rulings ledger — only ruled names ship entry tickets. A live
             # FAIL blocks outright (the 12-month cooldown, §3.1); a name never ruled still arms,
@@ -905,6 +922,7 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
                                 # the ruling that opened (or held) §3.3's sign-off, cited on the row
                                 # so a session never has to go looking for it — §5.6's one read
                                 ruling_id=ruling_id, verdict=ruling, ruling_decides=decides,
+                                ruling_blind=ruling_blind,
                                 signoff_current=bool(signoff_now),
                                 fundamentals_filing_date=str(filing_date) if filing_date else None,
                                 last_known_report=str(last_report) if last_report else None,

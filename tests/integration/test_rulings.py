@@ -146,6 +146,26 @@ def test_a_growth_derived_name_with_a_blind_c2_pass_arms_unblocked(db, fx):
     assert entry[0]["detail"]["ruling_id"] is not None, "the row cites the ruling that opened it"
 
 
+def test_only_a_blind_pass_is_the_sign_off(db, fx):
+    """§3.3 (2026-08-06) says the **blind** C2 PASS ruling is the sign-off, and the adjective is
+    load-bearing. §3.1's rulings law exists so the business verdict is recorded before price, gap
+    or CCN is revealed — a verdict the number got to argue with is not the one §3.3 accepts as a
+    waiver of its own guardrails. Free today (every live PASS on the bench is blind) and a real
+    guard the first time one is not."""
+    with db.cursor() as cur:
+        world.add_name(cur, "SGT.US")
+        world.flat_then_base(cur, "SGT.US", level=95.0)
+        world.gate(cur)
+        world.balances(cur)
+        filing(cur, "SGT.US")
+        bench_row(cur, "SGT.US")
+        rule(cur, "SGT.US", "PASS", blind=False)
+    db.commit()
+    run()
+    entry = armed(db, "SGT.US", "entry")[0]
+    assert "sign-off" in entry["blocked_by"] and "not blind" in entry["blocked_by"]
+
+
 def test_a_growth_derived_name_with_no_ruling_still_waits_for_one(db, fx):
     """The gate opens on a ruling, not on nothing. §3.1's guardrails on the fallback are real —
     bottom of the band and a manual sign-off — and the sign-off is now obtainable rather than
