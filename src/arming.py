@@ -965,6 +965,185 @@ def arm_housekeeping(conn, arm, holidays):
                         note="daily invalidator read", detail=dict(invalidators=invalidators))
 
 
+# --------------------------------------------------------------------------- the levered pool (§2.5)
+#
+# Ruled 2026-08-06 and law since the 08-07 plan: **drawn levered capital is never idle — its
+# resting state is the ETF.** In one sentence: borrowed dollars buy the qualified name when it is
+# trading behind the market, and hand it back to the ETF when it has run well ahead of it.
+#
+# The lag and lead thresholds are Zak's and he has not set them, so §2.5 is explicit about what
+# happens until he does: "the brief carries a levered status line (utilization per facility,
+# headroom, holdings) and **proposes nothing**." That is the whole shape of this function — the
+# arithmetic is built and standing, and `config.levered_cycle_params` is the only thing between it
+# and a proposal. A missing key is not a missing feature; it is a ruling that has not been made.
+
+LEVERED_WINDOW = 126        # sessions — §2.2's correlation window, and §2.5's relative-value window
+
+
+def relative_return(bars, ticker, *, index="GSPC.INDX", window=LEVERED_WINDOW):
+    """(name, index, lead in percentage points) over `window` sessions, or None.
+
+    §4.1 pins the input: signal and return computations run on **adjusted** closes. A dividend or a
+    split inside the window would otherwise read as a lag the business never had — and a lag is the
+    thing this number exists to measure.
+    """
+    a, b = bars.get(ticker) or [], bars.get(index) or []
+    if len(a) < window + 1 or len(b) < window + 1:
+        return None
+
+    def leg(rows):
+        first, last = rows[-(window + 1)]["adj"], rows[-1]["adj"]
+        return (float(last) / float(first) - 1.0) if first and float(first) > 0 else None
+
+    ra, rb = leg(a), leg(b)
+    if ra is None or rb is None:
+        return None
+    return dict(ret=round(ra, 4), index_ret=round(rb, 4),
+                lead_pp=round(100.0 * (ra - rb), 1), window=window)
+
+
+def levered_status(conn, bars, fx, nav, *, window=LEVERED_WINDOW):
+    """§2.5's levered pool, as numbers: utilization per facility, headroom, holdings, and how far
+    each name has run against the index.
+
+    Headroom is measured to the **utilization cap**, not to the credit limit, because the cap is
+    what §2.5 actually permits: callable facilities stop at 50% and the HELOC runs to the full line
+    ("it isn't callable, and a readvanceable mortgage grows by design"). Reporting the limit as
+    headroom would print C$67K of room on a facility that may only draw C$29K more.
+
+    Qualification is the bar §2.5 already sets and nothing new: a **blind** C2 PASS, CCN ≥ 85,
+    at or below its hurdle — plus a facility whose `funds` permits single names, which is a property
+    of the money rather than of the name and is reported per facility. The lag test is the only part
+    that needs Zak's numbers.
+    """
+    with conn.cursor() as cur:
+        params = config(cur, "levered_cycle_params", None)
+        etf = config(cur, "levered_etf", None)
+        if isinstance(etf, str):
+            etf = etf.strip('"') or None
+        thresholds = config(cur, "score_thresholds", {}) or {}
+        # the config row spells this `full`; `full_conviction` is read too so a rename cannot
+        # silently fall back to the default and look like it worked (learnings #21)
+        full = float(thresholds.get("full", thresholds.get("full_conviction", 85)))
+        balances = cash_by_account(cur)
+        cur.execute("""select code, label, callable, max_utilization, funds
+                         from accounts where kind = 'facility' order by code""")
+        register = cur.fetchall()
+
+        facilities = []
+        for code, label, callable_, max_util, funds in register:
+            b = balances.get(code, {})
+            drawn = float(b.get("drawn") or 0.0)
+            limit = float(b.get("limit") or 0.0)
+            # §2.5: "Callable margin 50% · Secured LOC 50% · HELOC full". A null max_utilization is
+            # the HELOC's "full", not an absent rule.
+            cap_frac = float(max_util) if max_util is not None else 1.0
+            cap_amount = limit * cap_frac
+            facilities.append(dict(
+                code=code, label=label, callable=bool(callable_), funds=funds,
+                drawn=round(drawn, 2), limit=round(limit, 2),
+                max_utilization=float(max_util) if max_util is not None else None,
+                utilization=round(drawn / limit, 4) if limit > 0 else None,
+                cap_amount=round(cap_amount, 2),
+                headroom=round(cap_amount - drawn, 2),
+                over_cap=bool(limit > 0 and drawn > cap_amount + 1e-9),
+                as_of=str(b.get("as_of")) if b.get("as_of") else None))
+
+        cur.execute("""select b.ticker, b.account, b.qty, b.currency, p.close, e.ccn,
+                              r.verdict_canon, r.decides
+                         from book b
+                         join lateral (select close from prices where ticker = b.ticker
+                                        order by d desc limit 1) p on true
+                         left join bench e on e.ticker = b.ticker
+                         left join v_rulings_latest_c2 r on r.ticker = b.ticker
+                        where b.status = 'open' and b.sleeve = 'levered'
+                        order by b.ticker""")
+        held = cur.fetchall()
+
+        # §2.5's bar for a single name taking the pool, minus the lag test that needs Zak's numbers
+        cur.execute("""select b.ticker, b.ccn, b.hurdle_price, b.last_close, b.gap_to_hurdle
+                         from bench b
+                         join v_rulings_latest_c2 r on r.ticker = b.ticker
+                        where r.decides and r.verdict_canon = 'pass' and r.blind
+                          and b.ccn >= %s and b.approved and b.c1_pass
+                          and b.hurdle_price is not null and b.last_close is not null
+                          and b.last_close <= b.hurdle_price
+                          and not b.owner_fcf_suspect
+                        order by b.ccn desc""", (full,))
+        qualified_rows = cur.fetchall()
+
+    holdings, disqualified = [], []
+    for tk, acct, qty, ccy, close, ccn, verdict, decides in held:
+        value = float(qty) * float(close) * (fx if ccy == "USD" else 1.0)
+        holdings.append(dict(ticker=tk, account=acct, qty=float(qty),
+                             value_cad=round(value, 2),
+                             weight_nav=round(value / nav, 4) if nav else None,
+                             is_etf=(tk == etf), ccn=float(ccn) if ccn is not None else None,
+                             relative=relative_return(bars, tk, window=window)))
+        # §2.5: a single name "reverts when it runs well ahead, **or stops qualifying** (CCN < 70 at
+        # a filing recompute, or an exit ruling) — the score-break revert applies regardless of
+        # relative position". Stating the disqualification is not proposing anything, so it is said
+        # out loud even while the cycle is locked.
+        if tk != etf:
+            why = None
+            if ccn is not None and float(ccn) < float(thresholds.get("enter",
+                                                                     thresholds.get("enterable", 70))):
+                why = f"CCN {float(ccn):.1f} — below the §2.5 qualifying floor"
+            elif decides and verdict in ("fail", "exit", "quarantine"):
+                why = f"latest c2 ruling is {str(verdict).upper()}"
+            if why:
+                disqualified.append(dict(ticker=tk, why=why))
+
+    qualified = [dict(ticker=t, ccn=float(c), hurdle_price=float(h), last_close=float(p),
+                      gap_to_hurdle=float(g) if g is not None else None,
+                      relative=relative_return(bars, t, window=window))
+                 for t, c, h, p, g in qualified_rows]
+
+    single_name_facilities = [f["code"] for f in facilities
+                              if f["funds"] == "single_or_etf" and (f["headroom"] or 0) > 0]
+
+    status = dict(
+        etf=dict(ticker=etf, priced=bool(etf and bars.get(etf)),
+                 relative=relative_return(bars, etf, window=window) if etf else None),
+        facilities=facilities, holdings=holdings, qualified=qualified,
+        disqualified=disqualified, single_name_facilities=single_name_facilities,
+        window=window, params=params, proposals=[],
+        breaches=[f["code"] for f in facilities if f["over_cap"]])
+
+    if not params:
+        status["note"] = ("§2.5 — cycle thresholds unset (`config.levered_cycle_params`): status "
+                          "only, no proposals. Zak's ruling sets lag to enter, lead to revert, "
+                          "and the window.")
+        return status
+
+    # ---- the cycle, once Zak has ruled. Both legs are proposals; he places them (§2.5, §4.5).
+    lag = float(params.get("enter_lag_pp", 0) or 0)
+    lead = float(params.get("revert_lead_pp", 0) or 0)
+    status["note"] = (f"§2.5 cycle armed — enter on a lag of {lag:g}pp, revert on a lead of "
+                      f"{lead:g}pp, over {window} sessions.")
+    for h in holdings:
+        if h["is_etf"] or not h["relative"]:
+            continue
+        broke = next((d["why"] for d in disqualified if d["ticker"] == h["ticker"]), None)
+        if broke:
+            status["proposals"].append(dict(kind="revert", ticker=h["ticker"], to=etf,
+                                            reason="score break", detail=broke))
+        elif h["relative"]["lead_pp"] >= lead:
+            status["proposals"].append(dict(
+                kind="revert", ticker=h["ticker"], to=etf, reason="ran ahead",
+                detail=f"{h['relative']['lead_pp']:+.1f}pp vs the index over {window} sessions"))
+    if not any(p["kind"] == "revert" for p in status["proposals"]):
+        for q in qualified:
+            if q["relative"] and q["relative"]["lead_pp"] <= -lag and single_name_facilities:
+                status["proposals"].append(dict(
+                    kind="enter", ticker=q["ticker"], from_=etf, reason="lagging the index",
+                    facilities=single_name_facilities,
+                    detail=f"CCN {q['ccn']:.1f} · at/below hurdle · "
+                           f"{q['relative']['lead_pp']:+.1f}pp vs the index over {window} sessions"))
+                break
+    return status
+
+
 # --------------------------------------------------------------------------- shadow book (§3.3)
 def shadow_book(conn, hb, bars):
     """Every pass and every exit, snapshotted and marked at 30 / 60 / 90 days (§3.3).
@@ -1122,8 +1301,11 @@ def run(conn, hb, *, held=frozenset(), apply_ledger_first=True):
             # theme — it ships the current theme weights on every armed row and R1 enforces
             # the 35% cap. Reading the config here would look like enforcement and be none.
             max_adds=int(config(cur, "max_adds_per_year", 2)),
-            # §3.2: BUY-state names under 70 stay queued and never ticket.
-            min_mcn=float((config(cur, "score_thresholds", {}) or {}).get("enterable", 70)),
+            # §3.2: BUY-state names under 70 stay queued and never ticket. The stored row spells
+            # this key `enter`; the code asked only for `enterable` and fell through to the same
+            # 70 by luck, so the config row was decorative — learnings #21, from the other side.
+            min_mcn=float((lambda t: t.get("enter", t.get("enterable", 70)))(
+                config(cur, "score_thresholds", {}) or {})),
             # §2.6: a US compounder with a trailing-12-month yield at or above this prefers
             # the RRSP — US dividend withholding is treaty-exempt there and leaks 15% in the
             # TFSA. Below it, placement follows the TFSA-first default.
@@ -1156,7 +1338,13 @@ def run(conn, hb, *, held=frozenset(), apply_ledger_first=True):
                        where is_holding or ticker in (select ticker from queue)
                           or ticker in (select ticker from candidates)
                           or ticker in (select ticker from bench)
-                          or ticker in (select ticker from book where status='open')""")
+                          or ticker in (select ticker from book where status='open')
+                          -- §2.5's levered pool is measured AGAINST the index, and its resting
+                          -- state is an ETF that is in no membership list — both need bars
+                          or ticker = 'GSPC.INDX'
+                          or ticker = trim(both '\"' from (
+                               select value::text from config where key='levered_etf'
+                                order by set_at desc limit 1))""")
         watched = [r[0] for r in cur.fetchall()]
         bars = load_bars(cur, watched)
 
@@ -1184,6 +1372,9 @@ def run(conn, hb, *, held=frozenset(), apply_ledger_first=True):
         hb.detail["unconfirmed_quantities"] = unconfirmed
     nav, fx = n["nav"], n["fx"]
     bets = book_effective_bets(conn, bars, fx)
+    # §2.5, ruled 2026-08-06: the brief carries a levered status line whether or not the cycle is
+    # armed. Computed here because §4.2 gives `score` every derived number and `compose` none.
+    levered = levered_status(conn, bars, fx, nav)
 
     arm = Arm()
     for m in moves:
@@ -1237,7 +1428,7 @@ def run(conn, hb, *, held=frozenset(), apply_ledger_first=True):
             bits.append(f"{len(k)} {label}{'s' if len(k) > 1 else ''}")
     summary = "; ".join(bits) if bits else "nothing needs you"
     detail = dict(gate=gate, nav_cad=round(nav, 2), effective_bets=bets,
-                  quarantined=sorted(held),
+                  levered=levered, quarantined=sorted(held),
                   effective_bets_warn=bets is not None and bets < caps["warn_bets"],
                   armed=arm.rows, protective=len(protective), offerable=len(offerable),
                   bench_at_hurdle=dict(approved=approved, total=any_hurdle),
@@ -1259,7 +1450,11 @@ def run(conn, hb, *, held=frozenset(), apply_ledger_first=True):
         conn.commit()
 
     hb.detail.update(armed=armed_n, protective=len(protective), offerable=len(offerable),
-                     effective_bets=bets, gate=gate, start_low=caps["start_low"])
+                     effective_bets=bets, gate=gate, start_low=caps["start_low"],
+                     levered=levered)
+    if levered["breaches"]:
+        # §2.5's utilization caps are hard caps, and §5.7 pages Zak on any hard-cap breach
+        hb.amber("facility over its §2.5 utilization cap: " + ", ".join(levered["breaches"]))
     print(f"score/arming: {fresh} | {summary} | armed {armed_n} "
           f"({len(protective)} protective) | bets "
           f"{f'{bets:.2f}' if bets else 'n/a'}")

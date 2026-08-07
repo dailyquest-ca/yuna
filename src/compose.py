@@ -87,6 +87,62 @@ def _table(rows, cols, headers):
     return "\n".join(out)
 
 
+def money(x):
+    return f"C${float(x):,.0f}" if x is not None else "—"
+
+
+def levered_line(pay):
+    """§2.5's levered status line — required on the brief whether or not the cycle is armed.
+
+    "Until set, the brief carries a levered status line (utilization per facility, headroom,
+    holdings) and proposes nothing." Headroom is to the plan's utilization cap, never to the credit
+    limit: printing the limit would offer room on a callable facility that may not draw it.
+    """
+    lev = pay.get("levered") or {}
+    if not lev:
+        return "**Levered pool (§2.5):** _not computed — the nightly job has not run_"
+    bits = []
+    # the facility carrying money leads; an unopened line is named and not dressed up with a 0%
+    # utilization and C$0 of headroom, which reads like a facility standing ready
+    for f in sorted(lev.get("facilities") or [],
+                    key=lambda f: (not (f.get("limit") or 0) > 0, -(f.get("drawn") or 0), f["code"])):
+        if not (f.get("limit") or 0) > 0:
+            bits.append(f"{f['code']} not opened")
+            continue
+        util = f"{f['utilization']:.0%}" if f.get("utilization") is not None else "—"
+        cap = (f" of a {f['max_utilization']:.0%} cap"
+               if f.get("max_utilization") is not None else " (full line, §2.5)")
+        flag = " ⚠️ OVER CAP" if f.get("over_cap") else ""
+        bits.append(f"{f['code']} drawn {money(f.get('drawn'))} — {util}{cap} · "
+                    f"headroom {money(f.get('headroom'))}{flag}")
+    held = []
+    for h in lev.get("holdings") or []:
+        rel = h.get("relative")
+        vs = f" · {rel['lead_pp']:+.1f}pp vs index/{rel['window']}d" if rel else ""
+        held.append(f"{h['ticker']} {money(h.get('value_cad'))}"
+                    f"{' (resting ETF)' if h.get('is_etf') else ''}{vs}")
+    etf = (lev.get("etf") or {}).get("ticker")
+    lines = ["**Levered pool (§2.5):** " + (" · ".join(bits) if bits else "_no facilities on file_"),
+             "Holdings: " + (" · ".join(held) if held else "_none — the pool is undrawn_")
+             + (f" · resting state {etf}" if etf else " · resting ETF not configured")]
+    if lev.get("disqualified"):
+        # not a proposal — a fact. §2.5's score-break revert applies regardless of relative
+        # position, so the desk hears about it even while the cycle is locked.
+        lines.append("No longer qualifying: "
+                     + " · ".join(f"{d['ticker']} — {d['why']}" for d in lev["disqualified"]))
+    if lev.get("qualified"):
+        lines.append("Qualified for the pool (§2.5 bar): " + " · ".join(
+            f"{q['ticker']} CCN {q['ccn']:.0f}"
+            + (f" {q['relative']['lead_pp']:+.1f}pp" if q.get("relative") else "")
+            for q in lev["qualified"][:6]))
+    if lev.get("proposals"):
+        lines.append("**Cycle proposals (Zak places both legs):** " + " · ".join(
+            f"{p['kind']} {p['ticker']} — {p['detail']}" for p in lev["proposals"]))
+    elif lev.get("note"):
+        lines.append(f"_{lev['note']}_")
+    return "\n".join(lines)
+
+
 def brief_skeleton(pay, freshness_line):
     """§5.1 step 9's snapshot, rendered mechanically. The session (or the voice layer) frames
     this; nothing may alter it. Gaps are named, never papered over (§5.6 no-improvise)."""
@@ -102,6 +158,7 @@ def brief_skeleton(pay, freshness_line):
         f"{', provisional' if nav.get('provisional') else ''})" if nav.get("nav_cad")
         else "**NAV:** not stored — say so, don't guess",
         f"**Gate:** {gate.get('state', 'unknown')} (week ending {gate.get('week_end')})",
+        levered_line(pay),
         "**Blackout wall (holdings included, in full):**\n"
         + _table(pay.get("blackout_wall") or [], ["ticker", "report_date", "report_when"],
                  ["name", "reports", "when"]),
