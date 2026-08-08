@@ -160,13 +160,27 @@ def extract(ticker, r, quote_ccy=None, fx=None):
     is_fin, industry_missing = excluded_industry(industry or gic_i)
     # General.CurrencyCode lies for depositary receipts (TSM says USD, files in TWD).
     # currency_symbol sits on every statement and does not.
+    primary = G.get("PrimaryTicker")
+    code = G.get("Code")
+    is_adr = bool(primary and code and primary.split(".")[0].upper() != str(code).upper())
     stmt_ccy = None
     for tbl in (is_y, cf_y, bs_y):
         for k in desc(tbl)[:1]:
             stmt_ccy = stmt_ccy or (tbl[k] or {}).get("currency_symbol")
-    primary = G.get("PrimaryTicker")
-    code = G.get("Code")
-    is_adr = bool(primary and code and primary.split(".")[0].upper() != str(code).upper())
+    stmt_ccy_source = "statement" if stmt_ccy else None
+    # …but on some payloads the vendor omits `currency_symbol` from every statement, and §3.0's
+    # "unknown statement currency → data-confidence path" then reads that silence as doubt. It was
+    # costing 21 names their bench eligibility — ADP, PG, KLAC, LRCX, STX among them — all of them
+    # US-domiciled, US-listed, filing in the currency they quote in. Silence from the vendor is not
+    # the same fact as a currency we cannot reconcile.
+    #
+    # `General.CurrencyCode` is the fallback, and it is only unsafe for the one case that made this
+    # rule necessary: a depositary receipt quotes in USD and files in its home currency, which is
+    # the exact shape of the TSM defect. That case already has a test — the receipt's PrimaryTicker
+    # points at a different listing — so the fallback is refused there and TSM keeps failing closed.
+    if stmt_ccy is None and not is_adr and G.get("CurrencyCode"):
+        stmt_ccy = G.get("CurrencyCode")
+        stmt_ccy_source = "general_currency_code"
     mcap = num(H.get("MarketCapitalization"))
     shares = num(SS.get("SharesOutstanding")) or num((bs_y.get(ys[0]) or {}).get("commonStockSharesOutstanding"))
 
@@ -480,12 +494,13 @@ def extract(ticker, r, quote_ccy=None, fx=None):
             "quarterly_fcf": qseries,
             # the restatement, auditable from the row: which currency, into which, at what rate,
             # per period. §3.0 asks for fiscal-period-end FX and this is the receipt for it.
-            "fx": ({"from": stmt_ccy, "to": target_ccy, "rate_latest": fx_rate,
+            "fx": ({"from": stmt_ccy, "from_source": stmt_ccy_source, "to": target_ccy,
+                    "rate_latest": fx_rate,
                     "as_of": str(fx_as_of) if fx_as_of else None,
                     "is_depositary_receipt": is_adr, "listing_share_ratio": listing_ratio,
                     "periods": fx_log} if converted else
-                   {"from": stmt_ccy, "to": target_ccy, "converted": False,
-                    "one_currency": one_currency}),
+                   {"from": stmt_ccy, "from_source": stmt_ccy_source, "to": target_ccy,
+                    "converted": False, "one_currency": one_currency}),
             # Point-in-time history. Every statement EODHD returns carries its own filing_date,
             # so a past date's CCN can be rebuilt from only what had been filed by then. This is
             # the asset §4.8 assumed could not be bought — it was in the document all along.

@@ -51,16 +51,35 @@ def doc(**over):
 
 # --------------------------------------------------- §3.0 · unknown currency is not agreement
 
-def test_unknown_statement_currency_routes_to_data_confidence():
-    """§3.0: eligible only when FCF and cap are in one currency — 'or the statement currency is
-    unknown → data-confidence path'. Silence is not a match."""
-    d = doc()
+def no_symbol(d):
+    """Strip `currency_symbol` from every statement, the way the vendor serves some payloads."""
     for section in ("Income_Statement", "Cash_Flow", "Balance_Sheet"):
         for row in d["Financials"][section]["yearly"].values():
             row.pop("currency_symbol", None)
-    row = fu.extract("TEST.US", d, "USD")
+    return d
+
+
+def test_unknown_statement_currency_routes_to_data_confidence():
+    """§3.0: eligible only when FCF and cap are in one currency — 'or the statement currency is
+    unknown → data-confidence path'. Silence is not a match.
+
+    Narrowed 2026-08-08: silence is only *unknown* when nothing trustworthy can answer it. A
+    depositary receipt is that case — General.CurrencyCode is the field that lied about TSM — so
+    the receipt still fails closed, which is the case the rule was written for."""
+    d = no_symbol(doc())
+    d["General"]["PrimaryTicker"] = "2330.TW"       # a receipt: quotes USD, files in TWD
+    row = fu.extract("TSM.US", d, "USD")
     assert row["statement_currency"] is None
     assert row["data_confidence"] == "flagged"
+
+
+def test_a_plain_filer_missing_the_symbol_is_answered_by_the_vendors_currency():
+    """The other side of the same law: a US filer that quotes and reports in one currency was
+    losing its bench seat to a blank field. 21 names, ADP and PG and KLAC among them."""
+    row = fu.extract("TEST.US", no_symbol(doc()), "USD")
+    assert row["statement_currency"] == "USD"
+    assert row["quote_ok"] is True
+    assert row["data_confidence"] == "full"
 
 
 def test_known_matching_currency_scores_full():

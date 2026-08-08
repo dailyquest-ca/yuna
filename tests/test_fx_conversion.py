@@ -171,6 +171,45 @@ def test_a_name_already_in_the_cap_currency_is_never_converted():
     assert r["data_confidence"] == "full"
 
 
+def no_symbol_doc(**over):
+    """The USD fixture as the vendor actually serves ADP, PG, KLAC, LRCX and STX: statements with
+    no `currency_symbol` on them at all, and General.CurrencyCode carrying the only answer."""
+    d = doc(**over)
+    for section in ("Income_Statement", "Cash_Flow", "Balance_Sheet"):
+        for row in d["Financials"][section]["yearly"].values():
+            row.pop("currency_symbol", None)
+    return d
+
+
+def test_a_missing_currency_symbol_falls_back_to_the_vendors_declared_currency():
+    """Silence from the vendor is not the same fact as a currency we cannot reconcile. 21 names —
+    ADP, PG, KLAC, LRCX, STX among them — were losing bench eligibility to a blank field on a
+    US filer that quotes and reports in the same currency."""
+    r = fu.extract("ADP.US", no_symbol_doc(), "USD", fx=twd_rates())
+    assert r["statement_currency"] == "USD"
+    assert r["quote_ok"] is True and r["data_confidence"] == "full"
+    assert json.loads(r["raw"])["fx"]["from_source"] == "general_currency_code"
+
+
+def test_the_fallback_is_refused_for_a_depositary_receipt():
+    """The one case the whole rule exists for: an ADR quotes USD and files in its home currency,
+    so General.CurrencyCode is exactly the field that lied about TSM. No statement symbol and no
+    trustworthy fallback means the name fails closed, as §3.0 says it must."""
+    d = no_symbol_doc()
+    d["General"]["PrimaryTicker"] = "2330.TW"          # TSM's shape: receipt here, listing there
+    r = fu.extract("TSM.US", d, "USD", fx=twd_rates())
+    assert r["statement_currency"] is None
+    assert r["quote_ok"] is False and r["data_confidence"] == "flagged"
+
+
+def test_a_stated_symbol_always_beats_the_fallback():
+    """The fallback never overrides evidence — a statement that names its currency is the answer,
+    even when General.CurrencyCode disagrees with it."""
+    r = fu.extract("TSM.US", twd_doc(), "USD", fx=twd_rates())
+    assert r["statement_currency"] == "TWD"            # not the "USD" General claims
+    assert json.loads(r["raw"])["fx"]["from_source"] == "statement"
+
+
 def test_the_two_flags_can_no_longer_disagree():
     """The TSM row carried quote_ok=false beside data_confidence='full' — the currency mismatch was
     visible to the scorer and invisible to §3.3's guardrails. They are one fact now."""
