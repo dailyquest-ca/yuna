@@ -404,3 +404,25 @@ class _HB:
 
 def _hb():
     return _HB()
+
+
+def test_a_hold_zone_compounder_is_never_offered_new_money(db, fx):
+    """§3.3: "55–69 Hold zone — **no new money**", and §3.1 gives no size band below 70 — a sub-70
+    entry has no legislated size to be written at.
+
+    Momentum enforced this line and so did the compounder ADD path; only the entry escaped, and it
+    escaped invisibly: until 2026-08-07 every one of these rows was already blocked by a sign-off
+    gate nothing could open. The night the gate opened, LMAT armed offerable at CCN 69.2.
+    """
+    with db.cursor() as cur:
+        world.add_name(cur, "LMAT.US")
+        world.flat_then_base(cur, "LMAT.US", level=95.0)
+        world.gate(cur)
+        world.balances(cur)
+        filing(cur, "LMAT.US")
+        bench_row(cur, "LMAT.US", ccn=69.2)
+        rule(cur, "LMAT.US", "PASS")          # ruled, signed off, and still not buyable
+    db.commit()
+    run()
+    entry = armed(db, "LMAT.US", "entry")[0]
+    assert "hold zone" in entry["blocked_by"] and "69.2" in entry["blocked_by"]
