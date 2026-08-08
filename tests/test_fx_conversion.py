@@ -202,6 +202,32 @@ def test_the_fallback_is_refused_for_a_depositary_receipt():
     assert r["quote_ok"] is False and r["data_confidence"] == "flagged"
 
 
+def test_the_fallback_is_refused_when_the_primary_listing_is_unknown():
+    """The regression this pins shipped and reached production: `not is_adr` is false both for a
+    domestic filer and for a name whose PrimaryTicker the vendor left blank, so the first cut of
+    the fallback read a blank listing as a domestic one — the same silence-is-agreement error it
+    was written to fix, one field over.
+
+    WSE.US is the exhibit: Wise plc, a Jersey issuer reporting in GBP against a USD market cap,
+    with no PrimaryTicker. It took **rank 1 of the bench at CCN 99.5 on a P/FCF of 1.5**. The
+    fallback now demands a PrimaryTicker that names this same listing."""
+    d = no_symbol_doc()
+    d["General"]["PrimaryTicker"] = None                # the vendor simply doesn't say
+    r = fu.extract("WSE.US", d, "USD", fx=twd_rates())
+    assert r["statement_currency"] is None
+    assert r["quote_ok"] is False and r["data_confidence"] == "flagged"
+
+
+def test_a_foreign_domiciled_filer_that_reports_in_the_cap_currency_still_qualifies():
+    """The discriminator is the listing, not the ISIN. STX.US is Seagate — Irish-domiciled, USD
+    statements, PrimaryTicker naming its own US line — and it belongs on the bench."""
+    d = no_symbol_doc()
+    d["General"]["Code"] = "STX"
+    d["General"]["PrimaryTicker"] = "STX.US"
+    r = fu.extract("STX.US", d, "USD", fx=twd_rates())
+    assert r["statement_currency"] == "USD" and r["quote_ok"] is True
+
+
 def test_a_stated_symbol_always_beats_the_fallback():
     """The fallback never overrides evidence — a statement that names its currency is the answer,
     even when General.CurrencyCode disagrees with it."""

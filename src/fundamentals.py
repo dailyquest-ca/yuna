@@ -174,11 +174,23 @@ def extract(ticker, r, quote_ccy=None, fx=None):
     # US-domiciled, US-listed, filing in the currency they quote in. Silence from the vendor is not
     # the same fact as a currency we cannot reconcile.
     #
-    # `General.CurrencyCode` is the fallback, and it is only unsafe for the one case that made this
-    # rule necessary: a depositary receipt quotes in USD and files in its home currency, which is
-    # the exact shape of the TSM defect. That case already has a test — the receipt's PrimaryTicker
-    # points at a different listing — so the fallback is refused there and TSM keeps failing closed.
-    if stmt_ccy is None and not is_adr and G.get("CurrencyCode"):
+    # `General.CurrencyCode` is the fallback, and it is unsafe for the case that made this rule
+    # necessary: a foreign issuer quotes in USD and files in its home currency, the shape of the
+    # TSM defect. So the fallback demands **positive evidence** that the US line is the primary
+    # listing — PrimaryTicker present AND naming this same code — and is refused otherwise.
+    #
+    # `not is_adr` is not that evidence, and reading it as such repeats the very error this fix is
+    # correcting one field over: `is_adr` is false both for a domestic filer and for a name whose
+    # PrimaryTicker the vendor simply left blank. WSE.US is the second kind — Wise plc, a Jersey
+    # issuer reporting in GBP against a USD cap, which the 2026-08-01 hardening names as one of its
+    # two exhibits. It reached **rank 1 of the bench at CCN 99.5 on a P/FCF of 1.5** in run 207 on
+    # the weaker test. Requiring the match keeps 17 plain US filers and refuses the 4 unknowns.
+    #
+    # Note the discriminator is the listing, not the ISIN: STX.US is Seagate, an Irish-domiciled
+    # issuer that reports in USD and carries PrimaryTicker=STX.US, and it belongs on the bench.
+    domestic_primary = bool(primary and code
+                            and primary.split(".")[0].upper() == str(code).upper())
+    if stmt_ccy is None and domestic_primary and G.get("CurrencyCode"):
         stmt_ccy = G.get("CurrencyCode")
         stmt_ccy_source = "general_currency_code"
     mcap = num(H.get("MarketCapitalization"))
