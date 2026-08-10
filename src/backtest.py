@@ -63,8 +63,19 @@ def load(cur):
     for c in ("open", "high", "low", "close", "adj", "vol"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["adj"] = df["adj"].fillna(df["close"])
-    wide = {c: df.pivot(index="d", columns="ticker", values=c).sort_index()
-            for c in ("open", "high", "low", "close", "adj", "vol")}
+
+    # Scatter into the date x ticker grid directly rather than pivoting six times. Retaining the
+    # delisted census roughly doubles the ticker count, and six pivots of a ten-million-row frame
+    # is where a runner with 7 GB stops being able to load the tape at all.
+    tcode, cols = pd.factorize(df["ticker"], sort=True)
+    dcode, dates = pd.factorize(df["d"], sort=True)
+    shape = (len(dates), len(cols))
+    arrays = {}
+    for c in ("open", "high", "low", "close", "adj", "vol"):
+        a = np.full(shape, np.nan)
+        a[dcode, tcode] = df[c].to_numpy(dtype=float)
+        arrays[c] = a
+    del df
 
     cur.execute("select ticker, industry from universe where kind='stock'")
     industry = {t: i for t, i in cur.fetchall()}
@@ -103,8 +114,8 @@ def load(cur):
         if pairs:
             eps[tk] = (np.array([r.toordinal() for r, _ in pairs]), [v for _, v in pairs])
 
-    return dict(wide=wide, industry=industry, bench=bench, spx=spx, gate_source=gate_source,
-                reports=reports, eps=eps)
+    return dict(dates=list(dates), cols=list(cols), arrays=arrays, industry=industry,
+                bench=bench, spx=spx, gate_source=gate_source, reports=reports, eps=eps)
 
 
 def eps_as_of(eps_entry, day):
@@ -634,21 +645,18 @@ def main():
                 # than a silent one (Phase 5 of the backtest plan).
                 config_stamp = config_digest(cur)
 
-            wide = frame.pop("wide")
-            index = list(wide["close"].index)
-            if START_DATE:
-                index = [d for d in index if str(d) >= START_DATE]
-            if END_DATE:
-                index = [d for d in index if str(d) <= END_DATE]
-            sub = {k: v.loc[index] for k, v in wide.items()}
-            frame["dates"] = index
-            frame["cols"] = list(sub["close"].columns)
-            frame["arrays"] = {k: v.values.astype(float) for k, v in sub.items()}
+            if START_DATE or END_DATE:
+                keep = [i for i, d in enumerate(frame["dates"])
+                        if (not START_DATE or str(d) >= START_DATE)
+                        and (not END_DATE or str(d) <= END_DATE)]
+                frame["dates"] = [frame["dates"][i] for i in keep]
+                frame["arrays"] = {k: v[keep] for k, v in frame["arrays"].items()}
             frame["bench_by_day"] = {d: float(v) for d, v in frame["bench"].items()}
 
-            hb.detail.update(tickers=len(frame["cols"]), bars=len(index),
-                             benchmark=BENCH, gate_source=frame["gate_source"])
-            print(f"backtest {VARIANT}: {len(frame['cols'])} tickers x {len(index)} bars "
+            hb.detail.update(tickers=len(frame["cols"]), bars=len(frame["dates"]),
+                             benchmark=BENCH, gate_source=frame["gate_source"],
+                             hair_trigger_while_pending=HAIR_TRIGGER_PENDING)
+            print(f"backtest {VARIANT}: {len(frame['cols'])} tickers x {len(frame['dates'])} bars "
                   f"| bench {BENCH} | gate {frame['gate_source']}")
 
             trades, equity, conf = simulate(frame, cfg)
