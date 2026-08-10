@@ -29,10 +29,10 @@ of a past statement, so a restatement is seen earlier than the market saw it; in
 today's; and the L0 census is reconstructed from bars rather than from a stored point-in-time
 listing, so a name whose bars we never pulled is still absent.
 """
-import os, sys, json, bisect, hashlib, datetime as dt
+import os, sys, json, bisect, datetime as dt
 import numpy as np
 import pandas as pd
-from db import connect, config, dry, Heartbeat
+from db import connect, config, config_digest, dry, Heartbeat
 import signals as sg
 
 START_NAV = float(os.environ.get("START_NAV", "200000"))       # USD (ruled 2026-08-10)
@@ -442,11 +442,6 @@ def simulate(frame, cfg):
     return trades, equity, conf
 
 
-def _stamp(obj):
-    """A short, stable digest of the config a run was decided by."""
-    return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:12]
-
-
 def _gate_series(spx):
     """M1 for every week of the test, latched — `market_gate` carrying its own previous state.
 
@@ -601,8 +596,7 @@ def main():
                 # Behaviour lives in the database as well as in git, so the run stamps what it
                 # ran under. A config change with no re-test is then a visible condition rather
                 # than a silent one (Phase 5 of the backtest plan).
-                config_stamp = _stamp(dict(score_thresholds=thresholds, sleeve_ceiling=ceilings,
-                                           max_names=cfg["max_names"], cushion=cfg["cushion"]))
+                config_stamp = config_digest(cur)
 
             wide = frame.pop("wide")
             index = list(wide["close"].index)

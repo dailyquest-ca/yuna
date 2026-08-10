@@ -3,7 +3,7 @@
 Kept deliberately thin — the jobs stay readable, and the heartbeat contract (one runs row
 per job, green | amber | red, tracebacks embedded on death) lives in exactly one place.
 """
-import bisect, os, sys, json, time, traceback, urllib.request, urllib.error
+import bisect, os, sys, json, hashlib, time, traceback, urllib.request, urllib.error
 import datetime as dt
 import psycopg
 
@@ -40,6 +40,27 @@ def config(cur, key, default=None):
     cur.execute("select value from config where key=%s order by set_at desc limit 1", (key,))
     row = cur.fetchone()
     return row[0] if row else default
+
+
+# The config rows that decide what the machine *does*, as opposed to how it talks or how often it
+# fetches. A backtest is only evidence about the machine these describe.
+DECISION_KEYS = ("score_thresholds", "sleeve_ceiling", "momentum_max_names",
+                 "holdthrough_cushion", "blackout_trading_days", "entry_limit_over_pivot",
+                 "mcn_risk_budget", "max_positions")
+
+
+def config_digest(cur, keys=DECISION_KEYS):
+    """A short, stable digest of the config a decision was made under.
+
+    Behaviour lives in the database as well as in git: change a threshold and the machine behaves
+    differently with no commit, no diff and nothing for a paths-filtered CI trigger to notice.
+    Every backtest run stamps this, and `check` ambers when the newest run's stamp no longer
+    matches today's — so "the rules moved and nothing re-tested them" is a line in the brief
+    rather than a silence. One function, so the stamp and the comparison cannot drift apart.
+    """
+    values = {k: config(cur, k, None) for k in keys}
+    blob = json.dumps(values, sort_keys=True, default=str).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
 
 
 def key():
