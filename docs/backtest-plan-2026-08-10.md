@@ -281,6 +281,39 @@ Phase 2 is the only large one, and most of its diff is deletion.
 One line in `signals.py`'s own docstring already claims *"the nightly job, the weekly rank and both
 backtests import from here."* Phase 2 is the commit that makes that sentence true.
 
+---
+
+## Build log — 2026-08-10
+
+| Phase | State | What landed |
+|---|---|---|
+| 0 | **done** | 5.8 min/run on fixed tails; `tests/test_tail_equivalence.py` pins the tail against the full series, including one test that truncates below 266 bars and asserts divergence |
+| 1 | **partly done** | VOO in the universe as `kind='index'` (untradeable by construction) · VOO + GSPC backfilled to **2016-08-12** with adjusted closes · **still to do:** the delisted census, and `earnings` report dates backfilled from `Earnings.History` |
+| 2 | **done** | `backtest.py` is a driver; `confirmation_state`, `stalled_pyramid`, `enterable` and `m4_acceleration` moved into `signals.py`; `arming.py` and `fundamentals.py` call them too |
+| 3 | **done** | 15-clause conformance table with per-clause coverage, written to `stats.conformance` |
+| 4 | **to do** | the differential test against the `armed` ledger |
+| 5 | **done** | paths-filtered CI · dispatch with window and label · config stamp on every run · **still to do:** the `check` amber when the stamp goes stale, and the Saturday chain entry |
+| 6 | **done** | `backtest_report.py` — delta against `config.backtest_baseline_run_id`, job summary + PR comment, conformance-only exit code |
+
+**Two bugs the engine tests found**, both of which would have produced a plausible wrong number
+rather than a crash:
+
+1. The entry loop scanned the base **through today**, so the very breakout it was meant to trigger
+   on marked that base spent (`base_scan` returns `broken='breakout'` the moment a close clears the
+   pivot). Nothing but marginal touches could ever have filled. It now reads last night's bars,
+   which is what a resting GTC order actually does.
+2. The config read invented key names — `momentum_min_mcn`, `mcn_exit` — that do not exist in
+   `config`. Every run would have silently used the defaults while production read
+   `score_thresholds`. This repo has already paid for that exact failure once: `score_thresholds.
+   enter` was decorative for weeks because the code asked for `enterable` (learnings #21).
+
+**One question for Zak, not settled here.** §3.2 says the unconfirmed hair-trigger applies "while
+unconfirmed", and a name is unconfirmed from the EOD of its breakout day — the pending window
+included. `arming.py` fires it only once the three-session window has *closed*. The backtest follows
+the law; the nightly keeps its current behaviour; `signals.confirmation_state` carries both under a
+flag and tests pin each, so neither can drift while the question is open. It is a live-rule change,
+so it rides the slow lane (§5.8) and wants a ruling.
+
 **Still parked, and now for a sharper reason:** the exit-rule ablation grid. A grid searched against
 a baseline that enters names at MCN 15, over one bull regime, with no costs, on a survivor-only
 tape, will faithfully find the parameters that fit those four defects. It gets unparked when
