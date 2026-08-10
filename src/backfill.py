@@ -11,17 +11,23 @@ Three things the 2026-08-01 law needs that the nightly feeds cannot produce retr
     current for nothing.
   * **The raw filing documents.** §4.1 moved them into the database. Only the derived extract was
     ever stored, so the archive has to be re-served once.
+  * **The delisted census** (added 2026-08-10). §3.3 says "delisted names retained in the universe"
+    and the universe held two of them, so every backtest to date measured the companies that
+    survived. The nightly cannot produce this retroactively either: a name that stopped trading in
+    2019 will never appear in a listings sweep run today.
 
 Per-ticker history calls are the §4.1 cold-start exception, not the routine. Budget is metered
 against the vendor's own usage endpoint before spending, and the run truncates rather than dying
 two-thirds through — the same discipline the fundamentals sweep learned the hard way.
 
     WHAT=bars,dividends,fundamentals   which passes to run (default all three)
+    WHAT=delisted                      the dead census + their bars, screened to L0's own floor
     YEARS=10                           bar depth
     TICKERS=A.US,B.US                  limit the target set
     SWEEP_LIMIT=200                    largest N by market cap
 """
 import os, sys, json, datetime as dt
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
@@ -134,6 +140,113 @@ def _flush_bars(conn, rows):
     return len(rows)
 
 
+def census_delisted(conn, hb, exchange="US"):
+    """Every US common stock that has stopped trading — the half of the tape we never stored.
+
+    §3.3 says "Delisted names retained in the universe" and the census held **two** of them, so
+    every backtest ran on the companies that survived. Momentum buys names printing new highs and
+    a fraction of those crash and delist; testing on survivors deletes that tail from the sample
+    and flatters every number. One vendor call returns the list.
+    """
+    rows = get(f"exchange-symbol-list/{exchange}", hb.calls, tries=2, timeout=240, delisted=1)
+    out = []
+    for r in rows if isinstance(rows, list) else []:
+        code, kind = r.get("Code"), (r.get("Type") or "")
+        if not code or kind != "Common Stock":
+            continue                       # ETFs, funds, preferreds and notes are not L0 (§3.0)
+        out.append((f"{code}.{exchange}", r.get("Name"), r.get("Currency") or "USD"))
+    hb.detail["delisted_census"] = len(out)
+    return out
+
+
+def backfill_delisted(conn, hb, since, min_addv=10_000_000.0, min_price=5.0, min_bars=210):
+    """Bars for the dead — but only for the dead that could ever have been L0.
+
+    Storage is the constraint, not quota: ten years for every delisted ticker would be tens of
+    millions of rows for companies §3.0's liquidity floor would never have let us buy. So each
+    name's history is fetched, screened in memory against the same floor L0 applies — 210 sessions,
+    a $5 price and a 50-session median dollar volume of $10M, at any point in its life — and only
+    the qualifiers are stored. The rest are counted and dropped, so the discard is a number in the
+    heartbeat rather than a silent omission.
+
+    Written with `status='delisted'` and `in_l0=false`: the backtest's census is rebuilt from bars
+    at each date, so a dead name is in the universe until the day its bars stop and out of it after
+    — which is what "retained" has to mean for a point-in-time test.
+    """
+    census = census_delisted(conn, hb)
+    with conn.cursor() as cur:
+        cur.execute("select ticker from universe")
+        known = {r[0] for r in cur.fetchall()}
+    todo = [(t, n, c) for t, n, c in census if t not in known]
+    afford = budget(hb, 1)
+    if len(todo) > afford:
+        hb.amber(f"quota allows {afford} of {len(todo)} delisted names today — re-run to continue")
+        todo = todo[:afford]
+
+    def one(entry):
+        t, name, ccy = entry
+        try:
+            rows = get(f"eod/{t}", hb.calls, tries=2, timeout=120,
+                       **{"from": since.isoformat(), "period": "d"})
+            return entry, (rows if isinstance(rows, list) else []), None
+        except Exception as e:
+            return entry, [], f"{type(e).__name__}: {e}"
+
+    kept, dropped, written, errors = 0, 0, 0, {}
+    buf, rows_to_add = [], []
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        for entry, rows, err in pool.map(one, todo):
+            t, name, ccy = entry
+            if err:
+                if len(errors) < 40:
+                    errors[t] = err
+                continue
+            bars = [b for b in rows if b.get("date") and b.get("close") is not None]
+            if len(bars) < min_bars:
+                dropped += 1
+                continue
+            close = np.array([float(b["close"]) for b in bars])
+            vol = np.array([float(b.get("volume") or 0) for b in bars])
+            dollar = close * vol
+            # the best 50-session stretch it ever had — err toward keeping
+            best = max((float(np.median(dollar[i:i + 50])) for i in range(0, len(dollar) - 49, 10)),
+                       default=0.0)
+            if best < min_addv or float(np.nanmax(close)) < min_price:
+                dropped += 1
+                continue
+            kept += 1
+            rows_to_add.append((t, name, ccy))
+            for b in bars:
+                buf.append((t, b["date"], b.get("open"), b.get("high"), b.get("low"),
+                            b.get("close"), b.get("adjusted_close"), b.get("volume")))
+            if len(buf) >= BATCH * 20:
+                written += _flush_delisted(conn, rows_to_add, buf)
+                rows_to_add, buf = [], []
+                if not wait_for_wal(conn, ceiling_bytes=WAL_CEILING, max_wait_s=WAL_MAX_WAIT):
+                    hb.amber(f"stopped early on WAL pressure; {written} bars committed, re-run "
+                             f"to continue — the census skips what is already stored")
+                    break
+    written += _flush_delisted(conn, rows_to_add, buf)
+    hb.detail.update(delisted_kept=kept, delisted_dropped_illiquid=dropped,
+                     delisted_errors=errors)
+    print(f"  delisted: {kept} kept, {dropped} never liquid enough for L0, {written} bars")
+    return written
+
+
+def _flush_delisted(conn, universe_rows, bars):
+    """Universe rows first — `prices.ticker` is a foreign key, so the name must exist to hold bars."""
+    if dry() or not universe_rows:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany("""insert into universe(ticker,name,kind,exchange,currency,status,in_l0,note)
+                           values (%s,%s,'stock','US',%s,'delisted',false,
+                                   'delisted census — §3.3 retains the dead so the backtest is not
+                                    measured on survivors only')
+                           on conflict (ticker) do nothing""", universe_rows)
+    conn.commit()
+    return _flush_bars(conn, bars)
+
+
 def backfill_dividends(conn, hb, names, since):
     """§2.6's trailing-12-month yield needs twelve months of payments. The per-ticker history keys
     the amount as `value`; the nightly bulk feed keys it as `dividend`. `v_dividend_ttm` reads both,
@@ -226,6 +339,8 @@ def main():
             # fundamentals request at ten)
             per_name = (1 if "bars" in WHAT else 0) + (1 if "dividends" in WHAT else 0) \
                        + (10 if "fundamentals" in WHAT else 0)
+            if WHAT == {"delisted"}:
+                names, per_name = [], 0        # the delisted pass builds its own target list
             afford = budget(hb, per_name)
             if len(names) > afford:
                 hb.amber(f"quota allows {afford} of {len(names)} names today — truncated, re-run tomorrow")
@@ -235,6 +350,8 @@ def main():
             print(f"backfill: {len(names)} names · {sorted(WHAT)} · ~{len(names) * per_name} units")
 
             counts = {}
+            if "delisted" in WHAT:
+                counts["delisted"] = backfill_delisted(conn, hb, since_bars)
             if "bars" in WHAT:
                 counts["bars"] = backfill_bars(conn, hb, names, since_bars)
                 print(f"  bars: {counts['bars']} rows since {since_bars}")

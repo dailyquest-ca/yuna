@@ -205,7 +205,7 @@ def breakout_confirmed(volumes, baselines, *, multiple=CONFIRM_MULTIPLE):
 
 def confirmation_state(volumes, baselines, *, closes=None, pivot=None,
                        sessions=CONFIRM_SESSIONS, multiple=CONFIRM_MULTIPLE,
-                       hair_trigger_while_pending=True):
+                       hair_trigger_while_pending=False):
     """§3.2 breakout confirmation as one state machine — the mechanic ratified 2026-07-31.
 
     `volumes`, `baselines` and `closes` all run from the breakout session forward, one entry per
@@ -227,11 +227,20 @@ def confirmation_state(volumes, baselines, *, closes=None, pivot=None,
     is unconfirmed, a close back below the pivot means the breakout failed by the only judge that
     matters, and the position leaves at the next open.
 
-    `hair_trigger_while_pending` exists because the law and the running code disagree, and the
-    disagreement is Zak's to settle (§5.8 slow lane). §3.2 says the hair-trigger applies "while
-    unconfirmed", and a name is unconfirmed from the EOD of its breakout day — pending included.
-    `arming.py` fires it only once the window has closed (`confirmed is False`). This default
-    follows the law; the nightly passes False to keep its behaviour unchanged until ruled.
+    **Ruled 2026-08-10 (Zak): the position waits out the window.** §3.2's wording — the
+    hair-trigger applies "while unconfirmed" — could be read as arming it from the breakout EOD,
+    pending included. It does not: a name inside its three-session window has not yet failed, and
+    cutting it there forfeits every late confirmation. The hair-trigger arms once the window
+    closes, which is what `arming.py` was already doing.
+
+    **What limits the wait is the stop, which is placed at entry and never lifts** —
+    `max(final-contraction low, entry - 8%)`, and never wider than 8% (§3.2 Stops). A name that
+    falls apart inside the window is stopped out on price like any other; it is not unprotected,
+    it is protected by the rule that protects everything else.
+
+    `hair_trigger_while_pending=True` keeps the discarded reading available so the backtest can
+    price the ruling rather than assume it — on the ten-year run the hair-trigger was the single
+    largest loss bucket, 158 trades at -1.61%, so the difference is worth measuring, not asserting.
     """
     v = list(volumes or [])
     b = list(baselines or [])

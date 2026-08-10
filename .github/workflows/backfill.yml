@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       what:
-        description: 'passes to run: bars,dividends,fundamentals'
+        description: 'passes to run: bars,dividends,fundamentals,delisted'
         default: 'bars,dividends,fundamentals'
       years:
         description: 'bar depth in years (§4.1 window is 10)'

@@ -200,15 +200,33 @@ def test_a_confirmed_breakout_has_no_hair_trigger():
     assert out["confirmed"] is True and out["exit_next_open"] is False
 
 
-def test_the_hair_trigger_fires_while_pending_under_the_law_and_not_under_the_nightly():
-    """§3.2 says "while unconfirmed", and a name is unconfirmed from its breakout EOD — pending
-    included. `arming.py` waits for the window to close. Flagged for Zak; both readings pinned so
-    neither can drift silently."""
+def test_a_pending_name_below_its_pivot_waits_out_the_window():
+    """Ruled 2026-08-10: the hair-trigger arms when the window CLOSES, not at the breakout EOD.
+
+    A name inside its three sessions has not failed yet, and cutting it there forfeits every late
+    confirmation. What limits the wait is the stop, which was placed at entry.
+    """
+    args = ([1e6], [1e6])                            # one session in, light volume: pending
+    kw = dict(closes=[99.0], pivot=100.0)
+    assert s.confirmation_state(*args, **kw)["confirmed"] is None
+    assert s.confirmation_state(*args, **kw)["exit_next_open"] is False
+
+
+def test_the_discarded_reading_stays_available_to_be_priced():
+    """The rejected reading is kept behind a flag so the backtest can measure what the ruling
+    cost or saved. On the ten-year run this was the largest loss bucket — 158 trades — so it is
+    worth a number rather than an opinion."""
     args = ([1e6], [1e6])
     kw = dict(closes=[99.0], pivot=100.0)
-    assert s.confirmation_state(*args, **kw)["exit_next_open"] is True
     assert s.confirmation_state(*args, **kw,
-                                hair_trigger_while_pending=False)["exit_next_open"] is False
+                                hair_trigger_while_pending=True)["exit_next_open"] is True
+
+
+def test_the_stop_is_what_limits_the_wait():
+    """§3.2: initial stop = max(final-contraction low, entry - 8%), never wider. That is the
+    protection during the window, so waiting is bounded by price, not by hope."""
+    assert s.initial_stop(100.0, 80.0) == pytest.approx(92.0)      # the 8% cap binds
+    assert s.initial_stop(100.0, 96.5) == pytest.approx(96.5)      # the contraction low is tighter
 
 
 def test_a_stalled_pyramid_is_four_weeks_of_sessions_not_days():

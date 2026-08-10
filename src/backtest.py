@@ -47,6 +47,7 @@ TAIL = 280
 T10 = 10                # §3.2: every MCN ranking window ends 10 trading days ago
 BENCH = os.environ.get("BENCHMARK", "VOO.US")
 DELISTED_AFTER = 5      # sessions without a bar before a holding is treated as gone
+CALENDAR_HORIZON = 100  # a scheduled report we can believe in — one quarter (check.py allows 110)
 
 
 # =============================================================================== data
@@ -341,18 +342,18 @@ def simulate(frame, cfg):
                 continue
 
             nxt = _next_report(frame["reports"].get(tk), day)
-            if nxt is not None:
-                conf["blackout_decisions"] += 1
+            conf["blackout_decisions"] += 1
+            if _knowable(nxt, day):
                 conf["blackout_known"] += 1
                 if sg.trading_days_between(day, nxt) <= 1 and \
                         sg.holds_through_earnings(cl, p["avg_cost"], cushion=cfg["cushion"]) is False:
                     pending[tk] = "earnings"
                     continue
-            else:
-                conf["blackout_decisions"] += 1
 
             # ---- pyramid: adds arm only once confirmed, both limits at the ceiling (§3.2)
-            if state["pyramid_armed"] and p["step"] < 3 and not _blacked_out(frame, tk, day):
+            add_nxt = _next_report(frame["reports"].get(tk), day)
+            if state["pyramid_armed"] and p["step"] < 3 and not (
+                    add_nxt is not None and sg.in_blackout(day, add_nxt)):
                 for order in sg.pyramid_orders(p["pivot"], ceiling=cfg["pyramid_ceiling"]):
                     if order["step"] <= p["step"] or hi < order["trigger"]:
                         continue
@@ -407,7 +408,10 @@ def simulate(frame, cfg):
                 pivot = base["pivot"]
                 if fired.get(tk) == round(float(pivot), 4):
                     continue                              # this order already filled once
-                if _blacked_out(frame, tk, day):
+                nxt = _next_report(frame["reports"].get(tk), day)
+                conf["blackout_decisions"] += 1
+                conf["blackout_known"] += 1 if _knowable(nxt, day) else 0
+                if nxt is not None and sg.in_blackout(day, nxt):
                     continue                              # §3.3: the wall cancels resting orders
                 hi, op = H[t, j], O[t, j]
                 if np.isnan(hi) or hi < pivot:
@@ -498,10 +502,18 @@ def _next_report(reports, day):
     return reports[i] if i < len(reports) else None
 
 
-def _blacked_out(frame, ticker, day):
-    """§3.3: no entries and no adds within 5 trading days of a scheduled report."""
-    nxt = _next_report(frame["reports"].get(ticker), day)
-    return nxt is not None and sg.in_blackout(day, nxt)
+def _knowable(nxt, day, horizon=CALENDAR_HORIZON):
+    """Did we actually know when this name next reports — or just find *a* date?
+
+    Coverage has to mean the second thing. The `earnings` ledger reaches back only as far as the
+    calendar sweep has run, so on any earlier date the "next report" it returns is whatever the
+    modern calendar holds — often years ahead. `in_blackout` correctly declines to fire on a date
+    that far out, so nothing is wrongly blocked; but counting it as coverage told the conformance
+    table the blackout was enforceable over 99.9% of a window where it was mostly unenforceable.
+    A clause that reports itself covered when it is blind is the exact failure this table exists
+    to catch, so the horizon is one quarter.
+    """
+    return nxt is not None and (nxt - day).days <= horizon
 
 
 # =============================================================================== conformance
