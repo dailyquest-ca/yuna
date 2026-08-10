@@ -25,6 +25,7 @@ two-thirds through — the same discipline the fundamentals sweep learned the ha
     YEARS=10                           bar depth
     TICKERS=A.US,B.US                  limit the target set
     SWEEP_LIMIT=200                    largest N by market cap
+    DELISTED_ONLY=true                 target the dead census (their filings, for M4)
 """
 import os, sys, json, datetime as dt
 import numpy as np
@@ -47,6 +48,7 @@ BATCH = 500
 WAL_CEILING = int(os.environ.get("WAL_CEILING_MB", "1500")) * 1024 * 1024
 WAL_MAX_WAIT = int(os.environ.get("WAL_MAX_WAIT_S", "180"))
 RESWEEP = os.environ.get("RESWEEP", "false").lower() in ("1", "true", "yes")
+DELISTED_ONLY = os.environ.get("DELISTED_ONLY", "false").lower() in ("1", "true", "yes")
 
 
 def targets(cur, since=None):
@@ -59,6 +61,17 @@ def targets(cur, since=None):
     only = [t.strip() for t in os.environ.get("TICKERS", "").split(",") if t.strip()]
     if only:
         return only
+    if DELISTED_ONLY:
+        # The other half of the survivorship fix. The delisted pass stored bars but no filings, so
+        # M4 is unknown for all 2,031 of them — and an unknown M4 is not a pass, so not one of them
+        # could ever be entered. The dead were in the census and still unbuyable, which corrects the
+        # ranking pool and leaves the bias that matters untouched.
+        cur.execute("""select u.ticker from universe u
+                        where u.kind='stock' and u.status='delisted'
+                          and not exists (select 1 from fundamentals f where f.ticker = u.ticker)
+                        order by u.ticker""")
+        dead = [r[0] for r in cur.fetchall()]
+        return dead[:SWEEP_LIMIT] if SWEEP_LIMIT else dead
     cur.execute("""select ticker from universe
                    where kind='stock' and (in_l0 or is_holding)
                    order by market_cap_usd desc nulls last""")

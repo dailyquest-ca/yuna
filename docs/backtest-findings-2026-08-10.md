@@ -95,6 +95,41 @@ moment. What caps the right tail is the stop — see §4.)*
 
 ---
 
+## 2b. The hair-trigger ruling, priced
+
+Zak ruled on 2026-08-10 that a name inside its confirmation window waits it out. Both readings were
+run over identical data (`backtest_runs` 15 and 16) so the ruling could be measured rather than
+argued.
+
+| | **Ruling: wait out window** | Rejected: cut while pending |
+|---|---:|---:|
+| CAGR | −0.73% | **−0.28%** |
+| Total P&L | −$12,711 | **−$5,012** |
+| Expectancy / trade | −0.434% | **−0.361%** |
+| Win rate | **29.0%** | 27.0% |
+| Max drawdown | −12.57% | **−12.17%** |
+| Average loss | −2.95% | **−2.66%** |
+
+The ruling costs about **$7,699 over nine years, 0.45pp of CAGR** — and the mechanism is visible
+bucket by bucket:
+
+| Bucket | Ruling | Rejected | Δ for waiting |
+|---|---:|---:|---:|
+| `unconfirmed` | 95 exits, −$18,737 | 151 exits, −$25,244 | **+$6,507** |
+| `stop` | 129 exits, −$21,214 | 120 exits, −$16,625 | **−$4,589** |
+| `stalled` | +$31,028 | +$31,610 | −$582 |
+
+**Waiting does not avoid the loss, it relocates it.** Fewer names are cut at −1.73%; those held run
+to the −7.6% stop instead.
+
+Two qualifications. The expectancy difference is 0.073pp against a standard error near 0.25pp on
+400 trades — directionally the ruling costs money, statistically it is a coin flip. And **both
+variants lose money**, which is the finding that matters: there is no answer to *when to cut a
+pending breakout* that pays, because the entry is what is wrong. Proposal A deletes the question
+instead of answering it.
+
+---
+
 ## 3. MCN does not rank
 
 Win rate and outcome by entry score, within the enterable band:
