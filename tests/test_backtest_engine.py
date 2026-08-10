@@ -177,6 +177,26 @@ def test_costs_are_charged_and_gross_beats_net(confirmed_run):
     assert all(t["pnl_gross_usd"] > t["pnl_usd"] for t in trades)
 
 
+# --------------------------------------------------------------------------- the union date grid
+
+def test_a_name_that_missed_a_session_is_still_ranked():
+    """Rules read a name's own bars, never a slice of the union date grid.
+
+    The grid holds every date any US ticker printed, so a name is NaN on sessions it did not
+    trade. The first real run of this engine demanded a hole-free 280-row grid window and got
+    **zero rank dates in 2,310 days** — every name in the universe failed it, silently, and the
+    run came back with a clean 0 trades and no error.
+    """
+    f, breakout = frame()
+    j = f["cols"].index("N00.US")
+    for k in (breakout - 200, breakout - 150, breakout - 120):
+        for key in ("open", "high", "low", "close", "adj", "vol"):
+            f["arrays"][key][k, j] = np.nan               # three sessions it simply did not trade
+    trades, equity, conf = bt.simulate(f, cfg())
+    assert conf["rank_dates"] > 0, "the ranker produced nothing at all"
+    assert conf["entries"] >= 1, "a name with three missing sessions fell out of the universe"
+
+
 # --------------------------------------------------------------------------- the freeze
 
 def test_an_unconfirmed_breakout_that_holds_the_pivot_is_not_exited():

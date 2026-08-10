@@ -80,6 +80,7 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: run
+        id: engine
         run: set -o pipefail; python src/backtest.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -106,8 +107,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NUMBER: ${{ github.event.pull_request.number }}
 
+      # Only when the ENGINE died. A conformance failure exits the report step non-zero on
+      # purpose; routing that through the autopsy wrote a `runs` row claiming the job died
+      # pre-heartbeat, seconds after the same job had finished and written its own amber.
       - name: autopsy on failure
-        if: failure()
+        if: failure() && steps.engine.outcome == 'failure'
         run: python src/report_fail.py backtest /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

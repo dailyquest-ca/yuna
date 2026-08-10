@@ -114,17 +114,31 @@ def eps_as_of(eps_entry, day):
 
 
 # =============================================================================== the weekly rank
-def rank(frame, t, cols, arrays):
+def own_bars(valid, j, t, back=0, n=TAIL):
+    """The last `n` bars **this name actually printed**, ending `back` sessions before `t`.
+
+    Not a slice of the date grid. The grid is the union of every ticker's dates, so a name is NaN
+    on any session it did not trade, and a fixed grid slice therefore mixes "no bar" into a window
+    the rules read as prices. Taking a name's own bars is what `rank.py` does — it loads one
+    series per ticker — and it is the difference between 2,310 rank dates and zero: the first run
+    of this engine required a hole-free grid window and no name in ten years ever had one.
+
+    The 2026-07-31 findings recorded the same shape from the other direction: one TSX listing put
+    TSX-only dates into the union index and every US name silently lost its volume baseline.
+    """
+    v = valid[j]
+    k = int(np.searchsorted(v, t, side="right")) - back
+    return v[k - n:k] if k >= n else None
+
+
+def rank(frame, t, cols, arrays, valid):
     """L1-M as `rank.py` builds it: M2 + M4, ranked by MCN, top 150 — same calls, same order.
 
     Gates and stops read current price; MCN reads windows ending 10 sessions ago (§3.2, "rank is
-    calm; protection is real-time"). Both slices are 280 bars, so both are constant-cost.
+    calm; protection is real-time"). Both slices are 280 of the name's own bars, so both are
+    constant-cost.
     """
     O, H, L, C, A, V = (arrays[k] for k in ("open", "high", "low", "close", "adj", "vol"))
-    lo_full, lo_mcn = max(0, t - TAIL + 1), max(0, t - T10 - TAIL + 1)
-    hi_mcn = t - T10 + 1
-    if hi_mcn <= lo_mcn:
-        return None
 
     # ---- L0 liquidity, evaluated on the bars of the day. Not a §3.2 rule: it is the census, and
     # it is what makes a delisted name leave the universe on the day its bars stop.
@@ -141,10 +155,12 @@ def rank(frame, t, cols, arrays):
     m2, bases, group_returns = {}, {}, {}
     for j in idx:
         tk = cols[j]
-        cl_f, hi_f, lo_f = C[lo_full:t + 1, j], H[lo_full:t + 1, j], L[lo_full:t + 1, j]
-        if np.isnan(cl_f).any():
-            continue                                     # a hole in the window is not a verdict
-        ac, hh, ll, cc, vv = (X[lo_mcn:hi_mcn, j] for X in (A, H, L, C, V))
+        f_rows = own_bars(valid, j, t)
+        m_rows = own_bars(valid, j, t, back=T10)
+        if f_rows is None or m_rows is None:
+            continue                                     # not yet 280 of its own bars
+        cl_f, hi_f, lo_f = C[f_rows, j], H[f_rows, j], L[f_rows, j]
+        ac, hh, ll, cc, vv = (X[m_rows, j] for X in (A, H, L, C, V))
 
         m2[tk] = sg.trend_template(cl_f)
         bases[tk] = sg.base_scan(hi_f, lo_f, cl_f)
@@ -199,6 +215,8 @@ def simulate(frame, cfg):
 
     # the 50 sessions *before* each day — the breakout day is the test, never its own baseline
     v50 = pd.DataFrame(V).shift(1).rolling(50, min_periods=25).mean().values
+    # every name's own printed sessions, once. Rules read these rows, never grid slices.
+    valid = [np.flatnonzero(~np.isnan(C[:, j])) for j in range(len(cols))]
 
     gate_weeks, gate_states = _gate_series(frame["spx"])
 
@@ -261,7 +279,7 @@ def simulate(frame, cfg):
 
         # ---- weekly re-rank (§3.0 cadence: M2 and M4 weekly, MCN weekly)
         if pd.Timestamp(day).weekday() == 4 or queue is None:
-            got = rank(frame, t, cols, arrays)
+            got = rank(frame, t, cols, arrays, valid)
             if got is not None:
                 queue = got
                 conf["rank_dates"] += 1
@@ -380,8 +398,10 @@ def simulate(frame, cfg):
                 # base broken by the very breakout it is supposed to trigger — the scan says
                 # "spent" the moment a high clears pivot x 1.005 — so nothing but marginal touches
                 # could ever fill.
-                a, b = max(0, t - TAIL), t
-                base = sg.base_scan(H[a:b, j], L[a:b, j], C[a:b, j])
+                rows = own_bars(valid, j, t, back=1)
+                if rows is None:
+                    continue
+                base = sg.base_scan(H[rows, j], L[rows, j], C[rows, j])
                 if not base["valid"]:
                     continue
                 pivot = base["pivot"]
