@@ -288,7 +288,7 @@ backtests import from here."* Phase 2 is the commit that makes that sentence tru
 | Phase | State | What landed |
 |---|---|---|
 | 0 | **done** | 5.8 min/run on fixed tails; `tests/test_tail_equivalence.py` pins the tail against the full series, including one test that truncates below 266 bars and asserts divergence |
-| 1 | **partly done** | VOO in the universe as `kind='index'` (untradeable by construction) · VOO + GSPC backfilled to **2016-08-12** with adjusted closes · **still to do:** the delisted census, and `earnings` report dates backfilled from `Earnings.History` |
+| 1 | **done** | VOO in the universe as `kind='index'` (untradeable by construction) · VOO + GSPC backfilled to **2016-08-12** with adjusted closes · `earnings` lifted from 15,391 rows starting 2025-06-27 to **118,531 starting 2015-01-06**, out of `raw_doc->Earnings->History` with no vendor call · **delisted census ingested: 32,611 dead US common stocks screened, 2,031 kept against L0's own liquidity floor, 30,578 dropped, 2.4M bars.** The tradeable universe went from 3,244 names to 5,276 — roughly 40% of the historical tape had been missing |
 | 2 | **done** | `backtest.py` is a driver; `confirmation_state`, `stalled_pyramid`, `enterable` and `m4_acceleration` moved into `signals.py`; `arming.py` and `fundamentals.py` call them too |
 | 3 | **done** | 15-clause conformance table with per-clause coverage, written to `stats.conformance` |
 | 4 | **to do** | the differential test against the `armed` ledger |
