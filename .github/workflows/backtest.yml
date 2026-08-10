@@ -30,6 +30,9 @@ on:
       start_nav:
         description: 'starting capital, USD'
         default: '200000'
+      hair_trigger_pending:
+        description: 'exit a pending breakout that closes below its pivot (rejected reading — ruled 2026-08-10 to wait out the window). Set true only to price the ruling.'
+        default: 'false'
       dry_run:
         description: 'compute everything, write nothing'
         default: 'false'
@@ -89,6 +92,7 @@ jobs:
           START_DATE: ${{ inputs.start_date }}
           END_DATE: ${{ inputs.end_date }}
           START_NAV: ${{ inputs.start_nav || '200000' }}
+          HAIR_TRIGGER_PENDING: ${{ inputs.hair_trigger_pending || 'false' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
       # The delta against the pinned baseline. Exits non-zero on a conformance failure only, so a
