@@ -1,48 +1,111 @@
 name: backtest
+# The verification instrument, on four doors (docs/backtest-plan-2026-08-10.md, Phase 5):
+#
+#   1. every logic change — the paths filter below, on pull requests and on main
+#   2. on demand        — workflow_dispatch, for "I am about to suggest a change" and for
+#                         "I just want to see that it still does what I think it does"
+#   3. behaviour git cannot see — 52 config keys live in the database; the run stamps the digest
+#                         it decided under and `check` ambers when the newest run's stamp is stale
+#   4. weekly           — the Saturday chain, so the answer is never more than seven days old
+#
+# **It reports; it does not gate on performance.** The build fails only when a CONFORMANCE clause
+# fails — an entry below the MCN floor, an exit reason §3.2 does not name, a clause no data covered.
+# A merge gate on CAGR is a standing instruction to fit the parameters to history, and it would
+# corrupt the one instrument the parked ablation grid has to be able to trust.
 on:
   workflow_dispatch:
     inputs:
       label:
         description: 'run label'
-        default: 'momentum v1'
+        default: 'law-v0'
+      variant:
+        description: 'variant recorded in params'
+        default: 'law-v0'
+      start_date:
+        description: 'window start (blank = all stored bars, 2016-08)'
+        default: ''
+      end_date:
+        description: 'window end (blank = the last bar)'
+        default: ''
       start_nav:
-        description: 'starting NAV in CAD'
-        default: '200754.38'
-      vol_mode:
-        description: 'fill_then_exit (plan §5.1) | confirm_first'
-        default: 'fill_then_exit'
-      breakeven_step:
-        description: 'pyramid step at which the stop moves to breakeven (§3.2 = 3)'
-        default: '3'
-      mcn_exit:
-        description: 'MCN below which a position exits (§3.3 = 55)'
-        default: '55'
-      min_hold_days:
-        description: 'minimum intended hold; stops always exempt (§1 = one week)'
-        default: '0'
+        description: 'starting capital, USD'
+        default: '200000'
       dry_run:
-        description: 'simulate, write nothing'
+        description: 'compute everything, write nothing'
         default: 'false'
+  pull_request:
+    paths:
+      - 'src/signals.py'         # the law itself
+      - 'src/backtest.py'        # the driver
+      - 'src/backtest_report.py'
+      - 'src/arming.py'          # what the differential test is measured against
+      - 'src/score.py'
+      - 'src/rank.py'
+      - 'src/fundamentals.py'
+      - 'migrations/**'          # config seeds move behaviour
+      - 'docs/yuna_plan.md'      # the law's text — a plan edit is a logic change
+      - '.github/workflows/backtest.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/signals.py'
+      - 'src/backtest.py'
+      - 'src/backtest_report.py'
+      - 'src/arming.py'
+      - 'src/score.py'
+      - 'src/rank.py'
+      - 'src/fundamentals.py'
+      - 'migrations/**'
+      - 'docs/yuna_plan.md'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Not `yuna-writes`: this job touches `backtest_*` and nothing else (§4.2), so it cannot race the
+# chain. One run per ref is enough — a second push supersedes the first.
+concurrency:
+  group: backtest-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/backtest.py 2>&1 | tee /tmp/job.out
+
+      - name: run
+        run: set -o pipefail; python src/backtest.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          LABEL: ${{ inputs.label || 'momentum v1' }}
-          START_NAV: ${{ inputs.start_nav || '200754.38' }}
-          VOL_MODE: ${{ inputs.vol_mode || 'fill_then_exit' }}
-          BREAKEVEN_STEP: ${{ inputs.breakeven_step || '3' }}
-          MCN_EXIT: ${{ inputs.mcn_exit || '55' }}
-          MIN_HOLD_DAYS: ${{ inputs.min_hold_days || '0' }}
+          LABEL: ${{ inputs.label || format('ci · {0}', github.ref_name) }}
+          VARIANT: ${{ inputs.variant || 'law-v0' }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          START_NAV: ${{ inputs.start_nav || '200000' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+
+      # The delta against the pinned baseline. Exits non-zero on a conformance failure only, so a
+      # red build here always means "the engine broke a rule", never "the number went down".
+      - name: report
+        id: report
+        run: python src/backtest_report.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REPORT_PATH: /tmp/report.md
+
+      - name: comment on the pull request
+        if: always() && github.event_name == 'pull_request' && hashFiles('/tmp/report.md') != ''
+        run: gh pr comment "$NUMBER" --body-file /tmp/report.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUMBER: ${{ github.event.pull_request.number }}
+
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py backtest /tmp/job.out
