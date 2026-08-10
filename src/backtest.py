@@ -41,6 +41,7 @@ VARIANT = os.environ.get("VARIANT", "law-v0")
 LAW_STAMP = os.environ.get("LAW_STAMP", "2026-08-09")
 START_DATE = os.environ.get("START_DATE") or None
 END_DATE = os.environ.get("END_DATE") or None
+HAIR_TRIGGER_PENDING = os.environ.get("HAIR_TRIGGER_PENDING", "false").lower() in ("1", "true", "yes")
 
 WARMUP = 280            # >= 266, the deepest window any rule reads (see tests/test_tail_equivalence)
 TAIL = 280
@@ -317,10 +318,10 @@ def simulate(frame, cfg):
             # ---- §3.2 breakout confirmation, judged at EOD on the sessions since entry
             k = t - p["entry_idx"] + 1
             window = range(p["entry_idx"], min(p["entry_idx"] + sg.CONFIRM_SESSIONS, t + 1))
-            state = sg.confirmation_state([V[i, j] for i in window],
-                                          [v50[i, j] for i in window],
-                                          closes=[C[i, j] for i in window],
-                                          pivot=p["pivot"])
+            state = sg.confirmation_state(
+                [V[i, j] for i in window], [v50[i, j] for i in window],
+                closes=[C[i, j] for i in window], pivot=p["pivot"],
+                hair_trigger_while_pending=cfg["hair_trigger_while_pending"])
             p["confirmed"] = state["confirmed"]
 
             if not on:
@@ -624,7 +625,10 @@ def main():
                            mcn_exit=float(thresholds.get("hold", 55)),
                            cushion=float(config(cur, "holdthrough_cushion", 1.08)),
                            max_stop=0.08, limit_over=0.02, pyramid_ceiling=1.05,
-                           spread_bps=(5.0, 15.0), addv_break=50_000_000.0)
+                           spread_bps=(5.0, 15.0), addv_break=50_000_000.0,
+                           # Ruled 2026-08-10: wait out the window. The rejected reading stays
+                           # runnable so the ruling can be priced against its alternative.
+                           hair_trigger_while_pending=HAIR_TRIGGER_PENDING)
                 # Behaviour lives in the database as well as in git, so the run stamps what it
                 # ran under. A config change with no re-test is then a visible condition rather
                 # than a silent one (Phase 5 of the backtest plan).
@@ -666,7 +670,8 @@ def main():
                                                               thin=cfg["spread_bps"][1]),
                                          addv_break=cfg["addv_break"]),
                               max_names=cfg["max_names"], sleeve_cap=cfg["sleeve_cap"],
-                              min_mcn=cfg["min_mcn"])
+                              min_mcn=cfg["min_mcn"],
+                              hair_trigger_while_pending=HAIR_TRIGGER_PENDING)
                 with conn.cursor() as cur:
                     cur.execute("""insert into backtest_runs(label,params,start_date,end_date,
                           trading_days,start_nav,end_nav,total_return,cagr,max_drawdown,max_dd_date,

@@ -132,7 +132,8 @@ def frame(hero_volume_multiple=3.0, hero_after=None, names=NAMES, days=DAYS):
 def cfg(**over):
     base = dict(start_nav=200_000.0, max_names=4, sleeve_cap=0.40, min_mcn=70.0, mcn_exit=55.0,
                 cushion=1.08, max_stop=0.08, limit_over=0.02, pyramid_ceiling=1.05,
-                spread_bps=(5.0, 15.0), addv_break=50_000_000.0)
+                spread_bps=(5.0, 15.0), addv_break=50_000_000.0,
+                hair_trigger_while_pending=False)      # ruled 2026-08-10: wait out the window
     base.update(over)
     return base
 
@@ -214,6 +215,18 @@ def test_an_unconfirmed_breakout_that_closes_back_below_the_pivot_exits():
     trades, equity, conf = bt.simulate(f, cfg())
     assert any(t["exit_reason"] == "unconfirmed" for t in trades), \
         "a failed breakout closed back below its pivot and the engine held it"
+
+
+def test_the_ruling_makes_the_position_wait_a_session_longer():
+    """Ruled 2026-08-10. The same failed breakout, both readings — the ruling holds it through the
+    confirmation window and exits a session later, so a name that confirms late is not thrown away
+    for dipping under its pivot on day two. The stop is what bounds the wait."""
+    f, _ = frame(hero_volume_multiple=0.5, hero_after=0.97)
+    ruled, _, _ = bt.simulate(f, cfg())
+    f, _ = frame(hero_volume_multiple=0.5, hero_after=0.97)
+    cut, _, _ = bt.simulate(f, cfg(hair_trigger_while_pending=True))
+    assert [t["exit_reason"] for t in ruled] == [t["exit_reason"] for t in cut] == ["unconfirmed"]
+    assert ruled[0]["bars_held"] > cut[0]["bars_held"]
 
 
 def test_a_frozen_position_never_pyramids(confirmed_run):
