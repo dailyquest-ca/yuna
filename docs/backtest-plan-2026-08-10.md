@@ -15,11 +15,11 @@ review in `backtest-spec-review-2026-08-10.md` and Zak's rulings the same day.*
 | 4 | **The backtest calls the real logic.** One source of truth | `backtest.py` becomes a driver over `signals.py`. This is the load-bearing decision |
 | 5 | **It runs on every logic or behaviour change, and on demand** | Phase 5 |
 
-**One caveat that follows from ruling 3, to be printed on every run:** the live book is a CAD NAV
-holding CNQ.TO among other things. A USD-native backtest is therefore *"what the US sleeve would
-have done, in USD"* — it is not comparable line-for-line to the live NAV number, and no letter
-should imply it is. That is the right trade: we are testing the rules, not reconstructing the
-account.
+**Settled the same day (second pass):** non-US holdings are out of scope for the instrument —
+the backtest is USD-native, benchmarked on VOO, and does not attempt to reconstruct the live
+account. Survivorship is **in scope** (see Phase 1). Starting capital is **$200,000 USD**, the
+window starts **2016-08**, and **both sleeves ride the same rails** — same triggers, same delta
+report, same benchmark, the compounder side still graded indicative-only per §4.8.
 
 ---
 
@@ -33,21 +33,36 @@ guard in Phase 2 exists to keep it that way after we've all forgotten why.
 
 ---
 
-## Phase 0 — the spike (measure before designing) · half a day
+## Phase 0 — the speed spike · **DONE, 2026-08-10**
 
-One real unknown: **speed**. Today's `rank_week` is vectorised across all names at once and runs
-the whole 500-day test in **0.6–1.4 minutes** (`runs` table, 2026-07-31). `signals.py` is per-name.
-A ten-year weekly rank is roughly 520 rank-dates × ~2,800 names ≈ **1.5M evaluations**, and
-`setup_proximity` → `atr` currently convolves the whole price history on each call.
+The one real unknown was whether per-name `signals.py` calls could drive a ten-year run at all.
+Today's `rank_week` is vectorised across every name at once and does the two-year test in
+**0.6–1.4 minutes**; a ten-year weekly rank is ~520 rank-dates × ~2,840 names ≈ **1.5M
+evaluations**, each calling `trend_template` + `base_scan` + `momentum_quality` +
+`setup_proximity`. Measured single-threaded on a decade of synthetic bars:
 
-Port one year of the rank loop onto `signals.py`, time it, extrapolate. Decision rule:
+| | per name | ten-year run |
+|---|---|---|
+| Naive port — pass the whole series to date | 264 µs | **8.1 min** |
+| **Fixed 280-bar tail** | 225 µs | **5.8 min** |
 
-- **Under ~15 minutes** → done, build Phase 2 as written, no optimisation.
-- **Over** → optimise **inside `signals.py`** (incremental ATR, cached rolling means, accept a
-  window slice instead of the full series). Production gets the same speedup. **Forking a fast copy
-  into the backtest is not on the table** — that is the failure this whole plan exists to end.
+**Verdict: build Phase 2 as written. No optimisation needed, and `signals.py` is not touched for
+speed.** Call it ~10 minutes on an Actions runner plus bar loading — affordable on every push, with
+no fast/slow CI split.
 
-Deliverable: a number in the PR body, and a go/no-go on optimisation.
+**Design decision that falls out of it:** the driver passes each rule a **fixed 280-bar tail**, not
+the growing slice. No rule reads deeper than 266 bars (`setup_proximity`'s 252-session ATR
+percentile plus ATR's own 14), and every output — M2's verdict, M3's `valid` / `state` / `broken` /
+`pivot` / `depth` / `contraction_low`, and all three MCN sub-scores — is **identical** on the tail
+and on the full 2,520-bar series. So the cost is constant in window length: a twenty-year run costs
+the same per rank date as a two-year one. `WARMUP = 280` already carries exactly this number, for
+exactly this reason.
+
+That equivalence is now pinned in CI rather than remembered — **`tests/test_tail_equivalence.py`**,
+26 assertions over five unrelated price paths, plus one test that truncates *below* 266 and asserts
+the answers genuinely diverge, so the guard cannot pass vacuously. A future rule that starts reading
+deeper than 280 bars would otherwise break the driver silently: the run still completes, with
+quietly different answers.
 
 ---
 
@@ -59,10 +74,46 @@ Deliverable: a number in the PR body, and a go/no-go on optimisation.
 | **`GSPC.INDX` backfill to 2016** | Currently starts **2023-08-01** — it, not the stock bars, is what caps the window at two years | Optional secondary reference; VOO is the yardstick |
 | **Position returns from `adj_close` ratios; triggers, pivots and stops from raw OHLC** | `corporate_actions` holds dividends only from **2025-06-30** (2,084 rows), so dividends cannot come from there | Negligible for 6-day momentum holds; **material** for 290-day compounder holds. Doing it once, correctly, costs nothing extra |
 | **`earnings` report dates back to 2016 from `raw_doc->'Earnings'->'History'`** | The `earnings` table starts **2025-06-27** (`CAL_BACK = 400`). Without this the blackout and M4 are unenforceable across most of the window | 2,949 tickers, avg 98.8 quarters, `reportDate` per quarter. **No new vendor call** |
-| **Survivorship — decision required** | `universe` has 3,244 active and **2** delisted, and `backtest.py` filters `status='active'` | See "Open decisions" below |
+| **Survivorship — in scope (ruled 2026-08-10)** | `universe` has 3,244 active and **2** delisted, and `backtest.py` filters `status='active'`, so the sim can never buy a name that later died | See below — cheaper than the review implied |
 
 Bars themselves need nothing: **6,410,951 rows, 3,268 tickers, back to 2016-08-05**, with 2,050
 tickers carrying the full depth.
+
+### Survivorship, and why it costs less than it looks
+
+The bias: we test on today's list of living companies. Every name that went bankrupt, got acquired
+or was delisted between 2016 and now is simply absent, so the simulation cannot buy one. Momentum
+buys names printing new highs, and some of those crash and delist — testing only on survivors
+deletes the worst tail from the sample and flatters every number in every run to date.
+
+The review implied a large rebuild. Reading the code more carefully, it is mostly one line plus one
+ingest, because **L0 membership in the backtest is already derived from bars, not from a stored
+flag**. `rank_week` computes it live:
+
+```python
+eff = live & (nbars >= 126) & (close[-1] >= 5) & (addv >= 10_000_000) & (nbars >= 210)
+```
+
+That is a point-in-time census by construction. A name with no bar on date *t* has `live = False`
+and drops out of the ranking automatically on the day it stops trading. The only look-ahead is the
+SQL above it — `where u.status='active' and (u.in_l0 or u.is_holding)` — which deletes the dead
+before the census ever sees them.
+
+So the work is three items, in order of size:
+
+1. **Ingest the delisted census.** `get_exchange_tickers(exchange_code='US', delisted=True)` →
+   `universe` rows with `status='delisted'`, then one EOD history call each. The budget is not a
+   constraint: **100,000 requests/day, 11 used today**, so even a five-figure delisted list lands
+   inside a single day.
+2. **Drop the `status='active'` filter** in the backtest loader, and let `eff` do the census.
+3. **Handle a position whose bars stop** — the one genuine new edge case. Today the daily mark
+   carries `last_mark` forward when a bar is missing, so a delisted holding would be held at its
+   final price forever and never exit. It needs an explicit rule: no bar for N sessions → exit at
+   the last close, `exit_reason = 'delisted'`. Without item 3, item 1 makes the numbers *better*
+   rather than worse, which is the trap.
+
+Acceptance: `select count(*) from universe where status='delisted'` is four figures, not 2; and a
+law-v0 run reports a non-zero `delisted` exit bucket.
 
 ---
 
@@ -202,14 +253,14 @@ Worth writing down now, so the first green run isn't over-read:
 
 ---
 
-## Open decisions
+## Decisions — all settled 2026-08-10
 
-| # | Decision | Recommendation |
+| # | Decision | Ruling |
 |---|---|---|
-| 1 | **Survivorship** — scope it in, or quantify and disclose? | **Quantify now, scope in later as its own phase.** Rebuilding a point-in-time L0 census for 2016–2026 and pulling bars for dead names is plausibly the largest single item in the programme, and it would block everything behind it. Start recording census membership from this month so the bias shrinks going forward, and print the count of names that left L0 during the window in `stats.biases` |
-| 2 | **Starting capital, in USD** | A round **$200,000 USD**. It is a scale factor on nothing that matters — per-trade stats and exposure percentages are the outputs — and a round number stops anyone reading the end NAV as a forecast |
-| 3 | **Window start** | **2016-08**, the full depth of the bars. Report the first tradeable date after warm-up (~280 bars) on every run |
-| 4 | **Does the compounder sleeve ride the same rails?** | **Yes** — same triggers, same delta report, same VOO benchmark, still graded indicative-only per §4.8. It is already a driver over `signals.py`, so it costs almost nothing |
+| 1 | Survivorship | **In scope.** Delisted census ingested, `status` filter dropped, delisted-exit rule added |
+| 2 | Starting capital | **$200,000 USD.** A scale factor on nothing that matters — the outputs are per-trade statistics and exposure percentages |
+| 3 | Window start | **2016-08**, the full depth of the bars. Every run reports its first tradeable date after the 280-bar warm-up |
+| 4 | Both sleeves on the same rails | **Yes.** Same triggers, same delta report, same VOO benchmark; the compounder side stays graded indicative-only per §4.8 |
 
 ---
 
@@ -217,8 +268,8 @@ Worth writing down now, so the first green run isn't over-read:
 
 | Phase | What | Size |
 |---|---|---|
-| 0 | Speed spike | half a day |
-| 1 | VOO + backfills + adj_close returns + earnings history | one afternoon |
+| 0 | Speed spike | **done — 5.8 min/run, no optimisation needed** |
+| 1 | VOO + backfills + adj_close returns + earnings history + delisted census | one afternoon, plus the delisted ingest |
 | 2 | `backtest.py` → driver over `signals.py`; three new `signals.py` functions; structural guard | the main build |
 | 3 | law-v0 + conformance table with coverage + acceptance SQL | with Phase 2 |
 | 4 | Differential test against the `armed` ledger, nightly | small, high value |
@@ -226,6 +277,9 @@ Worth writing down now, so the first green run isn't over-read:
 | 6 | Baseline + delta report; letter line | small |
 
 Phase 2 is the only large one, and most of its diff is deletion.
+
+One line in `signals.py`'s own docstring already claims *"the nightly job, the weekly rank and both
+backtests import from here."* Phase 2 is the commit that makes that sentence true.
 
 **Still parked, and now for a sharper reason:** the exit-rule ablation grid. A grid searched against
 a baseline that enters names at MCN 15, over one bull regime, with no costs, on a survivor-only
