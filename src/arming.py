@@ -285,11 +285,15 @@ def classify_breakouts(conn, hb, bars, sessions, multiple):
             if idx is None:
                 continue
             window = b[idx:idx + sessions]
-            ok = sg.breakout_confirmed([w["vol"] for w in window],
-                                       [volume_baseline(b, idx + j) for j in range(len(window))],
-                                       multiple=multiple)
-            expired = len(b) - idx >= sessions
-            new_state = True if ok else (False if expired else None)
+            # One state machine, shared with the backtest (§3.2). The nightly keeps its current
+            # hair-trigger timing — it fires from `arm_exits` once the window has closed, not while
+            # the name is still pending — until Zak rules on the divergence noted in
+            # `signals.confirmation_state`.
+            state = sg.confirmation_state([w["vol"] for w in window],
+                                          [volume_baseline(b, idx + j) for j in range(len(window))],
+                                          sessions=sessions, multiple=multiple,
+                                          hair_trigger_while_pending=False)
+            new_state = state["confirmed"]
             if not dry():
                 cur.execute("""update book set confirmed=%s, confirm_deadline=%s, updated_at=now()
                                where id=%s""",

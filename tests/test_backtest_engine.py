@@ -1,0 +1,269 @@
+"""The backtest engine, run over hand-built bars.
+
+`simulate()` is pure — no database, no clock — so the properties that matter can be asserted
+instead of hoped for. These are not performance tests. Every assertion here is a §3.2 clause the
+old engine violated on real data, and each one is phrased so that the old engine would fail it:
+
+  * 211 of run 5's 296 trades entered below MCN 70, which "never tickets".
+  * 171 of them exited on `volume unconfirmed`, a rule the plan replaced with the freeze.
+  * Pyramid adds fired at +2.5%/+4.5% with no ceiling.
+
+A conformance table that no run can fail is decoration, so the last test builds a book the law
+forbids and asserts the table says so.
+"""
+import datetime as dt
+import sys
+import pathlib
+
+import numpy as np
+import pandas as pd
+import pytest
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+import backtest as bt                                                    # noqa: E402
+import signals as sg                                                     # noqa: E402
+
+DAYS = 460
+NAMES = 40
+LEGAL_EXITS = {"stop", "gap", "gate_off", "unconfirmed", "template", "score",
+               "earnings", "stalled", "delisted", "end_of_test"}
+
+
+def sessions(n=DAYS, start=dt.date(2024, 1, 1)):
+    out, d = [], start
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d)
+        d += dt.timedelta(days=1)
+    return out
+
+
+def rising(n, start=20.0, daily=0.0016, wobble=0.0):
+    """A clean uptrend — passes the trend template at every point past its warm-up."""
+    drift = start * np.exp(np.cumsum(np.full(n, daily)))
+    if wobble:
+        drift = drift * (1 + wobble * np.sin(np.arange(n) / 7.0))
+    return drift
+
+
+def with_base(n, breakout_at, *, base_len=30, depth=0.04):
+    """A strong rise, a peak that becomes the pivot, a short shallow base, then a breakout.
+
+    The base is deliberately short. §3.2 needs the pivot 25-120 sessions back on the breakout day,
+    and MCN reads a 90-day regression ending 10 sessions ago — a long flat base drags that slope
+    to zero and the name ranks below its own floor, which is realistic and useless as a fixture.
+    """
+    peak_at = breakout_at - base_len
+    close = rising(n, start=20.0, daily=0.0050)
+    pivot = float(close[peak_at])
+    shape = pivot * (1 - depth * np.sin(np.linspace(0, np.pi, base_len)) - 0.003)
+    close[peak_at + 1:breakout_at + 1] = shape
+    close[breakout_at:] = pivot * 1.03
+    high = close * 1.002
+    high[peak_at] = pivot                                            # the defining high
+    high[peak_at + 1:breakout_at] = np.minimum(high[peak_at + 1:breakout_at], pivot * 1.002)
+    high[breakout_at:] = close[breakout_at:] * 1.004
+    return high, close * 0.996, close, pivot
+
+
+def frame(hero_volume_multiple=3.0, hero_after=None, names=NAMES, days=DAYS):
+    """A cross-section: one leader that sets up and breaks out, a strong group behind it, and a
+    long tail of dull names — because MCN is percentile-based and a universe of identical uptrends
+    scores every one of them at the middle."""
+    dates = sessions(days)
+    breakout = days - 12
+    cols = [f"N{i:02d}.US" for i in range(names)]
+    industry = {}
+    O, H, L, C, A, V = ({} for _ in range(6))
+
+    for i, tk in enumerate(cols):
+        if i == 0:
+            h, l, c, pivot = with_base(days, breakout)
+            industry[tk] = "Steel"
+        elif i < 10:
+            c = rising(days, start=20.0 + i, daily=0.0026 + i * 1e-5)    # the leader's group
+            h, l = c * 1.004, c * 0.996
+            industry[tk] = "Steel"
+        else:
+            # dull: drifting sideways or down, and well off their own highs
+            c = rising(days, start=15.0 + i, daily=-0.0004 + (i % 3) * 0.0002, wobble=0.01)
+            h, l = c * 1.004, c * 0.996
+            industry[tk] = ["Utilities", "Tobacco", "Rails"][i % 3]
+        vol = np.full(days, 1_000_000.0 + i * 10_000)
+        if i == 0:
+            # A quiet base is half of what §3.2's setup score is looking for, and it is the
+            # difference between this name ranking 65 and ranking 77 — without the dry-up the
+            # leader never clears its own MCN floor and the fixture proves nothing.
+            #
+            # It stays quiet afterwards too. Letting volume revert to normal makes the *baseline*
+            # the dried-out one, so an ordinary session prints 1.6x it and the breakout confirms
+            # late — which is the rule behaving correctly and the fixture testing the wrong thing.
+            vol[breakout - 30:] *= 0.4
+            vol[breakout] = 1_000_000.0 * hero_volume_multiple
+            if hero_after is not None:
+                c, h, l = c.copy(), h.copy(), l.copy()
+                c[breakout + 1:] = hero_after * pivot
+                h[breakout + 1:] = c[breakout + 1:] * 1.002
+                l[breakout + 1:] = c[breakout + 1:] * 0.998
+        o = c * 0.999
+        if i == 0:
+            # The breakout day opens *below* the pivot and trades up through it, which is what a
+            # resting stop-limit is for. Opening above pivot x 1.02 is a gap through the limit and
+            # fills nothing — correct behaviour, and useless as a fixture for everything after it.
+            o[breakout] = pivot * 0.995
+            l[breakout] = pivot * 0.99
+        O[tk], H[tk], L[tk], C[tk], A[tk], V[tk] = o, h, l, c, c, vol
+
+    arrays = {k: np.column_stack([d[tk] for tk in cols])
+              for k, d in (("open", O), ("high", H), ("low", L),
+                           ("close", C), ("adj", A), ("vol", V))}
+    spx = pd.Series(rising(days, start=4000.0, daily=0.0006), index=dates)
+
+    # every name reports quarterly, always accelerating, always long before the window
+    eps_rd = np.array([dt.date(2023, 12, 1).toordinal() - 90 * k for k in range(12)])
+    eps_v = [40.0 - 2.0 * k for k in range(12)]
+    return dict(dates=dates, cols=cols, arrays=arrays, spx=spx,
+                bench_by_day={d: v for d, v in zip(dates, rising(days, 400.0, 0.0006))},
+                industry=industry, reports={}, gate_source="TEST",
+                eps={tk: (eps_rd, eps_v) for tk in cols}), breakout
+
+
+def cfg(**over):
+    base = dict(start_nav=200_000.0, max_names=4, sleeve_cap=0.40, min_mcn=70.0, mcn_exit=55.0,
+                cushion=1.08, max_stop=0.08, limit_over=0.02, pyramid_ceiling=1.05,
+                spread_bps=(5.0, 15.0), addv_break=50_000_000.0)
+    base.update(over)
+    return base
+
+
+@pytest.fixture(scope="module")
+def confirmed_run():
+    f, breakout = frame(hero_volume_multiple=3.0)
+    return bt.simulate(f, cfg()) + (breakout,)
+
+
+# --------------------------------------------------------------------------- it runs at all
+
+def test_the_engine_takes_the_breakout_it_is_given(confirmed_run):
+    trades, equity, conf, _ = confirmed_run
+    assert len(equity) == DAYS - bt.WARMUP
+    assert conf["entries"] >= 1, "the fixture's breakout was never taken — the fixture is wrong"
+
+
+def test_every_exit_reason_is_one_the_law_names(confirmed_run):
+    """§3.2 lists the exits. `volume unconfirmed` was invented by the old engine and cost 4.7%
+    of NAV over two years before anyone noticed it was not a rule."""
+    trades, *_ = confirmed_run
+    assert {t["exit_reason"] for t in trades} <= LEGAL_EXITS
+    assert "volume unconfirmed" not in {t["exit_reason"] for t in trades}
+
+
+def test_nothing_enters_below_mcn_seventy(confirmed_run):
+    """§3.2 Sizing. The old engine had no floor at all and 71.3% of run 5 was below it."""
+    trades, *_ = confirmed_run
+    assert [t for t in trades if t["mcn"] is not None and t["mcn"] < 70.0] == []
+
+
+def test_no_position_is_ever_larger_than_the_sleeve_allows(confirmed_run):
+    trades, equity, *_ = confirmed_run
+    assert max(e[2] for e in equity) <= 0.40 + 1e-9
+
+
+def test_costs_are_charged_and_gross_beats_net(confirmed_run):
+    """WO-12: a frictionless verdict is not a verdict."""
+    trades, *_ = confirmed_run
+    assert all(t["cost_usd"] > 0 for t in trades)
+    assert all(t["pnl_gross_usd"] > t["pnl_usd"] for t in trades)
+
+
+# --------------------------------------------------------------------------- the freeze
+
+def test_an_unconfirmed_breakout_that_holds_the_pivot_is_not_exited():
+    """§3.2 as ratified: below 1.4x volume the pyramid freezes at 50% — it does not sell. The
+    engine this replaces sold 171 positions at the next open on exactly this condition."""
+    f, breakout = frame(hero_volume_multiple=0.5)
+    trades, equity, conf = bt.simulate(f, cfg())
+    early = [t for t in trades if t["bars_held"] <= 2 and t["exit_reason"] == "unconfirmed"]
+    assert early == [], "an unconfirmed breakout was sold while it was still above its pivot"
+
+
+def test_an_unconfirmed_breakout_that_closes_back_below_the_pivot_exits():
+    """The hair-trigger, and the only exit volume has any part in (§3.2)."""
+    f, breakout = frame(hero_volume_multiple=0.5, hero_after=0.97)
+    trades, equity, conf = bt.simulate(f, cfg())
+    assert any(t["exit_reason"] == "unconfirmed" for t in trades), \
+        "a failed breakout closed back below its pivot and the engine held it"
+
+
+def test_a_frozen_position_never_pyramids(confirmed_run):
+    """Unconfirmed means half size until it confirms late or the stall rule resolves it."""
+    f, breakout = frame(hero_volume_multiple=0.5)
+    trades, equity, conf = bt.simulate(f, cfg())
+    assert all(t["pyramid_steps"] == 1 for t in trades if t["confirmed"] is not True)
+
+
+# --------------------------------------------------------------------------- the conformance table
+
+def test_the_conformance_table_passes_a_lawful_run(confirmed_run):
+    trades, equity, conf, _ = confirmed_run
+    table = bt.conformance(conf, trades, equity)
+    assert not any(c.get("violations") for c in table)
+    assert not any(c.get("unknown_reasons") for c in table)
+    assert {c["clause"] for c in table} >= {"MCN < 70 never tickets",
+                                            "M4 earnings acceleration",
+                                            "Earnings blackout — 5 trading days"}
+
+
+def test_the_conformance_table_catches_a_run_the_law_forbids(confirmed_run):
+    """A table nothing can fail is decoration. Feed it a sub-70 entry and an invented exit."""
+    _, equity, conf, _ = confirmed_run
+    bad = [dict(mcn=15.1, exit_reason="volume unconfirmed"),
+           dict(mcn=88.0, exit_reason="stop")]
+    table = bt.conformance(conf, bad, equity)
+    floor = next(c for c in table if c["clause"] == "MCN < 70 never tickets")
+    exits = next(c for c in table if c["clause"].startswith("Exits"))
+    assert floor["violations"] == 1
+    assert exits["unknown_reasons"] == ["volume unconfirmed"]
+
+
+# --------------------------------------------------------------------------- the law, written once
+#
+# The whole point of the rewrite. `backtest_compounders.py` records what happens without this
+# guard: "a private copy with its own constants ... meant the backtest silently measured a
+# different formula than production priced — the exact failure mode a backtest exists to rule
+# out." The momentum engine had drifted in nine places before anyone diffed it against §3.2.
+
+SHARED_RULES = ["market_gate", "trend_template", "base_scan", "momentum_quality",
+                "setup_proximity", "mcn", "m4_acceleration", "confirmation_state",
+                "pyramid_orders", "entry_order", "ratchet_stop", "momentum_size",
+                "enterable", "stalled_pyramid", "in_blackout", "holds_through_earnings",
+                "pct_rank", "weekly_closes"]
+
+
+@pytest.mark.parametrize("rule", SHARED_RULES)
+def test_the_driver_calls_the_law_rather_than_restating_it(rule):
+    source = (ROOT / "src" / "backtest.py").read_text()
+    assert f"sg.{rule}(" in source, (
+        f"backtest.py no longer calls signals.{rule} — either the rule moved, or the driver has "
+        f"started deriving it again")
+
+
+def test_the_driver_defines_no_function_that_shadows_a_rule():
+    """A helper named like a rule is how the second implementation gets back in."""
+    import ast
+    tree = ast.parse((ROOT / "src" / "backtest.py").read_text())
+    defined = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    public = {n for n in dir(sg) if not n.startswith("_") and callable(getattr(sg, n))}
+    assert defined & public == set(), f"backtest.py redefines: {sorted(defined & public)}"
+
+
+def test_unknown_m4_coverage_is_reported_not_assumed():
+    """A clause with no data is not a passing clause (learnings #19 — green is not a result)."""
+    f, breakout = frame()
+    f["eps"] = {}                                    # nothing was knowable
+    trades, equity, conf = bt.simulate(f, cfg())
+    table = bt.conformance(conf, trades, equity)
+    m4 = next(c for c in table if c["clause"] == "M4 earnings acceleration")
+    assert m4["coverage"] == 0.0
+    assert trades == [], "M4 was unknown for every name, so L1-M should have been empty"

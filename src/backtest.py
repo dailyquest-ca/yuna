@@ -1,54 +1,61 @@
-"""backtest — Phase E. Run the momentum sleeve forward over our own bar history.
+"""backtest — the momentum sleeve replayed under the law, using the law's own code.
 
-The plan is explicit (§4.8) that only the momentum side can be tested honestly: it needs
-adjusted prices and nothing else. The compounder side cannot, because we hold exactly one
-fundamentals snapshot per name and using today's filing at a past date is the first of the
-two classic sins. So this simulates L0 → L1-M → L2 → L3 for momentum only, and the
-compounder pipeline stays forward-validated by the shadow book.
+This job is a **driver**, not a second implementation. Every rule it applies is a call into
+`signals.py`, the same module `arming.py` calls tonight: one market gate, one trend template, one
+base detector, one confirmation state machine, one stop ladder, one sizing formula. Before this
+rewrite the backtest re-derived all of them by hand, and the private copy had drifted in nine
+places — four MCN setup sub-scores against the law's three, pyramid adds at +2.5%/+4.5% against
++2%/+4%, no add ceiling, no MCN floor, a `volume unconfirmed` exit the plan deleted, and no
+blackout at all. 211 of run 5's 296 trades were entries §3.2 forbids outright. A backtest that
+measures a sincere restatement of the rules measures nothing.
 
-Known biases, stated up front rather than buried in the result:
+What it models, per the 2026-08-10 rulings:
 
-  * SURVIVORSHIP. The L0 census is today's listings. Names that delisted inside the window
-    are absent, so the tape we test on is the tape that survived. This flatters everything.
-  * NO M4. Point-in-time quarterly EPS is not stored, so the earnings-acceleration gate is
-    off and L1-M is wider here than it would be live.
-  * NO EARNINGS BLACKOUT. Historical report dates are not stored either, so entries that
-    §3.3 would have blocked are taken here.
-  * WARM-UP. The trend template needs 221 bars and the 52-week window needs 252, so the
-    first tradeable day is ~280 bars in — roughly the last two years of a three-year window.
-  * FILLS are modelled, not observed: a stop-limit fills at the pivot unless the day opened
-    above it, in which case it fills at the open, and not at all above the limit. Slippage
-    beyond that, and FX conversion cost, are not charged.
+  * **USD-native.** US listings only; no FX translation and no conversion fee. NAV starts in USD.
+  * **VOO is the benchmark**, on adjusted closes — total return, dividends included. The sleeve's
+    own P&L is price-only, so the comparison is biased *against* us, which is the safe direction;
+    the magnitude is reported as `stats.dividend_bps` rather than left to the imagination.
+  * **Delisted names are retained.** L0 membership is derived from bars at each date, never from
+    today's `universe.status`, so a name that died in 2019 is in the census until the day its bars
+    stop — and a position holding it exits on the `delisted` rule instead of being marked forever.
+  * **Costs.** Half-spread by ADDV bucket, per side; commission zero (Wealthsimple). Gross and net
+    both recorded on every trade.
+  * **Fixed 280-bar tails.** No rule reads deeper than 266 bars, so the driver hands each call a
+    280-bar window and the cost per rank date is constant in the length of the test.
+    `tests/test_tail_equivalence.py` pins that the tail and the full series agree.
 
-Everything else — M1's latch, the trend template, the base scan, MCN with its t−10 windows,
-the pyramid, the 8% cap, the ratchet, the euphoria rule, the sleeve ceiling — is the same
-arithmetic the live jobs run.
+Biases that remain, stated on every run rather than buried: the vendor serves the current version
+of a past statement, so a restatement is seen earlier than the market saw it; industry mappings are
+today's; and the L0 census is reconstructed from bars rather than from a stored point-in-time
+listing, so a name whose bars we never pulled is still absent.
 """
-import os, sys, json, math, datetime as dt
+import os, sys, json, bisect, hashlib, datetime as dt
 import numpy as np
 import pandas as pd
-import psycopg
 from db import connect, config, dry, Heartbeat
+import signals as sg
 
-START_NAV = float(os.environ.get("START_NAV", "200754.38"))
-LABEL = os.environ.get("LABEL", "momentum v1")
-WARMUP = 280
+START_NAV = float(os.environ.get("START_NAV", "200000"))       # USD (ruled 2026-08-10)
+LABEL = os.environ.get("LABEL", "law-v0")
+VARIANT = os.environ.get("VARIANT", "law-v0")
+LAW_STAMP = os.environ.get("LAW_STAMP", "2026-08-09")
+START_DATE = os.environ.get("START_DATE") or None
+END_DATE = os.environ.get("END_DATE") or None
 
-# ---- variant knobs. Defaults reproduce the plan exactly; every deviation is a hypothesis
-# about the friction the baseline exposed, not a change to §3.2, which is FINAL.
-VOL_MODE = os.environ.get("VOL_MODE", "fill_then_exit")   # fill_then_exit (§5.1) | confirm_first
-BREAKEVEN_STEP = int(os.environ.get("BREAKEVEN_STEP", "3"))   # §3.2: breakeven at full size
-MCN_EXIT = float(os.environ.get("MCN_EXIT", "55"))            # §3.3 exit-review threshold
-MIN_HOLD = int(os.environ.get("MIN_HOLD_DAYS", "0"))          # §1: one-week intended hold
+WARMUP = 280            # >= 266, the deepest window any rule reads (see tests/test_tail_equivalence)
+TAIL = 280
+T10 = 10                # §3.2: every MCN ranking window ends 10 trading days ago
+BENCH = os.environ.get("BENCHMARK", "VOO.US")
+DELISTED_AFTER = 5      # sessions without a bar before a holding is treated as gone
 
 
-# ------------------------------------------------------------------ data
+# =============================================================================== data
 def load(cur):
+    """Every US bar we hold, living and dead. The census is rebuilt from bars, not from `status`."""
     cur.execute("""select p.ticker, p.d, p.open, p.high, p.low, p.close, p.adj_close, p.volume
-                   from prices p join universe u on u.ticker = p.ticker
-                   where u.kind='stock' and u.status='active' and (u.in_l0 or u.is_holding)
-                     and u.ticker like '%.US'
-                   order by p.d""")
+                     from prices p join universe u on u.ticker = p.ticker
+                    where u.kind = 'stock' and u.ticker like '%%.US'
+                    order by p.d""")
     df = pd.DataFrame(cur.fetchall(),
                       columns=["ticker", "d", "open", "high", "low", "close", "adj", "vol"])
     for c in ("open", "high", "low", "close", "adj", "vol"):
@@ -56,359 +63,486 @@ def load(cur):
     df["adj"] = df["adj"].fillna(df["close"])
     wide = {c: df.pivot(index="d", columns="ticker", values=c).sort_index()
             for c in ("open", "high", "low", "close", "adj", "vol")}
+
     cur.execute("select ticker, industry from universe where kind='stock'")
-    ind = {t: i for t, i in cur.fetchall()}
+    industry = {t: i for t, i in cur.fetchall()}
+
+    cur.execute("""select d, close, coalesce(adj_close, close) from prices
+                    where ticker = %s order by d""", (BENCH,))
+    rows = cur.fetchall()
+    bench = pd.Series({d: float(a) for d, _, a in rows}).sort_index() if rows else pd.Series(dtype=float)
+
+    # M1 is the S&P 500 (§3.2). GSPC if we hold it deep enough, else the tracker standing in for it.
     cur.execute("select d, close from prices where ticker='GSPC.INDX' order by d")
     spx = pd.Series({d: float(c) for d, c in cur.fetchall()}).sort_index()
-    return wide, ind, spx
+    gate_source = "GSPC.INDX"
+    if len(spx) < len(bench):
+        spx, gate_source = pd.Series({d: float(c) for d, c, _ in rows}).sort_index(), BENCH
+
+    cur.execute("select ticker, report_date from earnings order by ticker, report_date")
+    reports = {}
+    for tk, rd in cur.fetchall():
+        reports.setdefault(tk, []).append(rd)
+
+    # Point-in-time EPS for M4: each quarter carries its own reportDate, so what was knowable on a
+    # past date is a prefix cut, not a guess. Period order and report order agree, so one bisect.
+    cur.execute("""select f.ticker,
+                          array_agg((h.value->>'reportDate')::date order by h.key desc)  as rds,
+                          array_agg((h.value->>'epsActual')::double precision
+                                    order by h.key desc)                                 as eps
+                     from v_fundamentals_latest f,
+                          lateral jsonb_each(coalesce(f.raw_doc->'Earnings'->'History','{}'::jsonb)) h
+                    where h.value->>'epsActual' is not null
+                      and h.value->>'reportDate' is not null
+                    group by f.ticker""")
+    eps = {}
+    for tk, rds, vals in cur.fetchall():
+        pairs = [(r, v) for r, v in zip(rds, vals) if r is not None and v is not None]
+        if pairs:
+            eps[tk] = (np.array([r.toordinal() for r, _ in pairs]), [v for _, v in pairs])
+
+    return dict(wide=wide, industry=industry, bench=bench, spx=spx, gate_source=gate_source,
+                reports=reports, eps=eps)
 
 
-def m1_series(spx):
-    """The Weinstein gate, resolved daily by carrying the latest weekly decision forward."""
-    s = pd.Series(spx.values, index=pd.to_datetime(spx.index))
-    weekly = s.resample("W-FRI").last().dropna()
-    sma = weekly.rolling(30).mean()
-    state, out, prev = None, {}, None
-    for i, (d, px) in enumerate(weekly.items()):
-        if i < 33 or pd.isna(sma.iloc[i]):
-            out[d] = None; continue
-        now, four = sma.iloc[i], sma.iloc[i - 4]
-        if prev is None:
-            state = "ON" if (px > now and now >= four) else "OFF"
-        elif prev == "ON":
-            state = "OFF" if px < now else "ON"          # latch: only the opposite trigger flips
-        else:
-            state = "ON" if (px > now and now >= four) else "OFF"
-        out[d] = state; prev = state
-    return pd.Series(out).sort_index()
+def eps_as_of(eps_entry, day):
+    """The quarters already reported by `day`, newest first — a prefix cut on report date."""
+    rds, vals = eps_entry
+    # rds descends, so the first index whose report date is on or before `day` starts the slice.
+    i = int(np.searchsorted(-rds, -day.toordinal(), side="left"))
+    return vals[i:]
 
 
-def gate_on(m1, day):
-    """The gate in force on `day` — the most recent Friday decision at or before it."""
-    prior = m1.loc[:pd.Timestamp(day)]
-    return (prior.iloc[-1] == "ON") if len(prior) and prior.iloc[-1] else False
+# =============================================================================== the weekly rank
+def rank(frame, t, cols, arrays):
+    """L1-M as `rank.py` builds it: M2 + M4, ranked by MCN, top 150 — same calls, same order.
 
-
-def pct_rank(a):
-    """Cross-sectional percentile 0..100, NaN-safe."""
-    v = np.asarray(a, dtype=float)
-    out = np.full(v.shape, np.nan)
-    ok = ~np.isnan(v)
-    n = ok.sum()
-    if n > 1:
-        out[ok] = 100.0 * v[ok].argsort().argsort() / (n - 1)
-    elif n == 1:
-        out[ok] = 50.0
-    return out
-
-
-# ------------------------------------------------------------------ weekly rank
-def rank_week(w, t, ind):
-    """Everything weekly-rank computes, as of bar index t. Returns a DataFrame of candidates."""
-    C, H, L, V, A = (w[k].iloc[:t + 1] for k in ("close", "high", "low", "vol", "adj"))
-    close, high, low, vol, adj = C.values, H.values, L.values, V.values, A.values
-    cols = np.array(w["close"].columns)
-
-    live = ~np.isnan(close[-1])
-    nbars = (~np.isnan(close)).sum(axis=0)
-    addv = np.nanmedian((close * vol)[-50:], axis=0)
-    eff = live & (nbars >= 126) & (close[-1] >= 5) & (addv >= 10_000_000) & (nbars >= 210)
-    if eff.sum() < 30:
+    Gates and stops read current price; MCN reads windows ending 10 sessions ago (§3.2, "rank is
+    calm; protection is real-time"). Both slices are 280 bars, so both are constant-cost.
+    """
+    O, H, L, C, A, V = (arrays[k] for k in ("open", "high", "low", "close", "adj", "vol"))
+    lo_full, lo_mcn = max(0, t - TAIL + 1), max(0, t - T10 - TAIL + 1)
+    hi_mcn = t - T10 + 1
+    if hi_mcn <= lo_mcn:
         return None
 
+    # ---- L0 liquidity, evaluated on the bars of the day. Not a §3.2 rule: it is the census, and
+    # it is what makes a delisted name leave the universe on the day its bars stop.
+    close_t = C[t]
+    live = ~np.isnan(close_t)
+    nbars = (~np.isnan(C[max(0, t - 251):t + 1])).sum(axis=0)
+    addv = np.nanmedian((C[max(0, t - 49):t + 1] * V[max(0, t - 49):t + 1]), axis=0)
+    eff = live & (nbars >= 210) & (close_t >= 5) & (addv >= 10_000_000)
     idx = np.where(eff)[0]
-    T10 = 10
-    a = adj[:-T10, idx]; c = close[:-T10, idx]; h = high[:-T10, idx]
-    l = low[:-T10, idx]; v = vol[:-T10, idx]
+    if len(idx) < 30:
+        return None
 
-    # momentum quality — 90d exp regression of log price, annualised slope x R2 / 90d vol
-    y = np.log(a[-90:])
-    x = np.arange(90.0)
-    xc = x - x.mean()
-    slope = (xc[:, None] * (y - y.mean(axis=0))).sum(axis=0) / (xc ** 2).sum()
-    yhat = slope * xc[:, None] + y.mean(axis=0)
-    ss_res = ((y - yhat) ** 2).sum(axis=0)
-    ss_tot = ((y - y.mean(axis=0)) ** 2).sum(axis=0)
-    r2 = np.clip(1 - ss_res / np.where(ss_tot == 0, 1e-12, ss_tot), 0, 1)
-    vol90 = np.std(np.diff(np.log(a[-91:]), axis=0), axis=0)
-    mq = slope * 252.0 * r2 / np.where(vol90 == 0, 1e-9, vol90)
+    quality, atr_pct, dryup, near_high = {}, {}, {}, {}
+    m2, bases, group_returns = {}, {}, {}
+    for j in idx:
+        tk = cols[j]
+        cl_f, hi_f, lo_f = C[lo_full:t + 1, j], H[lo_full:t + 1, j], L[lo_full:t + 1, j]
+        if np.isnan(cl_f).any():
+            continue                                     # a hole in the window is not a verdict
+        ac, hh, ll, cc, vv = (X[lo_mcn:hi_mcn, j] for X in (A, H, L, C, V))
 
-    # setup proximity — four equal sub-scores
-    tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
-    atr = pd.DataFrame(tr).rolling(14, min_periods=8).mean().values
-    hist = atr[-252:]
-    s_atr = 100.0 - 100.0 * np.nanmean(hist <= atr[-1], axis=0)
-    dd_r = 1 - np.min(c[-20:], axis=0) / np.max(c[-20:], axis=0)
-    dd_p = 1 - np.min(c[-40:-20], axis=0) / np.max(c[-40:-20], axis=0)
-    s_pull = dd_p - dd_r
-    v50 = np.mean(v[-50:], axis=0)
-    s_dry = -np.mean(v[-10:], axis=0) / np.where(v50 == 0, 1e-9, v50)
-    hi52 = np.max(c[-252:], axis=0)
-    s_prox = c[-1] / hi52
-    setup = np.nanmean(np.vstack([s_atr, pct_rank(s_pull), pct_rank(s_dry), pct_rank(s_prox)]), axis=0)
+        m2[tk] = sg.trend_template(cl_f)
+        bases[tk] = sg.base_scan(hi_f, lo_f, cl_f)
+        quality[tk] = sg.momentum_quality(ac)
+        subs = sg.setup_proximity(hh, ll, cc, vv)
+        atr_pct[tk], dryup[tk], near_high[tk] = subs["atr_pct"], subs["dryup"], subs["near_high"]
+        ind = frame["industry"].get(tk)
+        if ind and len(ac) >= 126 and ac[-126] > 0:
+            group_returns.setdefault(ind, []).append(float(ac[-1]) / float(ac[-126]) - 1)
 
-    # industry group strength — equal-weight 6-month group return, percentile across groups
-    ret6 = a[-1] / a[-126] - 1
-    tick = cols[idx]
-    gser = pd.Series(ret6, index=[ind.get(t_) for t_ in tick])
-    gmean = gser.groupby(level=0).mean()
-    gpct = pd.Series(pct_rank(gmean.values), index=gmean.index)
-    grp = np.array([gpct.get(ind.get(t_), 50.0) if ind.get(t_) else 50.0 for t_ in tick])
+    ranked = sorted(quality)
+    if not ranked:
+        return None
+    groups = sorted(group_returns)
+    group_mean = {g: float(np.nanmean(group_returns[g])) for g in groups}
+    group_pct = dict(zip(groups, sg.pct_rank([group_mean[g] for g in groups])))
+    q_p = dict(zip(ranked, sg.pct_rank([quality[tk] for tk in ranked])))
+    d_p = dict(zip(ranked, sg.pct_rank([dryup[tk] for tk in ranked])))
+    x_p = dict(zip(ranked, sg.pct_rank([near_high[tk] for tk in ranked])))
 
-    mcn = np.nanmean(np.vstack([pct_rank(mq), setup, grp]), axis=0)
+    day = frame["dates"][t]
+    out, m4_known = {}, 0
+    for tk in ranked:
+        setup = float(np.nanmean([atr_pct[tk], d_p[tk], x_p[tk]]))
+        ind = frame["industry"].get(tk)
+        grp = group_pct.get(ind, 50.0) if ind else 50.0
+        score = sg.mcn(q_p[tk], setup, grp)
+        entry = frame["eps"].get(tk)
+        if entry is not None:
+            m4 = sg.m4_acceleration(eps_as_of(entry, day))["passes"]
+            m4_known += 1
+        else:
+            m4 = None                       # unknown is not a pass; §3.3 never guesses a component
+        out[tk] = dict(mcn=score, m2=bool(m2[tk]), m4=m4, base=bases[tk])
 
-    # trend template at the current price
-    cc = close[:, idx]
-    s50 = np.nanmean(cc[-50:], axis=0); s150 = np.nanmean(cc[-150:], axis=0)
-    s200 = np.nanmean(cc[-200:], axis=0); s200_21 = np.nanmean(cc[-221:-21], axis=0)
-    lo52 = np.nanmin(cc[-252:], axis=0); hh52 = np.nanmax(cc[-252:], axis=0); px = cc[-1]
-    m2 = ((px > s150) & (px > s200) & (s150 > s200) & (s200 > s200_21) & (px > s50)
-          & (px >= lo52 * 1.30) & (px >= hh52 * 0.75))
-
-    # base scan — pivot is the highest high of the base, base is peak..today
-    hh, ll = high[:, idx], low[:, idx]
-    look = min(120, hh.shape[0])
-    seg_h, seg_l = hh[-look:], ll[-look:]
-    p = np.nanargmax(seg_h, axis=0)
-    pivot = seg_h[p, np.arange(len(p))]
-    blen = look - p
-    depth = np.array([(pivot[j] - np.nanmin(seg_l[p[j]:, j])) / pivot[j] for j in range(len(p))])
-    clow = np.nanmin(ll[-10:], axis=0)
-    valid = (blen >= 25) & (depth <= 0.25) & (px <= pivot * 1.005)
-
-    out = pd.DataFrame(dict(ticker=tick, mcn=mcn, m2=m2, valid=valid, pivot=pivot,
-                            depth=depth, blen=blen, clow=clow, px=px,
-                            stop=np.maximum(clow, pivot * 0.92)))
-    l1m = out[out.m2].sort_values("mcn", ascending=False).head(150)
-    return out.set_index("ticker"), l1m
+    # L1-M = M2 and M4 pass, ranked by MCN, top 150 (§3.2). An unknown M4 is not a pass.
+    eligible = [tk for tk in out if out[tk]["m2"] and out[tk]["m4"] is True
+                and out[tk]["mcn"] == out[tk]["mcn"]]
+    l1m = sorted(eligible, key=lambda tk: -out[tk]["mcn"])[:150]
+    return dict(scored=out, l1m=l1m, evaluated=len(ranked), m4_known=m4_known)
 
 
-# ------------------------------------------------------------------ simulation
-def run(w, ind, m1, hb):
-    dates = list(w["close"].index)
-    O, H, L, C, V = (w[k] for k in ("open", "high", "low", "close", "vol"))
-    # prior 50 days: the breakout day is the test, not the baseline. min_periods matters —
-    # without it one missing bar anywhere in the window returns NaN and silently fails the gate.
-    v50 = V.shift(1).rolling(50, min_periods=25).mean()
+# =============================================================================== the simulation
+def simulate(frame, cfg):
+    """The day loop. Pure: no database, no clock — `tests/test_backtest_engine.py` runs it on
+    hand-built bars, which is the only way to assert what the engine refuses to do."""
+    dates, cols = frame["dates"], frame["cols"]
+    arrays = frame["arrays"]
+    O, H, L, C, A, V = (arrays[k] for k in ("open", "high", "low", "close", "adj", "vol"))
+    col = {tk: j for j, tk in enumerate(cols)}
+    n = len(dates)
 
-    budgets = {70: 0.007, 85: 0.009}          # §3.2 steady-state risk budgets
-    MAXSTOP, CEIL, MAXN, BAND = 0.08, 0.40, 4, 0.12
+    # the 50 sessions *before* each day — the breakout day is the test, never its own baseline
+    v50 = pd.DataFrame(V).shift(1).rolling(50, min_periods=25).mean().values
 
-    nav, cash = START_NAV, START_NAV
-    book, trades, equity = {}, [], []
-    queue = pd.DataFrame()
-    fired = {}                               # ticker -> pivot already filled; re-arms on a new base
-    diag = dict(weeks=0, l1m=0, valid=0, touched=0, no_fill_gap=0, no_volume=0,
-                no_room=0, taken=0, days_slots_free=0, already_fired=0)
+    gate_weeks, gate_states = _gate_series(frame["spx"])
 
-    for t in range(WARMUP, len(dates)):
+    nav = cash = cfg["start_nav"]
+    book, trades, equity, pending = {}, [], [], {}
+    fired, queue, conf = {}, None, dict(m4_evaluated=0, m4_known=0, blackout_decisions=0,
+                                        blackout_known=0, rank_dates=0, entries=0,
+                                        entries_refused_below_70=0, gap_no_fill=0)
+
+    def spread(j, t):
+        """§ WO-12: half-spread by ADDV bucket, per side. Wide names cost more to touch."""
+        advv = np.nanmedian(C[max(0, t - 49):t + 1, j] * V[max(0, t - 49):t + 1, j])
+        bps = cfg["spread_bps"][0] if advv >= cfg["addv_break"] else cfg["spread_bps"][1]
+        return bps / 10_000.0
+
+    def close_position(tk, day, price, reason, t, gross_price=None):
+        p = book.pop(tk)
+        j = col[tk]
+        # Decisions ride raw prices, so the sleeve's P&L is price-only. The dividend the adjusted
+        # series implies is measured and reported (`stats.dividend_bps`) rather than either banked
+        # silently or forgotten — VOO's benchmark is total return, so this is the size of the
+        # handicap we are giving it.
+        adj_t, px_t = A[t, j], C[t, j]
+        if np.isfinite(adj_t) and np.isfinite(px_t):
+            total = sum(d * (adj_t / a) for d, _, a in p["lots"])
+            dividend = total - sum(d * (px_t / e) for d, e, _ in p["lots"])
+        else:
+            dividend = 0.0
+        proceeds = p["qty"] * price
+        gross = p["qty"] * (gross_price if gross_price is not None else price)
+        trades.append(dict(
+            ticker=tk, entry_date=p["entry_date"], entry_price=p["invested"] / p["qty"],
+            qty=p["qty"], exit_date=day, exit_price=price, mcn=p["mcn"], pivot=p["pivot"],
+            initial_stop=p["init_stop"], size_pct=p["size"], pyramid_steps=p["step"],
+            pnl_usd=proceeds - p["invested"], pnl_pct=proceeds / p["invested"] - 1,
+            pnl_gross_usd=gross - p["gross_invested"],
+            cost_usd=(gross - proceeds) + (p["invested"] - p["gross_invested"]),
+            dividend_usd=dividend,
+            bars_held=t - p["entry_idx"], max_favorable=p["mfe"], max_adverse=p["mae"],
+            exit_reason=reason, confirmed=p["confirmed"]))
+        return proceeds
+
+    for t in range(WARMUP, n):
         day = dates[t]
-        on = gate_on(m1, day)
+        on = _gate_on(gate_weeks, gate_states, day)
 
-        # ---- weekly re-rank (Fridays), exactly as weekly-rank does it
-        if pd.Timestamp(day).weekday() == 4 or queue.empty:
-            got = rank_week(w, t, ind)
-            if got is not None:
-                scored, queue = got
-                diag["weeks"] += 1
-                diag["l1m"] += len(queue); diag["valid"] += int(queue.valid.sum())
-                # §3.2 lists exactly three exits: the stop, the trend template failing, and
-                # MCN < 55. Falling out of the top 150 is NOT one of them — L1-M is a
-                # candidate list, not a holding rule, and treating it as one ejected every
-                # position within days and made the sleeve untradeable.
-                for tk in list(book):
-                    if tk not in scored.index:
-                        continue                            # no longer scoreable; leave it to the stop
-                    row = scored.loc[tk]
-                    px = C[tk].iloc[t]
-                    if np.isnan(px):
-                        continue
-                    if t - book[tk]["entry_idx"] < MIN_HOLD:
-                        continue                            # §1 minimum intended hold; stops exempt
-                    if not bool(row.m2):
-                        cash += book[tk]["qty"] * px
-                        close_trade(book, trades, tk, day, px, "trend template fail", t)
-                    elif float(row.mcn) < MCN_EXIT:
-                        cash += book[tk]["qty"] * px
-                        close_trade(book, trades, tk, day, px, "MCN < 55", t)
-
-        # ---- gate off: the sleeve goes to cash (§3.3 crash protocol)
-        if not on and book:
-            for tk in list(book):
-                px = O[tk].iloc[t]
-                if np.isnan(px): px = C[tk].iloc[t]
-                if not np.isnan(px):
-                    cash += book[tk]["qty"] * px
-                    close_trade(book, trades, tk, day, px, "market gate OFF", t)
-
-        # ---- §5.1: a breakout that did not carry 1.4x volume is a failed breakout. The
-        # broker order has already filled overnight, so the brief instructs an exit at the
-        # next open — not a refusal to enter, which is what the first run modelled.
-        for tk in list(book):
-            p = book[tk]
-            if p["vol_ok"] or p["entry_idx"] == t:
+        # ---- exits flagged at yesterday's close fill at this open (§5.1: the desk arms, the
+        # morning executes). Only the stop is intraday, because the broker holds it.
+        for tk, reason in list(pending.items()):
+            pending.pop(tk)
+            if tk not in book:
                 continue
-            px = O[tk].iloc[t]
+            j = col[tk]
+            px = O[t, j]
             if np.isnan(px):
-                px = C[tk].iloc[t]
-            if not np.isnan(px):
-                cash += p["qty"] * px
-                close_trade(book, trades, tk, day, px, "volume unconfirmed", t)
+                px = C[t, j]
+            if np.isnan(px):
+                px = book[tk]["last_mark"]
+            cash += close_position(tk, day, px * (1 - spread(j, t)), reason, t, gross_price=px)
 
-        # ---- stops and trails on what we hold
+        # ---- weekly re-rank (§3.0 cadence: M2 and M4 weekly, MCN weekly)
+        if pd.Timestamp(day).weekday() == 4 or queue is None:
+            got = rank(frame, t, cols, arrays)
+            if got is not None:
+                queue = got
+                conf["rank_dates"] += 1
+                conf["m4_evaluated"] += got["evaluated"]
+                conf["m4_known"] += got["m4_known"]
+
+        scored = (queue or {}).get("scored", {})
+
+        # ---- what we hold: stops first, then the conclusions the law draws
         for tk in list(book):
-            p = book[tk]
-            lo, hi, cl, op = L[tk].iloc[t], H[tk].iloc[t], C[tk].iloc[t], O[tk].iloc[t]
+            p, j = book[tk], col[tk]
+            lo, hi, cl, op = L[t, j], H[t, j], C[t, j], O[t, j]
+
             if np.isnan(cl):
+                p["stale"] += 1
+                if p["stale"] >= DELISTED_AFTER:
+                    cash += close_position(tk, day, p["last_mark"], "delisted", t,
+                                           gross_price=p["last_mark"])
                 continue
-            if lo <= p["stop"]:
-                fill = min(p["stop"], op) if not np.isnan(op) else p["stop"]
-                cash += p["qty"] * fill
-                close_trade(book, trades, tk, day, fill, "stop", t)
+            p["stale"] = 0
+
+            # the stop is a resting broker order: it fires intraday, and a gap fills at the open
+            if p["stop"] is not None and lo <= p["stop"]:
+                gapped = not np.isnan(op) and op < p["stop"]
+                fill = op if gapped else p["stop"]
+                cash += close_position(tk, day, fill * (1 - spread(j, t)),
+                                       "gap" if gapped else "stop", t, gross_price=fill)
                 continue
+
             p["hi_close"] = max(p["hi_close"], cl)
-            p["mfe"] = max(p["mfe"], hi / p["entry"] - 1)
-            p["mae"] = min(p["mae"], lo / p["entry"] - 1)
+            p["mfe"] = max(p["mfe"], hi / p["avg_cost"] - 1)
+            p["mae"] = min(p["mae"], lo / p["avg_cost"] - 1)
 
-            # pyramid — 50 / 25 / 25 at the pivot, +2.5%, +4.5%
-            for step, mult in ((2, 1.025), (3, 1.045)):
-                if p["vol_ok"] and p["step"] == step - 1 and hi >= p["pivot"] * mult and on:
-                    add_cost = p["target_cad"] * 0.25
-                    if cash >= add_cost:
-                        fill = max(p["pivot"] * mult, op if not np.isnan(op) else 0)
-                        q = add_cost / fill
-                        p["entry"] = (p["entry"] * p["qty"] + fill * q) / (p["qty"] + q)
-                        p["qty"] += q; cash -= add_cost; p["step"] = step
+            # ---- §3.2 breakout confirmation, judged at EOD on the sessions since entry
+            k = t - p["entry_idx"] + 1
+            window = range(p["entry_idx"], min(p["entry_idx"] + sg.CONFIRM_SESSIONS, t + 1))
+            state = sg.confirmation_state([V[i, j] for i in window],
+                                          [v50[i, j] for i in window],
+                                          closes=[C[i, j] for i in window],
+                                          pivot=p["pivot"])
+            p["confirmed"] = state["confirmed"]
 
-            # ratchet — breakeven at full size, 10% trail past +15%, 5% under euphoria
-            win = cl / p["entry"] - 1
-            hist = C[tk].iloc[max(0, t - 49):t + 1].dropna()
-            euph = False
-            if len(hist) >= 50:
-                euph = cl > hist.mean() + 2 * hist.std()
-            cand = p["stop"]
-            if euph:
-                cand = max(cand, p["hi_close"] * 0.95)
-            elif win >= 0.15:
-                cand = max(cand, p["hi_close"] * 0.90)
-            elif p["step"] >= BREAKEVEN_STEP:
-                cand = max(cand, p["entry"])
-            p["stop"] = max(p["stop"], cand)               # ratchets up, never down
+            if not on:
+                pending[tk] = "gate_off"                 # §3.3 crash protocol, acted next open
+                continue
+            if state["exit_next_open"]:
+                pending[tk] = "unconfirmed"              # the hair-trigger — the only volume exit
+                continue
 
-        # ---- entries
-        if on and len(book) < MAXN and not queue.empty:
-            diag["days_slots_free"] += 1
-            exposure = sum(p["qty"] * C[p["ticker"]].iloc[t] for p in book.values()
-                           if not np.isnan(C[p["ticker"]].iloc[t]))
-            for _, r in queue[queue.valid].sort_values("mcn", ascending=False).iterrows():
-                tk = r.ticker
-                if tk in book or len(book) >= MAXN:
+            row = scored.get(tk)
+            if row is not None and row["m2"] is False:
+                pending[tk] = "template"
+                continue
+            if row is not None and row["mcn"] == row["mcn"] and row["mcn"] < cfg["mcn_exit"]:
+                pending[tk] = "score"
+                continue
+            if sg.stalled_pyramid(pyramid_step=p["step"], sessions_held=k - 1):
+                pending[tk] = "stalled"
+                continue
+
+            nxt = _next_report(frame["reports"].get(tk), day)
+            if nxt is not None:
+                conf["blackout_decisions"] += 1
+                conf["blackout_known"] += 1
+                if sg.trading_days_between(day, nxt) <= 1 and \
+                        sg.holds_through_earnings(cl, p["avg_cost"], cushion=cfg["cushion"]) is False:
+                    pending[tk] = "earnings"
                     continue
-                if fired.get(tk) == round(float(r.pivot), 4):
-                    diag["already_fired"] += 1
-                    continue                                # this order already filled once
-                op = O[tk].iloc[t]
-                if VOL_MODE == "confirm_first":
-                    # wait for yesterday to CLOSE above the pivot on 1.4x volume, then buy this
-                    # open. Costs a day of drift; never pays for a breakout that did not carry.
-                    pc, pv, pv5 = C[tk].iloc[t - 1], V[tk].iloc[t - 1], v50[tk].iloc[t - 1]
-                    if np.isnan(pc) or pc < r.pivot:
+            else:
+                conf["blackout_decisions"] += 1
+
+            # ---- pyramid: adds arm only once confirmed, both limits at the ceiling (§3.2)
+            if state["pyramid_armed"] and p["step"] < 3 and not _blacked_out(frame, tk, day):
+                for order in sg.pyramid_orders(p["pivot"], ceiling=cfg["pyramid_ceiling"]):
+                    if order["step"] <= p["step"] or hi < order["trigger"]:
                         continue
-                    diag["touched"] += 1
-                    if np.isnan(pv) or np.isnan(pv5) or pv < 1.4 * pv5:
-                        diag["no_volume"] += 1
+                    fill = max(order["trigger"], op if not np.isnan(op) else order["trigger"])
+                    if fill > order["limit"]:
+                        continue                          # a gap beyond +5% fills nothing
+                    dollars = p["target"] * order["fraction"]
+                    if cash < dollars:
                         continue
-                    vol_ok = True
-                    fill = op if not np.isnan(op) else pc
-                    if fill > r.pivot * 1.05:               # §3.2 gap-up tolerance
-                        diag["no_fill_gap"] += 1
-                        continue
-                else:
-                    hi = H[tk].iloc[t]
-                    if np.isnan(hi) or hi < r.pivot:
-                        continue
-                    diag["touched"] += 1
-                    limit = r.pivot * 1.02
-                    fill = r.pivot if (np.isnan(op) or op <= r.pivot) else op
-                    if fill > limit:
-                        diag["no_fill_gap"] += 1
-                        continue                            # gapped through the limit — no fill
-                    vv, v5 = V[tk].iloc[t], v50[tk].iloc[t]
-                    vol_ok = bool(not np.isnan(vv) and not np.isnan(v5) and vv >= 1.4 * v5)
-                    if not vol_ok:
-                        diag["no_volume"] += 1              # filled anyway; exits at tomorrow's open
-                stop = max(r.clow, fill * (1 - MAXSTOP))
-                dist = max((fill - stop) / fill, 1e-4)
-                budget = budgets[85] if r.mcn >= 85 else budgets[70]
-                size = min(budget / dist, BAND)
-                target = size * nav
-                if exposure + target > CEIL * nav or cash < target * 0.5:
-                    diag["no_room"] += 1
+                    paid = dollars * (1 + spread(j, t))
+                    cash -= paid
+                    p["lots"].append((dollars, fill, A[t, j] if np.isfinite(A[t, j]) else fill))
+                    p["qty"] += dollars / fill
+                    p["invested"] += paid
+                    p["gross_invested"] += dollars
+                    p["avg_cost"] = p["invested"] / p["qty"]
+                    p["step"] = order["step"]
+
+            # ---- the stop ladder
+            out = sg.ratchet_stop(closes=C[max(0, p["entry_idx"]):t + 1, j][
+                                      ~np.isnan(C[max(0, p["entry_idx"]):t + 1, j])],
+                                  avg_cost=p["avg_cost"], current_stop=p["stop"],
+                                  highest_close=p["hi_close"], pyramid_step=p["step"])
+            if out["stop"] is not None:
+                p["stop"] = out["stop"]
+            p["last_mark"] = cl
+
+        # ---- entries. A resting GTC buy stop-limit at the pivot, judged daily (§3.2 M3 is a
+        # daily trigger check — the pre-rewrite sim reused Friday's pivot all week).
+        if on and queue and len(book) < cfg["max_names"]:
+            exposure = sum(p["qty"] * (C[t, col[p["ticker"]]] if not np.isnan(C[t, col[p["ticker"]]])
+                                       else p["last_mark"]) for p in book.values())
+            for tk in queue["l1m"]:
+                if tk in book or len(book) >= cfg["max_names"]:
                     continue
-                diag["taken"] += 1
-                fired[tk] = round(float(r.pivot), 4)
-                first = target * 0.5                        # pyramid step 1
-                q = first / fill
-                cash -= first
-                exposure += first
-                book[tk] = dict(ticker=tk, entry=fill, qty=q, stop=stop, pivot=r.pivot,
-                                hi_close=fill, step=1, target_cad=target, mcn=float(r.mcn),
-                                entry_date=day, entry_idx=t, init_stop=stop, size=size,
-                                mfe=0.0, mae=0.0, last_mark=fill, vol_ok=vol_ok)
+                row = scored[tk]
+                if not sg.enterable(row["mcn"], floor=cfg["min_mcn"]):
+                    conf["entries_refused_below_70"] += 1
+                    continue
+                j = col[tk]
+                # The base is read on LAST NIGHT's bars, and today's session is what fills the
+                # order resting at its pivot (§5.1). Scanning through today instead would mark the
+                # base broken by the very breakout it is supposed to trigger — the scan says
+                # "spent" the moment a high clears pivot x 1.005 — so nothing but marginal touches
+                # could ever fill.
+                a, b = max(0, t - TAIL), t
+                base = sg.base_scan(H[a:b, j], L[a:b, j], C[a:b, j])
+                if not base["valid"]:
+                    continue
+                pivot = base["pivot"]
+                if fired.get(tk) == round(float(pivot), 4):
+                    continue                              # this order already filled once
+                if _blacked_out(frame, tk, day):
+                    continue                              # §3.3: the wall cancels resting orders
+                hi, op = H[t, j], O[t, j]
+                if np.isnan(hi) or hi < pivot:
+                    continue
+                order = sg.entry_order(pivot, base["contraction_low"],
+                                       limit_over=cfg["limit_over"], max_stop=cfg["max_stop"])
+                fill = pivot if (np.isnan(op) or op <= pivot) else op
+                if fill > order["limit"]:
+                    conf["gap_no_fill"] += 1
+                    continue                              # gapped through the limit — no fill
+                size = sg.momentum_size(nav=nav, mcn_score=row["mcn"],
+                                        stop_distance=order["stop_distance"])
+                if not size:
+                    continue
+                target = size["size_pct"] * nav
+                if exposure + target > cfg["sleeve_cap"] * nav:
+                    continue
+                dollars = target * order["fraction"]       # step 1 — 50%
+                if cash < dollars * (1 + 0.01):
+                    continue
+                paid = dollars * (1 + spread(j, t))
+                cash -= paid
+                exposure += dollars
+                fired[tk] = round(float(pivot), 4)
+                conf["entries"] += 1
+                book[tk] = dict(ticker=tk, lots=[(dollars, fill, A[t, j] if np.isfinite(A[t, j]) else fill)],
+                                qty=dollars / fill, invested=paid, gross_invested=dollars,
+                                avg_cost=paid / (dollars / fill), stop=order["stop"], pivot=pivot,
+                                hi_close=fill, step=1, target=target, mcn=row["mcn"],
+                                entry_date=day, entry_idx=t, init_stop=order["stop"],
+                                size=size["size_pct"], mfe=0.0, mae=0.0, last_mark=fill,
+                                confirmed=None, stale=0)
 
         # ---- mark
         held = 0.0
         for p in book.values():
-            px = C[p["ticker"]].iloc[t]
+            px = C[t, col[p["ticker"]]]
             if np.isnan(px):
-                px = p["last_mark"]                        # carry, never drop to zero
+                px = p["last_mark"]
             else:
                 p["last_mark"] = px
             held += p["qty"] * px
         nav = cash + held
-        b = w["close"]["SPY.US"].iloc[t] if "SPY.US" in w["close"].columns else np.nan
-        equity.append((day, nav, held / nav if nav else 0, len(book), "ON" if on else "OFF", b))
+        equity.append((day, nav, held / nav if nav else 0.0, len(book),
+                       "ON" if on else "OFF", frame["bench_by_day"].get(day)))
 
-    # liquidate whatever is open at the end, so every trade has an exit
-    t = len(dates) - 1
     for tk in list(book):
-        px = C[tk].iloc[t]
-        if not np.isnan(px):
-            cash += book[tk]["qty"] * px
-            close_trade(book, trades, tk, dates[t], px, "end of test", t)
-    return trades, equity, diag
+        j = col[tk]
+        px = C[n - 1, j]
+        cash += close_position(tk, dates[n - 1], px if not np.isnan(px) else book[tk]["last_mark"],
+                               "end_of_test", n - 1)
+    return trades, equity, conf
 
 
-def close_trade(book, trades, tk, day, price, reason, t):
-    p = book.pop(tk)
-    pnl = (price - p["entry"]) * p["qty"]
-    trades.append(dict(ticker=tk, entry_date=p["entry_date"], entry_price=p["entry"],
-                       qty=p["qty"], exit_date=day, exit_price=price, mcn=p["mcn"],
-                       pivot=p["pivot"], initial_stop=p["init_stop"], size_pct=p["size"],
-                       pyramid_steps=p["step"], pnl_cad=pnl,
-                       pnl_pct=price / p["entry"] - 1, bars_held=t - p["entry_idx"],
-                       max_favorable=p["mfe"], max_adverse=p["mae"], exit_reason=reason))
+def _stamp(obj):
+    """A short, stable digest of the config a run was decided by."""
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
-# ------------------------------------------------------------------ stats + persistence
-def summarise(trades, equity, spx):
+def _gate_series(spx):
+    """M1 for every week of the test, latched — `market_gate` carrying its own previous state.
+
+    The rule returns one verdict for one moment and needs the prior state to latch, so the driver
+    walks it forward week by week. The walking is the driver's job; the verdict is never the
+    driver's job, which is why this calls §3.2's own function 520 times rather than reimplementing
+    the comparison once.
+    """
+    dates, closes = list(spx.index), list(spx.values)
+    weeks = sg.weekly_closes(dates, closes)
+    ends, states, prev = [], [], None
+    for i, (week_end, _) in enumerate(weeks):
+        k = bisect.bisect_right(dates, week_end)
+        try:
+            out = sg.market_gate(dates[:k], closes[:k], previous=prev)
+        except ValueError:
+            continue                              # not yet 35 weekly closes — no verdict exists
+        prev = out["state"]
+        ends.append(week_end)
+        states.append(prev)
+    return ends, states
+
+
+def _gate_on(ends, states, day):
+    """The M1 decision in force — the most recent weekly verdict at or before `day` (§3.2 latch)."""
+    i = bisect.bisect_right(ends, day) - 1
+    return bool(i >= 0 and states[i] == "ON")
+
+
+def _next_report(reports, day):
+    if not reports:
+        return None
+    i = bisect.bisect_left(reports, day)
+    return reports[i] if i < len(reports) else None
+
+
+def _blacked_out(frame, ticker, day):
+    """§3.3: no entries and no adds within 5 trading days of a scheduled report."""
+    nxt = _next_report(frame["reports"].get(ticker), day)
+    return nxt is not None and sg.in_blackout(day, nxt)
+
+
+# =============================================================================== conformance
+def conformance(conf, trades, equity):
+    """Every §3.2/§3.3 clause the run claims to implement, and how much of the window had the data
+    to enforce it. A green tick on a clause that was unenforceable for most of the test is the
+    failure this table exists to end (learnings #19 — green is not a result)."""
+    reasons = {t["exit_reason"] for t in trades}
+    legal = {"stop", "gap", "gate_off", "unconfirmed", "template", "score", "earnings",
+             "stalled", "delisted", "end_of_test"}
+    cov = lambda a, b: (a / b) if b else None
+    return [
+        dict(clause="M1 latch — weekly, 30-week SMA", fn="signals.market_gate", coverage=1.0),
+        dict(clause="M2 trend template — six conditions", fn="signals.trend_template", coverage=1.0),
+        dict(clause="M3 base detection, checked daily", fn="signals.base_scan", coverage=1.0),
+        dict(clause="M4 earnings acceleration", fn="signals.m4_acceleration",
+             coverage=cov(conf["m4_known"], conf["m4_evaluated"])),
+        dict(clause="MCN — three components, windows end t-10", fn="signals.mcn", coverage=1.0),
+        dict(clause="Entry — GTC stop-limit, pivot / pivot+2%", fn="signals.entry_order", coverage=1.0),
+        dict(clause="EOD confirmation, freeze at 50%, late window",
+             fn="signals.confirmation_state", coverage=1.0),
+        dict(clause="Pyramid +2%/+4%, both limits pivot x 1.05", fn="signals.pyramid_orders",
+             coverage=1.0),
+        dict(clause="Stops — initial, breakeven, 10% trail, euphoria", fn="signals.ratchet_stop",
+             coverage=1.0),
+        dict(clause="Exits — stop, template, MCN < 55", fn="driver",
+             coverage=1.0, unknown_reasons=sorted(reasons - legal)),
+        dict(clause="Earnings blackout — 5 trading days", fn="signals.in_blackout",
+             coverage=cov(conf["blackout_known"], conf["blackout_decisions"])),
+        dict(clause="Sizing — budget / stop distance", fn="signals.momentum_size", coverage=1.0),
+        dict(clause="MCN < 70 never tickets", fn="signals.enterable", coverage=1.0,
+             refused=conf["entries_refused_below_70"],
+             violations=sum(1 for t in trades if t["mcn"] is not None and t["mcn"] < 70)),
+        dict(clause="Stalled pyramid — 4 weeks", fn="signals.stalled_pyramid", coverage=1.0),
+        dict(clause="Survivorship — delisted retained", fn="driver", coverage=1.0,
+             delisted_exits=sum(1 for t in trades if t["exit_reason"] == "delisted")),
+    ]
+
+
+def summarise(trades, equity, frame, conf):
     eq = pd.DataFrame(equity, columns=["d", "nav", "exposure", "positions", "gate", "bench"])
     eq["d"] = pd.to_datetime(eq["d"])
     nav = eq.nav
     years = max((eq.d.iloc[-1] - eq.d.iloc[0]).days / 365.25, 1e-9)
-    total = nav.iloc[-1] / nav.iloc[0] - 1
-    cagr = (nav.iloc[-1] / nav.iloc[0]) ** (1 / years) - 1
-    peak = nav.cummax()
-    dd = nav / peak - 1
+    dd = nav / nav.cummax() - 1
     wins = [t for t in trades if t["pnl_pct"] > 0]
     losses = [t for t in trades if t["pnl_pct"] <= 0]
-    s = pd.Series(spx.values, index=pd.to_datetime(spx.index))
-    s = s.loc[eq.d.iloc[0]:eq.d.iloc[-1]]
-    bench_total = (s.iloc[-1] / s.iloc[0] - 1) if len(s) > 1 else None
+    b = eq.bench.dropna()
+    bench_total = (b.iloc[-1] / b.iloc[0] - 1) if len(b) > 1 else None
+    invested = sum(t["qty"] * t["entry_price"] for t in trades) or 1.0
+    table = conformance(conf, trades, equity)
     return dict(
         start_date=eq.d.iloc[0].date(), end_date=eq.d.iloc[-1].date(), trading_days=len(eq),
         start_nav=float(nav.iloc[0]), end_nav=float(nav.iloc[-1]),
-        total_return=float(total), cagr=float(cagr),
+        total_return=float(nav.iloc[-1] / nav.iloc[0] - 1),
+        cagr=float((nav.iloc[-1] / nav.iloc[0]) ** (1 / years) - 1),
         max_drawdown=float(dd.min()), max_dd_date=eq.d.iloc[int(dd.idxmin())].date(),
         trades=len(trades), wins=len(wins),
         win_rate=(len(wins) / len(trades)) if trades else None,
@@ -420,45 +554,101 @@ def summarise(trades, equity, spx):
         benchmark_return=float(bench_total) if bench_total is not None else None,
         benchmark_cagr=float((1 + bench_total) ** (1 / years) - 1) if bench_total is not None else None,
         stats=dict(
+            benchmark=BENCH, gate_source=frame["gate_source"], currency="USD",
+            conformance=table,
+            conformance_ok=all(c.get("coverage") not in (None, 0) for c in table)
+                           and not any(c.get("unknown_reasons") for c in table)
+                           and not any(c.get("violations") for c in table),
             exits={r: sum(1 for t in trades if t["exit_reason"] == r)
-                   for r in {t["exit_reason"] for t in trades}},
+                   for r in sorted({t["exit_reason"] for t in trades})},
+            cost_usd=float(sum(t["cost_usd"] for t in trades)),
+            expectancy_gross=float(np.mean([t["pnl_gross_usd"] / (t["qty"] * t["entry_price"])
+                                            for t in trades])) if trades else None,
+            dividend_bps=float(10_000 * sum(t["dividend_usd"] for t in trades) / invested)
+                         if trades else None,
             days_gate_on=int((eq.gate == "ON").sum()), days_gate_off=int((eq.gate == "OFF").sum()),
             pct_time_invested=float((eq.positions > 0).mean()),
             best=max((t["pnl_pct"] for t in trades), default=None),
             worst=min((t["pnl_pct"] for t in trades), default=None),
-            biases=["survivorship — L0 is today's listings only",
-                    "no M4 gate (point-in-time EPS not stored)",
-                    "no earnings blackout (historical report dates not stored)",
-                    "fills modelled at the pivot; no slippage or FX cost charged"]),
+            diagnostics=conf,
+            biases=["vendor serves the current version of a past statement (restatements)",
+                    "industry mappings are today's",
+                    "L0 census rebuilt from stored bars — names never ingested are still absent"]),
     )
 
 
+# =============================================================================== entry point
 def main():
     with connect() as conn:
         with Heartbeat(conn, "backtest") as hb:
             with conn.cursor() as cur:
-                w, ind, spx = load(cur)
-            hb.detail["tickers"] = int(w["close"].shape[1])
-            hb.detail["bars"] = int(w["close"].shape[0])
-            print(f"backtest: {w['close'].shape[1]} tickers x {w['close'].shape[0]} bars")
-            m1 = m1_series(spx)
-            trades, equity, diag = run(w, ind, m1, hb)
-            hb.detail["diagnostics"] = diag
-            print("  diagnostics:", diag)
-            summary = summarise(trades, equity, spx)
-            summary["stats"]["diagnostics"] = diag
-            print(f"  {summary['trades']} trades | CAGR {summary['cagr']:.1%} | "
-                  f"maxDD {summary['max_drawdown']:.1%} | win {summary['win_rate'] or 0:.0%}")
+                frame = load(cur)
+                # The SAME config rows the nightly reads, spelled the same way. Inventing
+                # `momentum_min_mcn` here would have read a row that does not exist, fallen
+                # through to a default, and measured a threshold nobody set — learnings #21,
+                # which this repo has already paid for once (`score_thresholds.enter` was
+                # decorative for weeks because the code asked for `enterable`).
+                thresholds = config(cur, "score_thresholds", {}) or {}
+                ceilings = config(cur, "sleeve_ceiling", {"momentum": 0.40}) or {}
+                cfg = dict(start_nav=START_NAV,
+                           max_names=int(config(cur, "momentum_max_names", 4)),
+                           sleeve_cap=float(ceilings.get("momentum", 0.40)),
+                           min_mcn=float(thresholds.get("enter", 70)),
+                           mcn_exit=float(thresholds.get("hold", 55)),
+                           cushion=float(config(cur, "holdthrough_cushion", 1.08)),
+                           max_stop=0.08, limit_over=0.02, pyramid_ceiling=1.05,
+                           spread_bps=(5.0, 15.0), addv_break=50_000_000.0)
+                # Behaviour lives in the database as well as in git, so the run stamps what it
+                # ran under. A config change with no re-test is then a visible condition rather
+                # than a silent one (Phase 5 of the backtest plan).
+                config_stamp = _stamp(dict(score_thresholds=thresholds, sleeve_ceiling=ceilings,
+                                           max_names=cfg["max_names"], cushion=cfg["cushion"]))
+
+            wide = frame.pop("wide")
+            index = list(wide["close"].index)
+            if START_DATE:
+                index = [d for d in index if str(d) >= START_DATE]
+            if END_DATE:
+                index = [d for d in index if str(d) <= END_DATE]
+            sub = {k: v.loc[index] for k, v in wide.items()}
+            frame["dates"] = index
+            frame["cols"] = list(sub["close"].columns)
+            frame["arrays"] = {k: v.values.astype(float) for k, v in sub.items()}
+            frame["bench_by_day"] = {d: float(v) for d, v in frame["bench"].items()}
+
+            hb.detail.update(tickers=len(frame["cols"]), bars=len(index),
+                             benchmark=BENCH, gate_source=frame["gate_source"])
+            print(f"backtest {VARIANT}: {len(frame['cols'])} tickers x {len(index)} bars "
+                  f"| bench {BENCH} | gate {frame['gate_source']}")
+
+            trades, equity, conf = simulate(frame, cfg)
+            summary = summarise(trades, equity, frame, conf)
+            print(f"  {summary['trades']} trades | CAGR {summary['cagr']:.1%} "
+                  f"vs {BENCH} {summary['benchmark_cagr'] or 0:.1%} | "
+                  f"maxDD {summary['max_drawdown']:.1%} | "
+                  f"conformance {'OK' if summary['stats']['conformance_ok'] else 'FAILED'}")
+            for c in summary["stats"]["conformance"]:
+                if c.get("coverage") is not None and c["coverage"] < 1.0:
+                    print(f"    coverage {c['coverage']:.0%} — {c['clause']}")
+
             if not dry():
+                params = dict(variant=VARIANT, law_stamp=LAW_STAMP, currency="USD",
+                              config_stamp=config_stamp,
+                              benchmark=BENCH, start_nav=START_NAV, warmup=WARMUP,
+                              costs=dict(commission_per_trade=0.0, fx_fee_per_side=0.0,
+                                         half_spread_bps=dict(deep=cfg["spread_bps"][0],
+                                                              thin=cfg["spread_bps"][1]),
+                                         addv_break=cfg["addv_break"]),
+                              max_names=cfg["max_names"], sleeve_cap=cfg["sleeve_cap"],
+                              min_mcn=cfg["min_mcn"])
                 with conn.cursor() as cur:
-                    cur.execute("""insert into backtest_runs(label,params,start_date,end_date,trading_days,
-                          start_nav,end_nav,total_return,cagr,max_drawdown,max_dd_date,trades,wins,
-                          win_rate,avg_win,avg_loss,expectancy,avg_exposure,avg_hold_days,
-                          benchmark_return,benchmark_cagr,stats)
+                    cur.execute("""insert into backtest_runs(label,params,start_date,end_date,
+                          trading_days,start_nav,end_nav,total_return,cagr,max_drawdown,max_dd_date,
+                          trades,wins,win_rate,avg_win,avg_loss,expectancy,avg_exposure,
+                          avg_hold_days,benchmark_return,benchmark_cagr,stats)
                         values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         returning id""",
-                        (LABEL, json.dumps(dict(start_nav=START_NAV, max_names=4, sleeve_cap=0.40,
-                                                budgets={"70": 0.007, "85": 0.009}, warmup=WARMUP)),
+                        (LABEL, json.dumps(params),
                          summary["start_date"], summary["end_date"], summary["trading_days"],
                          summary["start_nav"], summary["end_nav"], summary["total_return"],
                          summary["cagr"], summary["max_drawdown"], summary["max_dd_date"],
@@ -468,23 +658,29 @@ def main():
                          summary["benchmark_return"], summary["benchmark_cagr"],
                          json.dumps(summary["stats"], default=str)))
                     rid = cur.fetchone()[0]
-                    cur.executemany("""insert into backtest_trades(run_id,ticker,entry_date,entry_price,
-                          qty,exit_date,exit_price,mcn,pivot,initial_stop,size_pct,pyramid_steps,
-                          pnl_cad,pnl_pct,bars_held,max_favorable,max_adverse,exit_reason)
+                    cur.executemany("""insert into backtest_trades(run_id,ticker,entry_date,
+                          entry_price,qty,exit_date,exit_price,mcn,pivot,initial_stop,size_pct,
+                          pyramid_steps,pnl_cad,pnl_pct,bars_held,max_favorable,max_adverse,
+                          exit_reason)
                         values (%(run_id)s,%(ticker)s,%(entry_date)s,%(entry_price)s,%(qty)s,
-                          %(exit_date)s,%(exit_price)s,%(mcn)s,%(pivot)s,%(initial_stop)s,%(size_pct)s,
-                          %(pyramid_steps)s,%(pnl_cad)s,%(pnl_pct)s,%(bars_held)s,%(max_favorable)s,
-                          %(max_adverse)s,%(exit_reason)s)""",
+                          %(exit_date)s,%(exit_price)s,%(mcn)s,%(pivot)s,%(initial_stop)s,
+                          %(size_pct)s,%(pyramid_steps)s,%(pnl_usd)s,%(pnl_pct)s,%(bars_held)s,
+                          %(max_favorable)s,%(max_adverse)s,%(exit_reason)s)""",
                         [{**t, "run_id": rid} for t in trades])
-                    cur.executemany("""insert into backtest_equity(run_id,d,nav,exposure,positions,gate,benchmark)
-                                       values (%s,%s,%s,%s,%s,%s,%s)""",
-                        [(rid, d, n, e, p, g, None if (b is None or (isinstance(b, float) and np.isnan(b))) else b)
-                         for d, n, e, p, g, b in equity])
+                    cur.executemany("""insert into backtest_equity(run_id,d,nav,exposure,positions,
+                                         gate,benchmark) values (%s,%s,%s,%s,%s,%s,%s)""",
+                        [(rid, d, nv, e, p, g, None if bch is None or
+                          (isinstance(bch, float) and np.isnan(bch)) else bch)
+                         for d, nv, e, p, g, bch in equity])
                 conn.commit()
                 hb.detail["run_id"] = rid
+
             hb.rows = len(trades) + len(equity)
             hb.detail.update({k: v for k, v in summary.items() if k != "stats"})
             hb.detail["exits"] = summary["stats"]["exits"]
+            hb.detail["conformance_ok"] = summary["stats"]["conformance_ok"]
+            if not summary["stats"]["conformance_ok"]:
+                hb.amber("conformance table has a failing clause — see stats.conformance")
     return 0
 
 

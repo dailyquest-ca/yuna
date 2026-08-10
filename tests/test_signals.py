@@ -150,6 +150,85 @@ def test_unknown_baseline_never_reads_as_confirmed():
     assert s.breakout_confirmed([9e9], [None]) is False
 
 
+# ------------------------------------------------------- §3.2 the confirmation state machine
+#
+# The mechanic ratified 2026-07-31 and never backtested: mechanical entry, EOD verdict, freeze at
+# 50%, three sessions to confirm late, exit only on a close back below the pivot. Every run in
+# `backtest_runs` models the rule this one replaced.
+
+def test_a_confirmed_breakout_arms_the_pyramid_at_full_size():
+    out = s.confirmation_state([1.5e6], [1e6])
+    assert out["confirmed"] is True and out["pyramid_armed"] is True
+    assert out["fraction"] == 1.0
+
+
+def test_an_unconfirmed_breakout_is_pending_and_frozen_at_half():
+    """§3.2: below 1.4x is NOT an exit — the pyramid freezes at step 1 and the clock starts."""
+    out = s.confirmation_state([1.0e6], [1e6])
+    assert out["confirmed"] is None and out["pyramid_armed"] is False
+    assert out["fraction"] == 0.5
+    assert out["exit_next_open"] is False
+    assert out["sessions_left"] == 2
+
+
+def test_the_third_session_can_still_confirm_late():
+    out = s.confirmation_state([1e6, 1.1e6, 1.5e6], [1e6] * 3)
+    assert out["confirmed"] is True and out["fraction"] == 1.0
+
+
+def test_the_window_closes_after_three_sessions():
+    out = s.confirmation_state([1e6, 1e6, 1e6], [1e6] * 3)
+    assert out["confirmed"] is False and out["sessions_left"] == 0
+    assert out["fraction"] == 0.5                      # frozen for good, but still held
+
+
+def test_volume_alone_never_exits():
+    """171 trades and 4.7% of NAV in run 5 exited on this condition. It is not a rule."""
+    out = s.confirmation_state([1e6, 1e6, 1e6], [1e6] * 3, closes=[105.0], pivot=100.0)
+    assert out["confirmed"] is False
+    assert out["exit_next_open"] is False
+
+
+def test_the_hair_trigger_is_a_close_back_below_the_pivot():
+    out = s.confirmation_state([1e6, 1e6, 1e6], [1e6] * 3, closes=[105.0, 99.0], pivot=100.0)
+    assert out["exit_next_open"] is True
+
+
+def test_a_confirmed_breakout_has_no_hair_trigger():
+    """Once confirmed, price decides through the stop ladder — not through the pivot."""
+    out = s.confirmation_state([1.5e6], [1e6], closes=[99.0], pivot=100.0)
+    assert out["confirmed"] is True and out["exit_next_open"] is False
+
+
+def test_the_hair_trigger_fires_while_pending_under_the_law_and_not_under_the_nightly():
+    """§3.2 says "while unconfirmed", and a name is unconfirmed from its breakout EOD — pending
+    included. `arming.py` waits for the window to close. Flagged for Zak; both readings pinned so
+    neither can drift silently."""
+    args = ([1e6], [1e6])
+    kw = dict(closes=[99.0], pivot=100.0)
+    assert s.confirmation_state(*args, **kw)["exit_next_open"] is True
+    assert s.confirmation_state(*args, **kw,
+                                hair_trigger_while_pending=False)["exit_next_open"] is False
+
+
+def test_a_stalled_pyramid_is_four_weeks_of_sessions_not_days():
+    assert s.stalled_pyramid(pyramid_step=1, sessions_held=19) is False
+    assert s.stalled_pyramid(pyramid_step=1, sessions_held=20) is True
+
+
+def test_a_full_pyramid_never_stalls():
+    assert s.stalled_pyramid(pyramid_step=3, sessions_held=500) is False
+
+
+def test_below_seventy_never_tickets():
+    """§3.2 Sizing. The backtest never asked: 211 of run 5's 296 trades fail this."""
+    assert s.enterable(70.0) is True
+    assert s.enterable(69.9) is False
+    assert s.enterable(15.1) is False
+    assert s.enterable(None) is False
+    assert s.enterable(float("nan")) is False
+
+
 def test_pyramid_ships_two_adds_capped_at_the_ceiling():
     orders = s.pyramid_orders(100.0)
     assert [o["trigger"] for o in orders] == pytest.approx([102.0, 104.0])

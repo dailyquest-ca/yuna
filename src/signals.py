@@ -203,6 +203,103 @@ def breakout_confirmed(volumes, baselines, *, multiple=CONFIRM_MULTIPLE):
     return False
 
 
+def confirmation_state(volumes, baselines, *, closes=None, pivot=None,
+                       sessions=CONFIRM_SESSIONS, multiple=CONFIRM_MULTIPLE,
+                       hair_trigger_while_pending=True):
+    """§3.2 breakout confirmation as one state machine — the mechanic ratified 2026-07-31.
+
+    `volumes`, `baselines` and `closes` all run from the breakout session forward, one entry per
+    session since entry, the breakout day included. Each baseline is that session's *own* trailing
+    50-day average (`volume_baseline` in the nightly, the shifted rolling mean in the backtest) —
+    a session is never its own baseline.
+
+    Three states, and the freeze is the point of all of them:
+
+      * **confirmed** (`True`) — some session in the window printed >= 1.4x its own baseline. The
+        pyramid arms and the full target may ride.
+      * **pending** (`None`) — inside the window, not yet confirmed. Frozen at 50%. It may still
+        confirm late.
+      * **failed** (`False`) — the window closed with no qualifying session. Frozen at 50% for
+        good; the stalled-pyramid rule resolves it, and normal stops still apply.
+
+    Volume never exits a position — that was the pre-amendment rule, it cost 171 trades and 4.7%
+    of NAV in run 5, and it is gone. The only exit here is the **hair-trigger**: while the breakout
+    is unconfirmed, a close back below the pivot means the breakout failed by the only judge that
+    matters, and the position leaves at the next open.
+
+    `hair_trigger_while_pending` exists because the law and the running code disagree, and the
+    disagreement is Zak's to settle (§5.8 slow lane). §3.2 says the hair-trigger applies "while
+    unconfirmed", and a name is unconfirmed from the EOD of its breakout day — pending included.
+    `arming.py` fires it only once the window has closed (`confirmed is False`). This default
+    follows the law; the nightly passes False to keep its behaviour unchanged until ruled.
+    """
+    v = list(volumes or [])
+    b = list(baselines or [])
+    seen = len(v)
+    confirmed = breakout_confirmed(v, b, multiple=multiple)
+    expired = seen >= sessions
+
+    state = True if confirmed else (False if expired else None)
+    unconfirmed = state is False or (state is None and hair_trigger_while_pending)
+
+    below = False
+    if closes is not None and pivot is not None and len(closes):
+        last = closes[-1]
+        below = last is not None and np.isfinite(last) and float(last) < float(pivot)
+
+    return dict(confirmed=state,
+                pyramid_armed=state is True,
+                fraction=1.0 if state is True else 0.5,
+                exit_next_open=bool(unconfirmed and below),
+                closed_below_pivot=bool(below),
+                sessions_seen=seen,
+                sessions_left=max(0, sessions - seen))
+
+
+def stalled_pyramid(*, pyramid_step, sessions_held, full_step=3, weeks=4, sessions_per_week=5):
+    """§3.2: "A pyramid stalled below full size for 4 weeks either completes on the next base or
+    exits — no permanent sub-scale positions." Four weeks is 20 sessions, not 28 days."""
+    return pyramid_step < full_step and sessions_held >= weeks * sessions_per_week
+
+
+def m4_acceleration(eps_by_quarter, *, strong=0.25, accelerating=0.15):
+    """§3.2 M4 — latest reported quarter YoY EPS growth >= 25%, **or** accelerating for two
+    consecutive quarters with the latest >= 15%.
+
+    `eps_by_quarter` is newest-first: an ordered sequence of EPS values, one per *reported*
+    quarter. Each quarter is compared with the one four reported quarters back, so a skipped
+    filing shifts the comparison rather than inventing a base. A non-positive base year yields no
+    growth rate at all — a swing from a loss is not a growth rate, and dividing by it invents one.
+
+    The point-in-time caller filters by filing date before calling; the nightly passes what it
+    holds. Same arithmetic either way, which is the point of it living here.
+    """
+    eps = [e for e in eps_by_quarter if e is not None and np.isfinite(e)]
+    yoy = []
+    for i, v in enumerate(eps[:8]):
+        base = eps[i + 4] if i + 4 < len(eps) else None
+        yoy.append((v / base - 1) if base and base > 0 else None)
+    y0 = yoy[0] if yoy else None
+    y1 = yoy[1] if len(yoy) > 1 else None
+    passes = bool((y0 is not None and y0 >= strong)
+                  or (y0 is not None and y1 is not None and y0 > y1 and y0 >= accelerating))
+    return dict(passes=passes, yoy_latest=y0, yoy_prev=y1, quarters=len(eps))
+
+
+ENTER_FLOOR = 70.0
+
+
+def enterable(mcn_score, *, floor=ENTER_FLOOR):
+    """§3.2 Sizing: "MCN < 70 never tickets — BUY-state names below 70 stay queued."
+
+    A gate, not a size adjustment: a name below the floor is never armed at all. It lives here so
+    that both the nightly and the backtest ask the same question — the backtest never asked it,
+    and 211 of run 5's 296 trades were entries this returns False for.
+    """
+    return bool(mcn_score is not None and np.isfinite(mcn_score)
+                and float(mcn_score) >= float(floor))
+
+
 def pyramid_orders(pivot, *, ceiling=1.05):
     """Steps 2 and 3 as resting add stop-limits: triggers +2% / +4%, both limits pivot x 1.05.
 
