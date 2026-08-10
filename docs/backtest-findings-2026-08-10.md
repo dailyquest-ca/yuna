@@ -13,17 +13,40 @@ Conformance 15/15 on every run cited here.
 
 ## 1. The headline
 
+`backtest_runs.id = 15` — the whole tape: 5,276 tickers including 2,031 delisted names, ten years
+of report dates, Zak's 2026-08-10 hair-trigger ruling in force. Conformance 15/15.
+
 | | law-v0 | VOO |
 |---|---:|---:|
-| CAGR | **−1.53%** | **+15.57%** |
-| Total return, 2017-09 → 2026-08 | −12.8% | +263.7% |
-| Expectancy / trade | −0.71% net · −0.52% gross | — |
-| Win rate | 21.6% | — |
-| Average win / loss | +6.67% / −2.74% (2.4:1) | — |
-| Max drawdown | −20.0% | — |
-| Average exposure | 12.3% of NAV | 100% |
+| CAGR | **−0.73%** | **+15.46%** |
+| Expectancy / trade | −0.43% net · −0.25% gross | — |
+| Win rate | 29.0% | — |
+| Max drawdown | −12.6% | — |
+| Average exposure | 11.9% of NAV | 100% |
 
-449 trades. Costs are 19 bps a trade and are not the problem.
+403 trades. Costs are $9,261 over nine years — 19 bps a trade, and not the problem.
+
+**What moved it from the first run** (id 14: −1.53%, 21.6% win rate, −20.0% drawdown) was not
+survivorship, which only ever flatters. It was two fixes landing at once:
+
+* **The hair-trigger ruling.** Waiting out the confirmation window cut `unconfirmed` exits from 158
+  to 95. Each one costs more when it does fire (−1.61% → −2.12%, exactly the wider-stop exposure
+  the ruling accepts) but the bucket's total loss fell from −$23,276 to −$18,737.
+* **The ten-year earnings calendar.** `earnings` exits went from 4 to 47 and are **profitable**
+  (+1.52% each, +$8,939) — §3.3's hold-through cushion could not be tested at all before the
+  backfill, and it works: those names return −0.11% over the next 60 days while VOO returns +4.04%.
+
+### The survivorship correction is only half done
+
+2,033 delisted names are in the universe and in the ranking pool, and **zero of them were
+tradeable**: only 2 carry a fundamentals row, so M4 is unknown for the rest, and an unknown M4 is
+not a pass. M4 coverage fell from 99.9% to **80.4%** for exactly this reason, and the conformance
+table says so.
+
+So the dead now dilute the percentiles and leave the census the day their bars stop — but the
+system still cannot *buy* a name that later dies. **The headline remains flattered.** Closing it
+needs a fundamentals sweep over the delisted census (2,031 names × 10 units ≈ 20k of a 100k daily
+budget).
 
 ---
 
@@ -34,27 +57,33 @@ paid, against VOO over the identical windows.
 
 | | per trade |
 |---|---:|
-| What the rules captured | **−0.79%** |
-| Hold the same pick 25 sessions | +0.71% |
-| Hold 63 sessions | +2.78% |
-| **Hold 125 sessions** | **+7.40%** |
-| VOO over those same 125 sessions | +6.80% |
-| Picks up at 125 days | 61.1% |
+| What the rules captured | **−0.51%** |
+| Hold the same pick 25 sessions | +0.79% |
+| Hold 63 sessions | +2.85% |
+| **Hold 125 sessions** | **+8.00%** |
+| VOO over those same 125 sessions | +7.09% |
 
-**The rules destroy roughly eight percentage points per trade.** The selection is mildly positive —
-0.6pp better than the index over six months, about 1.2%/yr of edge — and the mechanics turn it into
-a loss.
+n = 373. **The rules destroy roughly eight and a half percentage points per trade.** The selection
+is mildly positive — 0.9pp better than the index over six months, under 2%/yr of edge — and the
+mechanics turn it into a loss. Both figures survived the survivorship correction essentially
+unchanged.
 
 Confirmed exit by exit. What each name did in the 60 days *after* we sold it:
 
 | Exit | n | We made | Name's next 60d | VOO's next 60d | Verdict |
 |---|---:|---:|---:|---:|---|
-| `unconfirmed` | 143 | −1.59% | **+4.69%** | +3.73% | sold winners at a loss |
-| `gap` | 36 | −2.72% | **+5.99%** | +4.73% | sold winners at a loss |
-| `stop` | 134 | −1.88% | +2.81% | +3.27% | defensible |
-| `template` | 21 | −3.32% | +2.31% | +4.07% | fine |
-| `stalled` | 69 | +4.73% | +0.90% | +2.28% | **well timed** |
-| `score` (MCN<55) | 6 | +6.01% | **−9.19%** | −0.34% | **excellent** |
+| `unconfirmed` | 87 | −2.07% | **+4.96%** | +3.95% | sold winners at a loss |
+| `gap` | 27 | −2.05% | **+6.26%** | +4.54% | sold winners at a loss |
+| `template` | 20 | −3.49% | **+6.65%** | +4.55% | sold winners at a loss |
+| `stop` | 121 | −1.92% | +2.23% | +3.17% | defensible |
+| `stalled` | 67 | +5.07% | +1.98% | +1.50% | roughly neutral |
+| `earnings` | 45 | +1.61% | **−0.11%** | +4.04% | **excellent** |
+| `score` (MCN<55) | 3 | +3.12% | **−9.73%** | +0.38% | **excellent** |
+
+Three exits sell names that then beat the market — `unconfirmed`, `gap` and now `template`, which
+looked defensible on the smaller sample and does not here. The two that clearly earn their place
+are the two judgement-shaped ones: the earnings cushion and the relative-strength score, both of
+which get out immediately before the name underperforms badly.
 
 The two exits that work are the two that look crudest — a four-week clock and a relative-strength
 score. `score` exits immediately before names fall 9%. The mechanical volume exit is the killer:
