@@ -156,6 +156,26 @@ def recovery_frame(days=DAYS):
     return f, shake
 
 
+def runner_frame(days=DAYS, top=2.6):
+    """The shape the trim ladder exists for: a leader that breaks out and keeps going.
+
+    A smooth climb on purpose. Any wobble large enough to matter brings the trail and the euphoria
+    rung into the picture, and then the test is measuring those instead of the ladder.
+    """
+    f, breakout = frame(days=days, breakout_at=days - 120)
+    a = {k: v.copy() for k, v in f["arrays"].items()}
+    close = a["close"][:, 0]
+    pivot = float(close[breakout]) / 1.03
+    close[breakout:] = pivot * np.linspace(1.03, top, days - breakout)
+    a["high"][breakout:, 0] = close[breakout:] * 1.004
+    a["low"][breakout:, 0] = close[breakout:] * 0.998
+    a["open"][breakout:, 0] = close[breakout:] * 0.999
+    a["open"][breakout, 0] = pivot * 0.995
+    a["low"][breakout, 0] = pivot * 0.99
+    a["adj"][:, 0] = a["close"][:, 0]
+    return dict(f, arrays=a), breakout
+
+
 def cfg(**over):
     hyp = dict(bt.LAW)
     hyp.update(over.pop("hyp", {}))
@@ -663,6 +683,85 @@ def test_t1_stops_selling_on_the_template_and_says_so():
     assert exits["suppressed"] == ["template"]
     law = bt.conformance(t1_conf, t1_trades, [], hyp=dict(bt.LAW))
     assert next(c for c in law if c["clause"].startswith("Exits"))["suppressed"] == []
+
+
+# --------------------------------------------------------------- M1: trimming into strength
+#
+# Zak's own method, ruled in 2026-08-11: "trimming 25% at 50% or so and trimming 25% at 100%. And
+# then letting the rest ride until the stock completely dies." §3.2 has no partial exit at all — a
+# position is opened once and closed once — so this is the first variant that needed the engine to
+# change rather than a threshold.
+
+def test_the_ladder_sells_a_quarter_at_each_rung_and_rides_the_rest():
+    f, _ = runner_frame()
+    trades, _, conf = bt.simulate(f, preset("m1"))
+    hero = [t for t in trades if t["ticker"] == "N00.US"]
+    reasons = [t["exit_reason"] for t in hero]
+    assert conf["trims"] == 2 and reasons[:2] == ["trim50", "trim100"]
+    assert hero[0]["pnl_pct"] == pytest.approx(0.50, abs=0.03)
+    assert hero[1]["pnl_pct"] == pytest.approx(1.00, abs=0.03)
+    # a quarter, then another quarter of the FULL position — not a quarter of what was left
+    full = sum(t["qty"] for t in hero)
+    assert hero[0]["qty"] == pytest.approx(full * 0.25, rel=0.02)
+    assert hero[1]["qty"] == pytest.approx(full * 0.25, rel=0.02)
+    assert hero[-1]["qty"] == pytest.approx(full * 0.50, rel=0.02), "half must be left riding"
+
+
+def test_the_runner_outlives_the_housekeeping_exits():
+    """"Until the stock completely dies" — the template, the MCN floor and the stall and
+    stagnation clocks are how a *resting* position gets closed, and a trimmed one is not resting.
+    It keeps its stop, the market gate and delisting."""
+    f, _ = runner_frame()
+    trades, _, _ = bt.simulate(f, preset("m1"))
+    runner = [t for t in trades if t["ticker"] == "N00.US"][-1]
+    assert runner["exit_reason"] not in ("template", "score", "stalled", "stagnant")
+    off, _ = runner_frame()
+    plain = bt.simulate(off, preset("m1", runner_immunity=False))[0]
+    assert [t["exit_reason"] for t in plain if t["ticker"] == "N00.US"][:2] == ["trim50", "trim100"]
+
+
+def test_the_ladder_keeps_the_basis_of_what_is_left():
+    """A trim must not change the average cost of the remainder, or the next rung, the stop and
+    the breakeven ladder are all measured against a number the position never paid."""
+    f, _ = runner_frame()
+    hero = [t for t in bt.simulate(f, preset("m1"))[0] if t["ticker"] == "N00.US"]
+    basis = {round(t["entry_price"], 6) for t in hero}
+    assert len(basis) == 1, f"the slices disagree about what the position cost: {basis}"
+
+
+def test_an_undeclared_trim_fails_conformance():
+    conf = dict(m4_evaluated=1, m4_known=1, blackout_decisions=1, blackout_known=1,
+                entries=1, entries_refused_below_70=0, reentries=0, trims=4)
+    clause = lambda hyp: next(c for c in bt.conformance(conf, [], [], hyp=hyp)
+                              if c["clause"].startswith("Position is opened once"))
+    assert clause(dict(bt.LAW))["violations"] == 4
+    m1 = dict(bt.LAW); m1.update(bt.PRESETS["m1"])
+    assert clause(m1)["violations"] == 0 and clause(m1)["rungs"] == [0.50, 1.00]
+
+
+def test_the_capital_regime_puts_the_account_to_work():
+    """Ruled 2026-08-11: $100k, all of it, up to 25% on high conviction, against 100% in VOO.
+    §3.2's 0.7-0.9% budget against a 20% stop is a 3.5-4.5% position, which is why thirteen runs
+    all sat ~90% in cash."""
+    law = sg.momentum_size(nav=100_000, mcn_score=90.0, stop_distance=0.20)
+    z1 = bt.PRESETS["z1"]
+    big = sg.momentum_size(nav=100_000, mcn_score=90.0, stop_distance=0.20,
+                           budgets=(z1["budget_lo"], z1["budget_hi"]), band=(0.08, z1["band_hi"]))
+    ordinary = sg.momentum_size(nav=100_000, mcn_score=70.0, stop_distance=0.20,
+                                budgets=(z1["budget_lo"], z1["budget_hi"]),
+                                band=(0.08, z1["band_hi"]))
+    assert law["size_pct"] == pytest.approx(0.045)
+    assert big["size_pct"] == pytest.approx(0.25), "full conviction must reach the 25% ceiling"
+    assert ordinary["size_pct"] == pytest.approx(0.125)
+    assert z1["sleeve_cap_pct"] == 1.0 and z1["entry_fraction"] == 1.0
+
+
+def test_z1_takes_the_whole_position_at_entry_because_e1_already_confirmed():
+    """§3.2 buys half at the pivot because the breakout is unconfirmed there. Under E1 it is
+    confirmed before a share is bought, so the position opens full and must not pyramid again."""
+    f, _ = runner_frame()
+    trades, _, _ = bt.simulate(f, preset("z1"))
+    assert trades and all(t["pyramid_steps"] == 3 for t in trades)
 
 
 def test_an_undeclared_reentry_fails_conformance():

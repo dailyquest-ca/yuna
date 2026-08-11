@@ -65,6 +65,13 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            press_grace=20,             #       sessions the next base has to show up in
            stagnation_days=None,       # H4  — resolve a position that stops making new highs
            template_exit=True,         # T1  — sell when M2 stops passing
+           entry_fraction=0.5,         # Z1  — §3.2's first tranche: half now, the rest on the way
+           band_hi=None,               # Z2  — the position ceiling, as a fraction of NAV
+           budget_lo=None, budget_hi=None,  #  — risk budget, ordinary / full conviction
+           sleeve_cap_pct=None,        # Z3  — the sleeve's ceiling, as a fraction of NAV
+           trim_at=None,               # M1  — unrealised gains at which to sell a slice
+           trim_frac=0.25,             #     — how much of the full position each slice is
+           runner_immunity=False,      #     — what is left after a trim rides on the stop alone
            depth_atr_mult=None,        # D1  — base depth allowance scaled to the name's own ATR
            off_high_atr_mult=None,     # D2  — 52-week-high tolerance scaled the same way
            min_base_age=25,            # D3  — sessions a base runs before its pivot is tradeable
@@ -199,6 +206,34 @@ PRESETS = {
     "b5": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
                atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
                stagnation_days=20, breakeven_giveback=0.5),
+    # ---- the capital regime, ruled by Zak 2026-08-11. Thirteen runs established that no rule
+    # change closes the gap to VOO, because the sleeve is ~90% in cash: §3.2's risk budget is
+    # 0.7-0.9% of NAV and the position band tops out at 12%, so against a 20% volatility stop a
+    # position is 3.5-6.4% of NAV and the book averages 1.3-1.8 names. VOO is 100% invested.
+    #
+    # "to be fair we should say 100k USD is the amount and we can use all of it... with up to 25%
+    # on high conviction... and that's vs. 100% in VOO." So the sleeve gets the whole account: the
+    # budgets are raised until a full-conviction name reaches the 25% ceiling against its own
+    # stop, the sleeve cap goes to 100%, and E1's confirmation makes §3.2's half-now first tranche
+    # a hedge against a risk that no longer exists.
+    "z1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0, max_names=5),
+    # M1 · Zak's own ladder, on top of the capital regime: sell a quarter at +50%, a quarter at
+    # +100%, and let the remaining half ride "until the stock completely dies". The rungs are
+    # resting limit sells at avg cost x (1 + level). The ride is implemented as immunity from the
+    # housekeeping exits — template, MCN floor, stall clock, stagnation clock — since those are
+    # how a position that is merely *resting* gets closed, and a trimmed position is not resting.
+    # It keeps its stop, the gate, and delisting. That reading of "completely dies" is an
+    # assumption, and it is the first thing to revisit if the runner bucket bleeds.
+    "m1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0, max_names=5,
+               trim_at=(0.50, 1.00), trim_frac=0.25, runner_immunity=True),
 }
 
 
@@ -446,7 +481,7 @@ def simulate(frame, cfg):
                                         blackout_known=0, rank_dates=0, entries=0,
                                         entries_refused_below_70=0, gap_no_fill=0,
                                         pressed=0, press_windows=0, press_expired=0,
-                                        reentries=0)
+                                        reentries=0, trims=0)
 
     def spread(j, t):
         """§ WO-12: half-spread by ADDV bucket, per side. Wide names cost more to touch."""
@@ -494,9 +529,18 @@ def simulate(frame, cfg):
             return None                                   # gapped through the limit — no fill
         return dict(kind="base", fill=fill, pivot=pivot, confirmed=None)
 
-    def close_position(tk, day, price, reason, t, gross_price=None):
-        p = book.pop(tk)
+    def realise(tk, day, price, reason, t, qty, gross_price=None):
+        """Book `qty` shares out of a position and write the trade row for that slice.
+
+        The engine held whole positions only until the trim ladder needed partials. A slice is a
+        trade in its own right — its own row, its own reason, its own P&L — so `trim50` and the
+        eventual exit of the runner are separately measurable, which is the whole point of asking
+        whether trimming pays. Average cost is unchanged by a trim: the lots shrink pro rata, so
+        what is left has the same basis, the same stop and the same milestones ahead of it.
+        """
+        p = book[tk]
         j = col[tk]
+        share = qty / p["qty"]
         # Decisions ride raw prices, so the sleeve's P&L is price-only. The dividend the adjusted
         # series implies is measured and reported (`stats.dividend_bps`) rather than either banked
         # silently or forgotten — VOO's benchmark is total return, so this is the size of the
@@ -504,21 +548,36 @@ def simulate(frame, cfg):
         adj_t, px_t = A[t, j], C[t, j]
         if np.isfinite(adj_t) and np.isfinite(px_t):
             total = sum(d * (adj_t / a) for d, _, a in p["lots"])
-            dividend = total - sum(d * (px_t / e) for d, e, _ in p["lots"])
+            dividend = share * (total - sum(d * (px_t / e) for d, e, _ in p["lots"]))
         else:
             dividend = 0.0
-        proceeds = p["qty"] * price
-        gross = p["qty"] * (gross_price if gross_price is not None else price)
+        invested, gross_invested = p["invested"] * share, p["gross_invested"] * share
+        proceeds = qty * price
+        gross = qty * (gross_price if gross_price is not None else price)
         trades.append(dict(
-            ticker=tk, entry_date=p["entry_date"], entry_price=p["invested"] / p["qty"],
-            qty=p["qty"], exit_date=day, exit_price=price, mcn=p["mcn"], pivot=p["pivot"],
+            ticker=tk, entry_date=p["entry_date"], entry_price=invested / qty,
+            qty=qty, exit_date=day, exit_price=price, mcn=p["mcn"], pivot=p["pivot"],
             initial_stop=p["init_stop"], size_pct=p["size"], pyramid_steps=p["step"],
-            pnl_usd=proceeds - p["invested"], pnl_pct=proceeds / p["invested"] - 1,
-            pnl_gross_usd=gross - p["gross_invested"],
-            cost_usd=(gross - proceeds) + (p["invested"] - p["gross_invested"]),
+            pnl_usd=proceeds - invested, pnl_pct=proceeds / invested - 1,
+            pnl_gross_usd=gross - gross_invested,
+            cost_usd=(gross - proceeds) + (invested - gross_invested),
             dividend_usd=dividend,
             bars_held=t - p["entry_idx"], max_favorable=p["mfe"], max_adverse=p["mae"],
             exit_reason=reason, confirmed=p["confirmed"], entry_kind=p.get("kind", "base")))
+        p["qty"] -= qty
+        p["invested"] -= invested
+        p["gross_invested"] -= gross_invested
+        p["lots"] = [(d * (1 - share), e, a) for d, e, a in p["lots"]]
+        return proceeds
+
+    def trim(tk, day, price, reason, t, qty, gross_price=None):
+        got = realise(tk, day, price, reason, t, qty, gross_price=gross_price)
+        conf["trims"] += 1
+        return got
+
+    def close_position(tk, day, price, reason, t, gross_price=None):
+        proceeds = realise(tk, day, price, reason, t, book[tk]["qty"], gross_price=gross_price)
+        book.pop(tk)
         # A delisted name has no way back; everything else is only a moment we were wrong about.
         if reason != "delisted":
             exited[tk] = t
@@ -579,6 +638,37 @@ def simulate(frame, cfg):
             p["mfe"] = max(p["mfe"], hi / p["avg_cost"] - 1)
             p["mae"] = min(p["mae"], lo / p["avg_cost"] - 1)
 
+            # ---- M1: the trim ladder. Zak's own method — sell a quarter at +50%, a quarter at
+            # +100%, let the rest ride until the name is genuinely finished. Each rung is a
+            # resting GTC limit sell at avg cost x (1 + level), so it fills intraday when the
+            # high reaches it and takes the better price on a gap through. That is how the order
+            # would actually sit at the broker, and unlike an at-the-close trim it cannot use a
+            # price the day had not yet printed when the decision was made.
+            for rung, level in enumerate(hyp["trim_at"] or ()):
+                if rung in p["trimmed"] or p["qty"] <= 0:
+                    continue
+                target = p["avg_cost"] * (1 + float(level))
+                if np.isnan(hi) or hi < target:
+                    continue
+                fill = max(target, op if not np.isnan(op) else target)
+                sold = min(p["qty_peak"] * float(hyp["trim_frac"]), p["qty"])
+                p["trimmed"].add(rung)
+                if sold <= 0:
+                    continue
+                cash += trim(tk, day, fill * (1 - spread(j, t)),
+                             f"trim{int(round(level * 100))}", t, sold, gross_price=fill)
+            if p["qty"] <= 0:
+                book.pop(tk)                      # the ladder sold the last of it
+                exited[tk] = t
+                continue
+            # What is left after a trim is the runner. §3.2's housekeeping exits — the template,
+            # the MCN floor, the stall clock, the stagnation clock — are how a position that is
+            # merely resting gets closed, and Zak's rule is that the runner rides "until the stock
+            # completely dies". So on a trimmed position only the stop, the gate and delisting
+            # speak. This is an interpretation of "completely dies", and it is the assumption to
+            # revisit first if the runner bucket bleeds.
+            riding = hyp["runner_immunity"] and p["trimmed"]
+
             # ---- §3.2 breakout confirmation, judged at EOD on the sessions since entry
             k = t - p["entry_idx"] + 1
             window = range(p["entry_idx"], min(p["entry_idx"] + sg.CONFIRM_SESSIONS, t + 1))
@@ -603,14 +693,15 @@ def simulate(frame, cfg):
                 continue
 
             row = scored.get(tk)
-            if hyp["template_exit"] and row is not None and row["m2"] is False:
+            if hyp["template_exit"] and not riding and row is not None and row["m2"] is False:
                 pending[tk] = "template"
                 continue
-            if row is not None and row["mcn"] == row["mcn"] and row["mcn"] < cfg["mcn_exit"]:
+            if not riding and row is not None and row["mcn"] == row["mcn"] \
+                    and row["mcn"] < cfg["mcn_exit"]:
                 pending[tk] = "score"
                 continue
-            if sg.stagnant(sessions_since_high=t - p["hi_at"],
-                           limit=hyp["stagnation_days"]):
+            if not riding and sg.stagnant(sessions_since_high=t - p["hi_at"],
+                                          limit=hyp["stagnation_days"]):
                 pending[tk] = "stagnant"
                 continue
 
@@ -622,8 +713,8 @@ def simulate(frame, cfg):
             # in 285 trades, so P1 went untested while looking disproven. "The next base" needs a
             # window to arrive in — the position keeps its stop and is given `press_grace` sessions
             # to complete, and exits only if none shows up.
-            stalled_now = sg.stalled_pyramid(pyramid_step=p["step"],
-                                             sessions_held=t - p["stall_from"])
+            stalled_now = not riding and sg.stalled_pyramid(
+                pyramid_step=p["step"], sessions_held=t - p["stall_from"])
             seeking = p.get("seeking")
             if hyp["press_on_next_base"] and p["step"] < 3 and (stalled_now or seeking):
                 if not seeking:
@@ -649,6 +740,7 @@ def simulate(frame, cfg):
                         p["invested"] += paid
                         p["gross_invested"] += dollars
                         p["avg_cost"] = p["invested"] / p["qty"]
+                        p["qty_peak"] = max(p["qty_peak"], p["qty"])
                         p["step"] = 3
                         p["stall_from"] = t
                         p["seeking"] = None
@@ -666,7 +758,7 @@ def simulate(frame, cfg):
             conf["blackout_decisions"] += 1
             if _knowable(nxt, day):
                 conf["blackout_known"] += 1
-                if sg.trading_days_between(day, nxt) <= 1 and \
+                if not riding and sg.trading_days_between(day, nxt) <= 1 and \
                         sg.holds_through_earnings(cl, p["avg_cost"], cushion=cfg["cushion"]) is False:
                     pending[tk] = "earnings"
                     continue
@@ -691,6 +783,7 @@ def simulate(frame, cfg):
                     p["invested"] += paid
                     p["gross_invested"] += dollars
                     p["avg_cost"] = p["invested"] / p["qty"]
+                    p["qty_peak"] = max(p["qty_peak"], p["qty"])
                     p["step"] = order["step"]
 
             # ---- the stop ladder
@@ -776,13 +869,22 @@ def simulate(frame, cfg):
                     stop = sg.initial_stop(fill, None if kind == "reentry"
                                            else base["contraction_low"], max_stop=hyp["max_stop"])
                 dist = max((fill - stop) / fill, 1e-4)
-                size = sg.momentum_size(nav=nav, mcn_score=row["mcn"], stop_distance=dist)
+                budgets = ((hyp["budget_lo"], hyp["budget_hi"])
+                           if hyp["budget_lo"] and hyp["budget_hi"] else (0.007, 0.009))
+                size = sg.momentum_size(nav=nav, mcn_score=row["mcn"], stop_distance=dist,
+                                        budgets=budgets,
+                                        band=(0.08, hyp["band_hi"] or 0.12))
                 if not size:
                     continue
                 target = size["size_pct"] * nav
-                if exposure + target > cfg["sleeve_cap"] * nav:
+                if exposure + target > (hyp["sleeve_cap_pct"] or cfg["sleeve_cap"]) * nav:
                     continue
-                dollars = target * 0.5                     # step 1 — 50% (§3.2 pyramid)
+                # §3.2 buys half now and the rest at +2%/+4%, because at the pivot the breakout is
+                # still unconfirmed. Under E1 it is confirmed before a share is bought, so the
+                # hedge is paying for a risk that no longer exists — Z1 lets the caller take the
+                # whole position at entry, and marks it full so the pyramid does not add again.
+                frac = float(hyp["entry_fraction"])
+                dollars = target * frac
                 if cash < dollars * (1 + 0.01):
                     continue
                 paid = dollars * (1 + spread(j, t))
@@ -797,7 +899,9 @@ def simulate(frame, cfg):
                                 lots=[(dollars, fill, A[t, j] if np.isfinite(A[t, j]) else fill)],
                                 qty=dollars / fill, invested=paid, gross_invested=dollars,
                                 avg_cost=paid / (dollars / fill), stop=stop, pivot=pivot,
-                                hi_close=fill, hi_at=t, step=1, target=target, mcn=row["mcn"],
+                                hi_close=fill, hi_at=t, step=3 if frac >= 1.0 else 1,
+                                target=target, mcn=row["mcn"], trimmed=set(),
+                                qty_peak=dollars / fill,
                                 entry_date=day, entry_idx=t, stall_from=t, init_stop=stop,
                                 size=size["size_pct"], mfe=0.0, mae=0.0, last_mark=fill,
                                 confirmed=born_confirmed, stale=0)
@@ -892,6 +996,7 @@ def conformance(conf, trades, equity, hyp=None):
     # not conformance either — it has to be declared, so a variant can never quietly pass as
     # law-v0. law-v0 declares nothing and so still fails on any unknown reason.
     declared = {"stagnant"} if (hyp or {}).get("stagnation_days") else set()
+    declared |= {f"trim{int(round(x * 100))}" for x in ((hyp or {}).get("trim_at") or ())}
     cov = lambda a, b: (a / b) if b else None
     return [
         dict(clause="M1 latch — weekly, 30-week SMA", fn="signals.market_gate", coverage=1.0),
@@ -926,7 +1031,18 @@ def conformance(conf, trades, equity, hyp=None):
              suppressed=[] if (hyp or {}).get("template_exit", True) else ["template"]),
         dict(clause="Earnings blackout — 5 trading days", fn="signals.in_blackout",
              coverage=cov(conf["blackout_known"], conf["blackout_decisions"])),
-        dict(clause="Sizing — budget / stop distance", fn="signals.momentum_size", coverage=1.0),
+        dict(clause="Sizing — budget / stop distance", fn="signals.momentum_size", coverage=1.0,
+             band_ceiling=(hyp or {}).get("band_hi") or 0.12,
+             entry_fraction=(hyp or {}).get("entry_fraction", 0.5),
+             sleeve_cap=(hyp or {}).get("sleeve_cap_pct")),
+        # §3.2 has no partial exit: a position is opened once and closed once. The trim ladder
+        # sells slices, so the rungs are named here and the count is reported — a run that sold
+        # part of a position without declaring it is not law-v0 however its exits are labelled.
+        dict(clause="Position is opened once and closed once", fn="driver", coverage=1.0,
+             trims=conf.get("trims", 0),
+             violations=(0 if (hyp or {}).get("trim_at") else conf.get("trims", 0)),
+             rungs=list((hyp or {}).get("trim_at") or ()),
+             runner_immunity=bool((hyp or {}).get("runner_immunity"))),
         dict(clause="MCN < 70 never tickets", fn="signals.enterable", coverage=1.0,
              refused=conf["entries_refused_below_70"],
              violations=sum(1 for t in trades if t["mcn"] is not None and t["mcn"] < 70)),
