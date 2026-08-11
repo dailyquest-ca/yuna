@@ -403,14 +403,25 @@ def enterable(mcn_score, *, floor=ENTER_FLOOR):
                 and float(mcn_score) >= float(floor))
 
 
-def pyramid_orders(pivot, *, ceiling=1.05):
+def pyramid_orders(pivot, *, ceiling=1.05, spacing=None, tranches=3):
     """Steps 2 and 3 as resting add stop-limits: triggers +2% / +4%, both limits pivot x 1.05.
 
     A gap that skips a band completes at the open automatically; a gap beyond the ceiling fills
     nothing. The ceiling enforces itself at the broker, unwatched (§3.2, X2).
+
+    `spacing` widens the ladder for hypothesis A1 — Zak's "3 tranches or so that are 5% apart",
+    against §3.2's 50/25/25 at +0/+2/+4%. Equal thirds rather than a half up front, because the
+    point of averaging in is that the later tranches are worth as much as the first. The ceiling
+    has to move with the spacing or the last tranche can never fill, so it is applied relative to
+    each trigger rather than to the pivot.
     """
-    return [dict(step=2, fraction=0.25, trigger=pivot * 1.02, limit=pivot * ceiling),
-            dict(step=3, fraction=0.25, trigger=pivot * 1.04, limit=pivot * ceiling)]
+    if not spacing:
+        return [dict(step=2, fraction=0.25, trigger=pivot * 1.02, limit=pivot * ceiling),
+                dict(step=3, fraction=0.25, trigger=pivot * 1.04, limit=pivot * ceiling)]
+    share = 1.0 / float(tranches)
+    return [dict(step=k + 1, fraction=share, trigger=pivot * (1 + k * spacing),
+                 limit=pivot * (1 + k * spacing) * ceiling)
+            for k in range(1, int(tranches))]
 
 
 def entry_order(pivot, contraction_low, *, limit_over=0.02, max_stop=0.08):
@@ -524,6 +535,25 @@ def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_
         if stop == float(current_stop) and candidate < current_stop:
             mode = "held"
     return dict(stop=stop, mode=mode, highest_close=hc, euphoric=euphoric)
+
+
+def profitability_dead(eps_by_quarter, *, quarters=2):
+    """Has the business stopped making money — the only thing that ends a forever hold.
+
+    Zak's rule (2026-08-11): a name that ran past the last trim rung "rides through the highs and
+    lows unless the financials on the profitability of the company dies". Every other exit in §3.2
+    is a *price* exit, and the whole point of this one is that price no longer speaks. So the test
+    has to be about earnings and nothing else.
+
+    `eps_by_quarter` is newest first, as `m4_acceleration` takes it. Dead means the last `quarters`
+    **reported** quarters are at or below zero — one bad quarter is a stumble, two consecutive is
+    the profitability going away. Unknown is not dead: with no earnings we hold, because the
+    alternative is selling the position on a data gap.
+    """
+    vals = [v for v in (eps_by_quarter or []) if v is not None and np.isfinite(v)]
+    if len(vals) < quarters:
+        return False
+    return all(v <= 0 for v in vals[:quarters])
 
 
 def momentum_size(*, nav, mcn_score, stop_distance, budgets=(0.007, 0.009), band=(0.08, 0.12),

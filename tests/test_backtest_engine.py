@@ -735,6 +735,92 @@ def test_m2_gives_the_runner_a_wider_trail_than_the_position_it_came_from():
     assert ride["mode"] in ("trail10", "held") and ride["stop"] <= tight["stop"]
 
 
+def test_expectancy_does_not_flatter_a_run_that_trims():
+    """A trim rung can only be hit by a position already up 50% or 100%, so slices are winners by
+    construction. Averaging them beside full exits made run 36 read +2.208% while the dollar it
+    deployed returned -1.45%. Equal-weighting rows stopped being meaningful the moment a row
+    became a slice rather than a position, and the summary has to say so itself."""
+    f, _ = runner_frame()
+    trades, equity, conf = bt.simulate(f, preset("m1"))
+    s = bt.summarise(trades, equity, f, conf, hyp=preset("m1")["hyp"])
+    st = s["stats"]
+    assert st["trim_slices"] == 2 and st["trim_usd"] > 0
+    # The headline averages slices beside positions and the full-exit figure does not, so the two
+    # must differ. Which is larger depends on the run — in run 36 the slices flattered it (+2.208%
+    # against -1.45% on the dollar deployed); on a single clean runner they drag it down. Either
+    # way the headline is not a number to compare across runs once a variant trims.
+    assert st["expectancy_full_exits"] != pytest.approx(s["expectancy"])
+    assert st["return_on_deployed"] is not None
+
+    f, _ = frame()
+    plain = bt.simulate(f, cfg())
+    ps = bt.summarise(*plain[:2], f, plain[2])["stats"]
+    assert ps["trim_slices"] == 0
+    assert ps["expectancy_full_exits"] == pytest.approx(
+        bt.summarise(*plain[:2], f, plain[2])["expectancy"]), "no trims: the two must agree"
+
+
+# ------------------------------------------------- A: the forever hold, and averaging into it
+#
+# Zak, 2026-08-11: "what if our biggest winners that made it to +100%... we never sold. We just
+# kept them long-term? ... averaged in ... on proven strength we widen the stops ... 25% at 35% and
+# 25% at 75% and if it makes it that high... never sell... unless the financials on the
+# profitability of the company dies."
+
+def test_averaging_in_is_three_equal_tranches_five_percent_apart():
+    law = sg.pyramid_orders(100.0)
+    a1 = sg.pyramid_orders(100.0, spacing=0.05, tranches=3)
+    assert [o["trigger"] for o in law] == [102.0, 104.0]
+    assert [round(o["trigger"], 2) for o in a1] == [105.0, 110.0]
+    assert all(o["fraction"] == pytest.approx(1 / 3) for o in a1)
+    # the ceiling has to travel with the trigger, or the last tranche can never fill
+    assert all(o["limit"] > o["trigger"] for o in a1)
+    assert bt.PRESETS["a1"]["entry_fraction"] == pytest.approx(1 / 3), (
+        "a1 must not open full — averaging in is the whole point")
+
+
+def test_only_the_financials_can_end_a_forever_hold():
+    """Every §3.2 exit is a price exit, and the premise of the forever hold is that price no
+    longer speaks. So the test has to be earnings and nothing else — and unknown is not dead,
+    because the alternative is selling a position on a data gap."""
+    assert sg.profitability_dead([1.2, 0.9, 0.7]) is False
+    assert sg.profitability_dead([-0.4, 0.9, 0.7]) is False        # one bad quarter is a stumble
+    assert sg.profitability_dead([-0.4, -0.1, 0.7]) is True        # two in a row is the business
+    assert sg.profitability_dead([]) is False                      # no data is not a sell signal
+    assert sg.profitability_dead([-0.4]) is False
+
+
+def test_the_forever_hold_survives_what_would_close_any_other_position():
+    """The runner past the last rung keeps no stop, ignores the template and the score and the
+    clocks, and — this is the part to weigh — ignores the §3.3 market gate too."""
+    f, _ = runner_frame(top=3.0)
+    trades, _, _ = bt.simulate(f, preset("a1"))
+    hero = [t for t in trades if t["ticker"] == "N00.US"]
+    reasons = [t["exit_reason"] for t in hero]
+    assert reasons[:2] == ["trim35", "trim75"]
+    # The remainder is only ever released by the harness closing the book, or by the business
+    # failing. Anything else in this slot means a price exit survived the forever branch.
+    assert reasons[2:] in ([], ["end_of_test"], ["profitability"], ["delisted"]), reasons
+    assert hero[-1]["pnl_pct"] > hero[1]["pnl_pct"], "the runner should still have been running"
+
+    table = bt.conformance(dict(m4_evaluated=1, m4_known=1, blackout_decisions=1,
+                                blackout_known=1, entries=1, entries_refused_below_70=0,
+                                reentries=0, trims=2, heat_refused=0),
+                           trades, [], hyp=preset("a1")["hyp"])
+    exits = next(c for c in table if c["clause"].startswith("Exits"))
+    assert "profitability" not in exits["unknown_reasons"], "the forever exit must be declared"
+
+
+def test_proven_strength_widens_the_trail_rather_than_tightening_it():
+    a1 = dict(bt.LAW); a1.update(bt.PRESETS["a1"])
+    assert a1["strength_trail"] > a1["trail"] and a1["strength_at"] == 0.25
+    parabolic = list(np.linspace(100.0, 150.0, 49)) + [200.0]
+    kw = dict(closes=parabolic, avg_cost=100.0, current_stop=120.0, pyramid_step=3)
+    assert sg.ratchet_stop(**kw, trail10=a1["trail"])["mode"] == "trail5"
+    proven = sg.ratchet_stop(**kw, trail10=a1["strength_trail"], euphoria=False)
+    assert proven["stop"] < sg.ratchet_stop(**kw, trail10=a1["trail"])["stop"]
+
+
 def test_the_heat_cap_binds_before_the_cash_does():
     """The sleeve cap limits how much is invested; nothing limited how much could be lost. Run 34
     averaged +1.27% a trade with a 39.6% win rate and drew down 53.5% — over-betting a real edge.

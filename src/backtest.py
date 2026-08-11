@@ -73,6 +73,11 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            trim_frac=0.25,             #     — how much of the full position each slice is
            runner_immunity=False,      #     — what is left after a trim rides on the stop alone
            heat_cap=None,              # H1  — total open risk, as a fraction of NAV
+           pyramid_spacing=None,       # A1  — average in: tranche spacing, equal thirds
+           pyramid_tranches=3,
+           strength_at=None,           # A2  — gain at which a position has "proven strength"
+           strength_trail=None,        #     — the trail it earns by proving it
+           forever=False,              # A3  — past the last rung, only the financials can sell it
            runner_trail=None,          # M2  — the trail the runner rides on, if not the position's
            runner_no_euphoria=False,   #     — whether the runner is exempt from the 5% tightening
            depth_atr_mult=None,        # D1  — base depth allowance scaled to the name's own ATR
@@ -278,6 +283,32 @@ PRESETS = {
                entry_fraction=1.0, max_names=5, breakeven_on_full_size=False,
                trim_at=(0.50, 1.00), trim_frac=0.25, runner_immunity=True,
                runner_trail=0.35, runner_no_euphoria=True, heat_cap=0.06),
+    # ---- A · Zak's compounder reading of the momentum sleeve (2026-08-11): "what if our biggest
+    # winners that made it to +100%... we never sold. We just kept them long-term?"
+    #
+    # Four changes, and the last one is a change of kind rather than of degree.
+    #   A1  average in over three equal tranches 5% apart, against §3.2's 50/25/25 at +0/+2/+4%
+    #   A2  proven strength (+25%) earns a 40% trail and exemption from the euphoria cut
+    #   A3  trim rungs move in, to +35% and +75%, so more names reach them
+    #   A4  past the last rung the position stops being a trade: every §3.2 exit is a PRICE exit,
+    #       and the premise is that price no longer speaks, so the stop, the trail, the template,
+    #       the score, the clocks and the market gate all go. Only `profitability_dead` — two
+    #       consecutive reported quarters at or below zero — and delisting can sell it.
+    #
+    # A4 is the one to watch. It removes the crash protocol from a live position, so a forever hold
+    # carries a 2008-shaped drawdown by construction. That is the trade Zak is proposing and the
+    # measurement is whether the compounding beats it.
+    "a1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               # a third at the breakout and a third at each of +5% and +10% — averaging in is the
+               # point, so this cannot open full the way z1/m1..m3 do
+               entry_fraction=1.0 / 3.0, pyramid_spacing=0.05, pyramid_tranches=3,
+               max_names=5, breakeven_on_full_size=False, heat_cap=0.06,
+               trim_at=(0.35, 0.75), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True,
+               strength_at=0.25, strength_trail=0.40, forever=True),
 }
 
 
@@ -712,6 +743,27 @@ def simulate(frame, cfg):
             # speak. This is an interpretation of "completely dies", and it is the assumption to
             # revisit first if the runner bucket bleeds.
             riding = hyp["runner_immunity"] and p["trimmed"]
+            # A2: proven strength earns room. Zak's "on proven strength we widen the stops" — a
+            # position that has already made `strength_at` has told us something the entry could
+            # not, and the trail that was right for an unproven breakout is not right for it.
+            gain = cl / p["avg_cost"] - 1
+            proven = hyp["strength_at"] is not None and gain >= float(hyp["strength_at"])
+            # A3: past the final rung the position stops being a trade. Zak's rule — "if it makes
+            # it that high... never sell... just ride it through the highs and lows unless the
+            # financials on the profitability of the company dies". Every §3.2 exit is a PRICE
+            # exit, and the whole premise here is that price no longer speaks, so all of them go:
+            # the stop, the trail, the template, the score, the clocks and the market gate. What
+            # is left is the business failing, and the name ceasing to trade.
+            forever = bool(hyp["forever"] and hyp["trim_at"]
+                           and len(p["trimmed"]) >= len(hyp["trim_at"]))
+            if forever:
+                p["stop"] = None
+                eps = frame["eps"].get(tk)
+                if eps is not None and sg.profitability_dead(eps_as_of(eps, day)):
+                    pending[tk] = "profitability"
+                    continue
+                p["last_mark"] = cl
+                continue
 
             # ---- §3.2 breakout confirmation, judged at EOD on the sessions since entry
             k = t - p["entry_idx"] + 1
@@ -811,7 +863,9 @@ def simulate(frame, cfg):
             add_nxt = _next_report(frame["reports"].get(tk), day)
             if state["pyramid_armed"] and p["step"] < 3 and not (
                     add_nxt is not None and sg.in_blackout(day, add_nxt)):
-                for order in sg.pyramid_orders(p["pivot"], ceiling=cfg["pyramid_ceiling"]):
+                for order in sg.pyramid_orders(p["pivot"], ceiling=cfg["pyramid_ceiling"],
+                                               spacing=hyp["pyramid_spacing"],
+                                               tranches=int(hyp["pyramid_tranches"])):
                     if order["step"] <= p["step"] or hi < order["trigger"]:
                         continue
                     fill = max(order["trigger"], op if not np.isnan(op) else order["trigger"])
@@ -837,7 +891,8 @@ def simulate(frame, cfg):
                                   highest_close=p["hi_close"], pyramid_step=p["step"],
                                   trail10_from=hyp["trail_from"],
                                   trail10=(hyp["runner_trail"] if riding and hyp["runner_trail"]
-                                           else hyp["trail"]),
+                                           else hyp["strength_trail"] if proven
+                                           and hyp["strength_trail"] else hyp["trail"]),
                                   breakeven_r=hyp["breakeven_r"], init_stop=p["init_stop"],
                                   breakeven=hyp["breakeven"],
                                   # A runner has already banked two rungs of profit. The euphoria
@@ -845,8 +900,8 @@ def simulate(frame, cfg):
                                   # a trimmed one it is what ends the ride: in run 33 all three
                                   # runners stopped out 2-4 sessions after their second trim, on a
                                   # 5% trail, at +91.7% (MU), +102.7% (AVAV) and +9.9% (CAMT).
-                                  euphoria=hyp["euphoria"] and not (riding
-                                                                    and hyp["runner_no_euphoria"]),
+                                  euphoria=hyp["euphoria"] and not proven and not (
+                                      riding and hyp["runner_no_euphoria"]),
                                   breakeven_on_full_size=hyp["breakeven_on_full_size"],
                                   breakeven_giveback=hyp["breakeven_giveback"])
             if out["stop"] is not None:
@@ -1062,6 +1117,8 @@ def conformance(conf, trades, equity, hyp=None):
     # law-v0. law-v0 declares nothing and so still fails on any unknown reason.
     declared = {"stagnant"} if (hyp or {}).get("stagnation_days") else set()
     declared |= {f"trim{int(round(x * 100))}" for x in ((hyp or {}).get("trim_at") or ())}
+    if (hyp or {}).get("forever"):
+        declared.add("profitability")
     cov = lambda a, b: (a / b) if b else None
     return [
         dict(clause="M1 latch — weekly, 30-week SMA", fn="signals.market_gate", coverage=1.0),
@@ -1129,6 +1186,8 @@ def summarise(trades, equity, frame, conf, hyp=None):
     b = eq.bench.dropna()
     bench_total = (b.iloc[-1] / b.iloc[0] - 1) if len(b) > 1 else None
     invested = sum(t["qty"] * t["entry_price"] for t in trades) or 1.0
+    full = [t for t in trades if not str(t["exit_reason"]).startswith("trim")]
+    deployed = sum(t["qty"] * t["entry_price"] for t in trades)
     table = conformance(conf, trades, equity, hyp=hyp)
     return dict(
         start_date=eq.d.iloc[0].date(), end_date=eq.d.iloc[-1].date(), trading_days=len(eq),
@@ -1140,6 +1199,10 @@ def summarise(trades, equity, frame, conf, hyp=None):
         win_rate=(len(wins) / len(trades)) if trades else None,
         avg_win=float(np.mean([t["pnl_pct"] for t in wins])) if wins else None,
         avg_loss=float(np.mean([t["pnl_pct"] for t in losses])) if losses else None,
+        # Equal-weighted over trade ROWS. Kept for continuity with runs 1-32, but once a variant
+        # trims, a row is a *slice* rather than a position and this number stops meaning what it
+        # meant — see `expectancy_full_exits` and `return_on_deployed` below, which are the ones to
+        # compare across the M-series.
         expectancy=float(np.mean([t["pnl_pct"] for t in trades])) if trades else None,
         avg_exposure=float(eq.exposure.mean()),
         avg_hold_days=float(np.mean([t["bars_held"] for t in trades])) if trades else None,
@@ -1162,6 +1225,16 @@ def summarise(trades, equity, frame, conf, hyp=None):
             pct_time_invested=float((eq.positions > 0).mean()),
             best=max((t["pnl_pct"] for t in trades), default=None),
             worst=min((t["pnl_pct"] for t in trades), default=None),
+            # A trim rung can only be hit by a position that is already up 50% or 100%, so the
+            # slices are winners *by construction* and averaging them beside full exits flatters
+            # the run. Run 36 reads +2.208% on `expectancy` and -1.45% on the dollar it actually
+            # deployed: five slices averaging +69.85% on $3.4k positions against 122 full exits
+            # averaging -0.56% on $18.2k positions. These two are the honest measures.
+            expectancy_full_exits=float(np.mean([t["pnl_pct"] for t in full])) if full else None,
+            return_on_deployed=(float(sum(t["pnl_usd"] for t in trades) / deployed)
+                                if deployed else None),
+            trim_slices=len(trades) - len(full),
+            trim_usd=float(sum(t["pnl_usd"] for t in trades if t not in full)) if trades else 0.0,
             diagnostics=conf,
             biases=["vendor serves the current version of a past statement (restatements)",
                     "industry mappings are today's",
