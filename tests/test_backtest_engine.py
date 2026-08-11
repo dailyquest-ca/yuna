@@ -735,6 +735,24 @@ def test_m2_gives_the_runner_a_wider_trail_than_the_position_it_came_from():
     assert ride["mode"] in ("trail10", "held") and ride["stop"] <= tight["stop"]
 
 
+def test_the_heat_cap_binds_before_the_cash_does():
+    """The sleeve cap limits how much is invested; nothing limited how much could be lost. Run 34
+    averaged +1.27% a trade with a 39.6% win rate and drew down 53.5% — over-betting a real edge.
+    Heat is the sum of what every open stop would cost if it fired today."""
+    f, _ = frame()
+    hot, _, hot_conf = bt.simulate(f, preset("m3"))
+    f, _ = frame()
+    free, _, free_conf = bt.simulate(f, preset("m2"))
+    assert bt.LAW["heat_cap"] is None, "law-v0 must not have a heat cap"
+    assert free_conf["heat_refused"] == 0
+    assert hot_conf["entries"] <= free_conf["entries"]
+
+    table = bt.conformance(hot_conf, hot, [], hyp=preset("m3")["hyp"])
+    sizing = next(c for c in table if c["fn"] == "signals.momentum_size")
+    assert sizing["heat_cap"] == 0.06
+    assert sizing["heat_refused"] == hot_conf["heat_refused"]
+
+
 def test_the_ladder_keeps_the_basis_of_what_is_left():
     """A trim must not change the average cost of the remainder, or the next rung, the stop and
     the breakeven ladder are all measured against a number the position never paid."""

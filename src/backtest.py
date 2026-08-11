@@ -72,6 +72,7 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            trim_at=None,               # M1  — unrealised gains at which to sell a slice
            trim_frac=0.25,             #     — how much of the full position each slice is
            runner_immunity=False,      #     — what is left after a trim rides on the stop alone
+           heat_cap=None,              # H1  — total open risk, as a fraction of NAV
            runner_trail=None,          # M2  — the trail the runner rides on, if not the position's
            runner_no_euphoria=False,   #     — whether the runner is exempt from the 5% tightening
            depth_atr_mult=None,        # D1  — base depth allowance scaled to the name's own ATR
@@ -261,6 +262,22 @@ PRESETS = {
                entry_fraction=1.0, max_names=5, breakeven_on_full_size=False,
                trim_at=(0.50, 1.00), trim_frac=0.25, runner_immunity=True,
                runner_trail=0.35, runner_no_euphoria=True),
+    # M3 · M2 with a cap on total open risk. Run 34 is the argument: average trade **+1.27%**,
+    # win rate 39.6%, average hold 24.5 sessions — a real edge by every per-trade measure — and a
+    # **-53.5% drawdown**. That gap is not a bad strategy, it is over-betting a good one. The
+    # sleeve cap limits how much is invested and nothing limited how much could be lost: a 25%
+    # position behind a 20% stop risks 5% of NAV, and the book holds four or five of them.
+    #
+    # 6% is one full-conviction name's worth of risk plus change — so the book can carry one 25%
+    # position at full stop width, or several whose stops have already ratcheted up. It makes the
+    # heat, not the cash, the binding constraint, which is the right way round.
+    "m3": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0, max_names=5, breakeven_on_full_size=False,
+               trim_at=(0.50, 1.00), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True, heat_cap=0.06),
 }
 
 
@@ -508,7 +525,7 @@ def simulate(frame, cfg):
                                         blackout_known=0, rank_dates=0, entries=0,
                                         entries_refused_below_70=0, gap_no_fill=0,
                                         pressed=0, press_windows=0, press_expired=0,
-                                        reentries=0, trims=0)
+                                        reentries=0, trims=0, heat_refused=0)
 
     def spread(j, t):
         """§ WO-12: half-spread by ADDV bucket, per side. Wide names cost more to touch."""
@@ -915,6 +932,18 @@ def simulate(frame, cfg):
                 target = size["size_pct"] * nav
                 if exposure + target > (hyp["sleeve_cap_pct"] or cfg["sleeve_cap"]) * nav:
                     continue
+                # ---- H1: total open risk. The sleeve cap limits how much is INVESTED; nothing
+                # limited how much could be LOST. Under the capital regime a 25% position behind a
+                # 20% stop puts 5% of NAV at risk, and four of them put 20% at risk at once — run
+                # 34 drew down 53.5% while its average trade was +1.27%, which is what over-betting
+                # a real edge looks like. Heat is the missing primitive: the sum of (what we would
+                # lose if every open stop fired today), capped as a fraction of NAV.
+                if hyp["heat_cap"]:
+                    open_heat = sum(q["qty"] * max(q["avg_cost"] - (q["stop"] or 0.0), 0.0)
+                                    for q in book.values())
+                    if open_heat + target * dist > float(hyp["heat_cap"]) * nav:
+                        conf["heat_refused"] += 1
+                        continue
                 # §3.2 buys half now and the rest at +2%/+4%, because at the pivot the breakout is
                 # still unconfirmed. Under E1 it is confirmed before a share is bought, so the
                 # hedge is paying for a risk that no longer exists — Z1 lets the caller take the
@@ -1068,6 +1097,7 @@ def conformance(conf, trades, equity, hyp=None):
         dict(clause="Earnings blackout — 5 trading days", fn="signals.in_blackout",
              coverage=cov(conf["blackout_known"], conf["blackout_decisions"])),
         dict(clause="Sizing — budget / stop distance", fn="signals.momentum_size", coverage=1.0,
+             heat_cap=(hyp or {}).get("heat_cap"), heat_refused=conf.get("heat_refused", 0),
              band_ceiling=(hyp or {}).get("band_hi") or 0.12,
              entry_fraction=(hyp or {}).get("entry_fraction", 0.5),
              sleeve_cap=(hyp or {}).get("sleeve_cap_pct")),
