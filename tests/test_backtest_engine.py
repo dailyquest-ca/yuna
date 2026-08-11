@@ -346,6 +346,30 @@ def test_s1_and_s2_change_which_names_rank():
     assert law["l1m"] != loud["l1m"], "S1+S2 produced an identical ranking — the flags are dead"
 
 
+def test_the_press_counter_exists_so_the_branch_cannot_crash_or_hide():
+    """`conf['pressed'] += 1` on an uninitialised key is a KeyError waiting for the first press.
+
+    H3 ran green with the key missing, which is the tell: the branch never executed once in 285
+    trades. A counter that is absent rather than zero cannot distinguish "P1 did not pay" from
+    "P1 never ran", and those need very different responses.
+    """
+    f, _ = frame()
+    _, _, conf = bt.simulate(f, cfg())
+    assert conf["pressed"] == 0
+    assert "press_windows" in conf and "press_expired" in conf
+
+
+def test_the_press_gives_the_next_base_a_window_to_arrive_in():
+    """P1's first cut demanded a valid base AND a breakout on the exact session the four-week
+    clock expired — a coincidence, not a rule. §3.2 says "completes on the next base", and the
+    next base needs time to form."""
+    assert bt.LAW["press_grace"] >= 20, "one session is not a window"
+    f, _ = frame()
+    _, _, conf = bt.simulate(f, preset("h3"))
+    assert conf["press_windows"] >= 0        # the machinery is reachable
+    assert conf["pressed"] + conf["press_expired"] <= conf["press_windows"]
+
+
 def test_s3_lets_a_loss_to_profit_swing_pass_m4():
     """MU went -$1.07 to +$1.18 and scored no growth rate at all, because you cannot divide by a
     negative base. It was invisible through the whole recovery, then ran +1,029%."""

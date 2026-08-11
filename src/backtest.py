@@ -58,6 +58,7 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            breakeven_r=None,           # R2  — breakeven at full pyramid size
            trail_from=0.15, trail=0.10,# R3  — 10% trail from +15%
            press_on_next_base=False,   # P1  — a stalled pyramid only ever exits
+           press_grace=20,             #       sessions the next base has to show up in
            max_names=None)             # P2  — from config (4)
 
 PRESETS = {
@@ -291,7 +292,8 @@ def simulate(frame, cfg):
     book, trades, equity, pending = {}, [], [], {}
     fired, queue, conf = {}, None, dict(m4_evaluated=0, m4_known=0, blackout_decisions=0,
                                         blackout_known=0, rank_dates=0, entries=0,
-                                        entries_refused_below_70=0, gap_no_fill=0)
+                                        entries_refused_below_70=0, gap_no_fill=0,
+                                        pressed=0, press_windows=0, press_expired=0)
 
     def spread(j, t):
         """§ WO-12: half-spread by ADDV bucket, per side. Wide names cost more to touch."""
@@ -410,35 +412,49 @@ def simulate(frame, cfg):
             if row is not None and row["mcn"] == row["mcn"] and row["mcn"] < cfg["mcn_exit"]:
                 pending[tk] = "score"
                 continue
-            if sg.stalled_pyramid(pyramid_step=p["step"], sessions_held=t - p["stall_from"]):
-                # §3.2: a stalled pyramid "either completes on the next base or exits". Only the
-                # exit branch was ever built. P1 builds the other one — the press: a position that
-                # is working and forms a fresh base gets taken to full size instead of thrown away.
+            # §3.2: a stalled pyramid "either completes on the next base or exits". Only the exit
+            # branch was ever built. P1 builds the other one — the press.
+            #
+            # The first cut of this required a valid new base AND a breakout on the exact session
+            # the four-week clock expired. That is a coincidence, not a rule: it never fired once
+            # in 285 trades, so P1 went untested while looking disproven. "The next base" needs a
+            # window to arrive in — the position keeps its stop and is given `press_grace` sessions
+            # to complete, and exits only if none shows up.
+            stalled_now = sg.stalled_pyramid(pyramid_step=p["step"],
+                                             sessions_held=t - p["stall_from"])
+            seeking = p.get("seeking")
+            if hyp["press_on_next_base"] and p["step"] < 3 and (stalled_now or seeking):
+                if not seeking:
+                    p["seeking"] = seeking = t + int(hyp["press_grace"])
+                    conf["press_windows"] += 1
                 pressed = False
-                if hyp["press_on_next_base"] and p["step"] < 3:
-                    nb_rows = own_bars(valid, j, t, back=1)
-                    nb = (sg.base_scan(H[nb_rows, j], L[nb_rows, j], C[nb_rows, j])
-                          if nb_rows is not None else None)
-                    if nb and nb["valid"] and not np.isnan(hi) and hi >= nb["pivot"]:
-                        dollars = p["target"] * (3 - p["step"]) * 0.25
-                        if cash >= dollars:
-                            fillp = max(nb["pivot"], op if not np.isnan(op) else nb["pivot"])
-                            paid = dollars * (1 + spread(j, t))
-                            cash -= paid
-                            p["lots"].append((dollars, fillp,
-                                              A[t, j] if np.isfinite(A[t, j]) else fillp))
-                            p["qty"] += dollars / fillp
-                            p["invested"] += paid
-                            p["gross_invested"] += dollars
-                            p["avg_cost"] = p["invested"] / p["qty"]
-                            p["step"] = 3
-                            p["stall_from"] = t
-                            p["pressed"] = p.get("pressed", 0) + 1
-                            conf["pressed"] += 1
-                            pressed = True
-                if not pressed:
+                nb_rows = own_bars(valid, j, t, back=1)
+                nb = (sg.base_scan(H[nb_rows, j], L[nb_rows, j], C[nb_rows, j])
+                      if nb_rows is not None else None)
+                if nb and nb["valid"] and not np.isnan(hi) and hi >= nb["pivot"]:
+                    dollars = p["target"] * (3 - p["step"]) * 0.25
+                    if cash >= dollars:
+                        fillp = max(nb["pivot"], op if not np.isnan(op) else nb["pivot"])
+                        paid = dollars * (1 + spread(j, t))
+                        cash -= paid
+                        p["lots"].append((dollars, fillp,
+                                          A[t, j] if np.isfinite(A[t, j]) else fillp))
+                        p["qty"] += dollars / fillp
+                        p["invested"] += paid
+                        p["gross_invested"] += dollars
+                        p["avg_cost"] = p["invested"] / p["qty"]
+                        p["step"] = 3
+                        p["stall_from"] = t
+                        p["seeking"] = None
+                        conf["pressed"] += 1
+                        pressed = True
+                if not pressed and t >= seeking:
+                    conf["press_expired"] += 1
                     pending[tk] = "stalled"
-                    continue
+                    continue                      # no base arrived in the window — resolve it
+            elif stalled_now:
+                pending[tk] = "stalled"
+                continue
 
             nxt = _next_report(frame["reports"].get(tk), day)
             conf["blackout_decisions"] += 1
