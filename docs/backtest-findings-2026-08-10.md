@@ -979,6 +979,56 @@ what nineteen backtest runs produced from it. The census predicts the backtests,
 strongest evidence that it is measuring the right thing. Step 4 with a 40% stop is +14.52% per six
 months on the same pessimistic basis.
 
+## 9d. The C series — the screen on the rails, and an exit I misread three times
+
+`c1` puts the census screen where M2 and M3 were, drops M4, and enters on a new 20-session closing
+high because a name 50% off its low has no §3.2 base and will not have one for months. Everything
+else is A1's machinery. $100k, fully deployable, 25% conviction ceiling.
+
+| | C1 | C1b | C2 | **C3** | C4 |
+|---|---:|---:|---:|---:|---:|
+| screen exit | on *(by accident)* | **off** | **only from +10% profit** | **on, deliberate** | **quarter clause only** |
+| CAGR | +0.51% | −0.98% | −1.52% | **+0.51%** | −0.11% |
+| Total P&L | +$4,624 | −$8,459 | −$12,773 | **+$4,624** | −$951 |
+| Trades | 253 | 178 | 210 | 253 | 198 |
+| Win rate | **47.0%** | 42.7% | 43.8% | **47.0%** | 44.4% |
+| Average win | +18.67% | **+28.02%** | +19.78% | +18.67% | +24.70% |
+| Average loss | **−10.21%** | −12.47% | −13.24% | **−10.21%** | −10.99% |
+| Avg hold | 14.3 | 29.1 | 20.2 | 14.3 | 20.3 |
+| Max drawdown | **−18.0%** | −27.1% | −35.0% | **−18.0%** | −27.2% |
+| Best trade | +148.4% | **+271.0%** | +149.5% | +148.4% | +148.4% |
+| **Trim rungs fired** | **23** | 23 | 18 | **23** | **26** |
+
+**The screen solves the problem it was built for.** 23 trim rungs against A1's 4 — six times the
+tail candidates — and a 47.0% win rate, the highest of any run in the grid. "One candidate per
+decade" is gone.
+
+**The exit was read wrong three times, and every correction came from the bucket table rather than
+from reasoning about the mechanism.** Recorded because the pattern is the lesson:
+
+1. *"It is a bug destroying the winners."* 142 of C1's 253 exits fired on the screen at 9.1
+   sessions, and the hold had collapsed from A1's 34.8. Removing it (C1b) doubled the hold to 29.1,
+   took the best trade to +271% — and **lost $13,083.** The bucket had been **+$18,831**.
+2. *"It is a profit-take."* Gating it on +10% of gain (C2) made the fired subset far better per
+   trade — 27 exits at **+14.97%** for **+$40,449** — and the run far worse: **−$12,773**, drawdown
+   −35.0%. The 115 positions it stopped selling did not recover, they rotted: `stagnant` went from
+   −$335 over 9 exits to **−$21,267 over 30**, and `stop` from −$8,948 to −$17,677.
+3. *"It is momentum death, so isolate that clause."* `deep_recovery`'s depth and off-high clauses
+   can fail merely because the 252-day window rolls over, so only `r3` seemed to carry information.
+   C4 fires on `r3 < 0.10` alone: **71 exits at −7.71% for −$36,287**, the worst bucket in its run,
+   and the whole thing came in at −$951.
+
+**The conjunction is the signal.** A soft quarter on a name that fell 50% and is grinding back is
+normal and it recovers; the setup is only over when the quarter fades **and** the name has left the
+cheap band. C3 reproduces C1 to the dollar through an entirely different code path — same 253
+trades, same $4,624, same −18.03% drawdown — so the number is the rule's, not a side effect of the
+mis-wiring, and it is now a declared exit (`no_longer_cheap`) rather than the template exit firing
+on a screen.
+
+**Where C3 actually stands:** +0.51% CAGR against VOO's +15.44%, full-exit expectancy −1.50%, the
+run carried by 23 trims and the tail. Better raw material than anything before it, still not a
+strategy. The outstanding test is the one that killed A1 — the window ending 2025-08, before MU.
+
 ### Is it "sentiment and attention"? Not quite — and the difference is testable
 
 Zak's reading: *"high beta stocks that have high volume... as if we are riding sentiment and
