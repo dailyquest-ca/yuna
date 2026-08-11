@@ -67,12 +67,12 @@ def with_base(n, breakout_at, *, base_len=30, depth=0.04):
     return high, close * 0.996, close, pivot
 
 
-def frame(hero_volume_multiple=3.0, hero_after=None, names=NAMES, days=DAYS):
+def frame(hero_volume_multiple=3.0, hero_after=None, names=NAMES, days=DAYS, breakout_at=None):
     """A cross-section: one leader that sets up and breaks out, a strong group behind it, and a
     long tail of dull names — because MCN is percentile-based and a universe of identical uptrends
     scores every one of them at the middle."""
     dates = sessions(days)
-    breakout = days - 12
+    breakout = days - 12 if breakout_at is None else breakout_at
     cols = [f"N{i:02d}.US" for i in range(names)]
     industry = {}
     O, H, L, C, A, V = ({} for _ in range(6))
@@ -127,6 +127,33 @@ def frame(hero_volume_multiple=3.0, hero_after=None, names=NAMES, days=DAYS):
                 bench_by_day={d: v for d, v in zip(dates, rising(days, 400.0, 0.0006))},
                 industry=industry, reports={}, gate_source="TEST",
                 eps={tk: (eps_rd, eps_v) for tk in cols}), breakout
+
+
+def recovery_frame(days=DAYS):
+    """The shape H6 exists for: the leader breaks out, gets shaken out, goes quiet, then resumes.
+
+    The recovery deliberately stops **below** the post-breakout high, so the old pivot is still
+    overhead and no base breakout is available. That is the realistic case and the one the first
+    cut of the code got wrong: a valid-but-untriggered base sitting in front of the name would
+    have shut the re-entry door for months.
+    """
+    f, breakout = frame(days=days, breakout_at=days - 120)
+    a = {k: v.copy() for k, v in f["arrays"].items()}
+    close = a["close"][:, 0]
+    pivot = float(close[breakout]) / 1.03
+    plateau, shake, quiet = breakout + 10, breakout + 20, breakout + 45
+
+    seg = np.concatenate([
+        np.linspace(1.03, 0.955, shake - plateau),        # the shakeout, through any sane stop
+        np.full(quiet - shake, 0.955),                    # dead money
+        np.linspace(0.955, 1.02, days - quiet)])          # resumption, still under the old pivot
+    close[plateau:] = pivot * seg
+    a["high"][plateau:, 0] = close[plateau:] * 1.002
+    a["low"][plateau:, 0] = close[plateau:] * 0.998
+    a["open"][plateau:, 0] = close[plateau:] * 0.999
+    a["adj"][:, 0] = a["close"][:, 0]
+    f = dict(f, arrays=a)
+    return f, shake
 
 
 def cfg(**over):
@@ -285,9 +312,14 @@ def test_the_hypothesis_machinery_is_inert_by_default(monkeypatch):
 
 def test_the_presets_stage_the_changes_in_dependency_order():
     """Widening risk is pointless while unconfirmed breakouts are still bought, and pressing is
-    dangerous before expectancy turns — so each preset contains the one before it."""
-    h1, h2, h3 = (bt.PRESETS[k] for k in ("h1", "h2", "h3"))
-    assert h1.items() <= h2.items() <= h3.items()
+    dangerous before expectancy turns — so each preset contains the one before it.
+
+    The chain forks after H2: H3 presses and H4 takes profit on a stall, and they were run against
+    each other rather than stacked. H4 won, so H5 and H6 continue from H4, not from H3.
+    """
+    P = bt.PRESETS
+    assert P["h1"].items() <= P["h2"].items() <= P["h3"].items()
+    assert P["h2"].items() <= P["h4"].items() <= P["h5"].items() <= P["h6"].items()
 
 
 def test_e1_refuses_the_breakout_the_law_buys():
@@ -382,6 +414,188 @@ def s_m4(eps, **kw):
     return sg.m4_acceleration(eps, **kw)["passes"]
 
 
+# --------------------------------------------------------------------- H5: eligibility, scaled
+#
+# The funnel decomposition put the miss before ranking: a name that produces a +100% year corrects
+# 42% on the way, and §3.2's flat 25% depth clause gives it a valid base on 5.9% of days against
+# 29.3% at 40%. These pin that the widening is proportional rather than blanket — a quiet name has
+# to keep the law exactly, or D1 is not a hypothesis about volatility, it is just a looser rule.
+
+def test_d1_hands_a_quiet_name_the_law_and_a_volatile_one_more():
+    at = lambda pct: bt._tolerance(pct / 100.0, 8.0)
+    assert at(2.24) == pytest.approx(0.25)     # quiet name: the floor binds, the law is unchanged
+    assert at(2.86) == pytest.approx(0.25)     # the median name: still exactly the law
+    assert at(5.00) == pytest.approx(0.40)     # the depth the winners actually need
+    assert at(12.0) == pytest.approx(0.60)     # the ceiling binds — no name gets a blank cheque
+
+
+def test_d1_is_inert_when_the_flag_is_off():
+    """law-v0 must read 25% for every name, whatever its ATR, or the baseline has moved."""
+    assert all(bt._tolerance(p, None) == 0.25 for p in (0.01, 0.03, 0.09, None))
+
+
+def test_the_multiplier_is_read_off_the_measured_atr_not_off_convention():
+    """8 is chosen so the median name (ATR 2.86%) lands *below* the 25% floor and is untouched.
+    A smaller multiplier changes nothing anywhere; a larger one loosens the median too."""
+    assert 8.0 * 0.0286 < 0.25, "the median name must fall through to the law's number"
+    assert 8.0 * 0.0500 == pytest.approx(0.40), "a 5% ATR name must reach the measured 40%"
+    assert bt.PRESETS["h5"]["depth_atr_mult"] == 8.0
+
+
+def test_d1_makes_a_deep_base_valid_only_for_the_name_that_earns_it():
+    """The same 33%-deep base: rejected under the law, accepted once the name's own range says a
+    third is an ordinary correction for it."""
+    close = np.concatenate([np.linspace(70, 100, 51),            # the pivot, 110 sessions back
+                            np.linspace(100, 67, 70)[1:],        # a 33% correction under it
+                            np.linspace(67, 99, 40)])            # back to just below the pivot
+    high, low = close * 1.001, close * 0.999
+    high[50] = 100.0
+    assert sg.base_scan(high, low, close)["depth"] == pytest.approx(0.3307, abs=1e-3)
+    assert sg.base_scan(high, low, close)["valid"] is False
+    assert sg.base_scan(high, low, close, max_depth=0.40)["valid"] is True
+
+
+def test_d2_keeps_the_name_that_corrected_hard_on_the_way_up():
+    """M2's last condition is 'within 25% of the 52-week high'. A name up 300% that spiked, gave
+    back 30%, and is climbing again off a rising 50-day passes the other five conditions — and is
+    exactly the one we want. The law rejects it on that clause alone.
+
+    The clause is narrower than it looks, which is worth recording: an ordinary 30% drawdown also
+    puts price under its own 50- and 200-day, so those conditions reject the name first and
+    `off_high` never gets a vote. It binds only where the SMA stack is still far below — the shape
+    a name that has already tripled actually has. That is why D1 (depth) is the big term and D2 is
+    the small one.
+    """
+    c = np.concatenate([np.linspace(40.0, 50.0, 100),        # a long, low base — the 200-day
+                        np.linspace(50.0, 130.0, 80),        # the run
+                        [165.0],                             # the spike high
+                        np.linspace(165.0, 100.0, 50),       # -39%
+                        np.linspace(100.0, 115.0, 21)])      # climbing again, 30% off the high
+    assert 1 - c[-1] / c[-252:].max() == pytest.approx(0.303, abs=1e-3)
+    assert sg.trend_template(c) is False                     # the law rejects it at -30%
+    assert sg.trend_template(c, off_high=0.40) is True       # scaled to its own range, it passes
+
+
+def test_d3_is_the_small_term_and_is_declared_as_such():
+    """Shortening the base moves the winners' base frequency 5.9% -> 6.8%; depth moves it to
+    29.3%. It is in H5 to answer the question, not because it is expected to carry the run."""
+    assert bt.LAW["min_base_age"] == 25
+    assert bt.PRESETS["h5"]["min_base_age"] == 12
+
+
+def test_h5_declares_the_thresholds_it_actually_enforced():
+    """A conformance table that prints the law's 25% while the run used 40% is a lie, and this
+    table exists to end exactly that kind of green."""
+    f, _ = frame()
+    trades, equity, conf = bt.simulate(f, preset("h5"))
+    table = bt.conformance(conf, trades, equity, hyp=preset("h5")["hyp"])
+    m3 = next(c for c in table if c["fn"] == "signals.base_scan")
+    m2 = next(c for c in table if c["fn"] == "signals.trend_template")
+    assert "8.0 x ATR" in m3["depth"] and m3["min_age"] == 12
+    assert "8.0 x ATR" in m2["off_high"]
+
+    law_table = bt.conformance(conf, trades, equity, hyp=dict(bt.LAW))
+    assert next(c for c in law_table if c["fn"] == "signals.base_scan")["depth"] == "25% flat"
+
+
+# ------------------------------------------------------------------------- H6: a way back in
+#
+# §3.2 has one door into a name and no way back through it. Of 200 positions stopped out, 96%
+# traded back above the exit inside 60 days and the average best subsequent move was +26.8% — we
+# were wrong about the moment, not the name.
+
+def test_x1_is_inert_without_the_flag():
+    f, _ = frame()
+    _, _, conf = bt.simulate(f, cfg())
+    assert conf["reentries"] == 0
+    assert bt.LAW["reentry_window"] is None
+
+
+def test_x1_will_not_buy_a_name_we_never_held():
+    """A re-entry is a second opinion on our own exit. With no exit there is nothing to revise —
+    otherwise X1 is a whole new entry rule wearing a re-entry's name."""
+    hyp = dict(bt.LAW); hyp.update(bt.PRESETS["h6"])
+    C = np.linspace(10.0, 30.0, 300).reshape(-1, 1)      # a new high every single session
+    valid = [np.arange(300)]
+    assert bt._reentry_ready("N.US", 0, 299, valid, C, {}, hyp) is False
+    assert bt._reentry_ready("N.US", 0, 299, valid, C, {"N.US": 250}, hyp) is True
+
+
+def test_x1_waits_out_the_cooloff():
+    hyp = dict(bt.LAW); hyp.update(bt.PRESETS["h6"])
+    C = np.linspace(10.0, 30.0, 300).reshape(-1, 1)
+    valid = [np.arange(300)]
+    assert bt._reentry_ready("N.US", 0, 299, valid, C, {"N.US": 297}, hyp) is False
+    assert bt._reentry_ready("N.US", 0, 299, valid, C, {"N.US": 294}, hyp) is True
+
+
+def test_x1_triggers_on_the_stocks_high_and_not_on_our_exit_price():
+    """Zak's ruling, and the whole reason the trigger is written this way: 'it doesn't have to be
+    where we sold ... we have to just buy back into strength'. Where we sold is our history."""
+    flat_then_up = np.concatenate([np.full(40, 50.0), [50.5]])
+    assert sg.resumed(flat_then_up) is True     # a new 20-day high, far below any plausible exit
+    still_sagging = np.concatenate([np.full(20, 50.0), np.linspace(80.0, 60.0, 21)])
+    assert sg.resumed(still_sagging) is False   # well above an exit at 50, and not resuming
+
+
+def test_x1_never_re_buys_a_name_that_delisted():
+    """`delisted` is the one exit that is about the name rather than the moment."""
+    f, breakout = frame()
+    f = dict(f)
+    a = {k: v.copy() for k, v in f["arrays"].items()}
+    for k in a:                                          # the leader stops printing after entry
+        a[k][breakout + 3:, 0] = np.nan
+    f["arrays"] = a
+    trades, _, conf = bt.simulate(f, preset("h6"))
+    assert any(t["exit_reason"] == "delisted" for t in trades)
+    assert conf["reentries"] == 0
+
+
+def test_x1_buys_the_recovery_back_and_says_which_door_it_used():
+    f, exit_at = recovery_frame()
+    trades, _, conf = bt.simulate(f, preset("h6"))
+    assert conf["reentries"] >= 1, "the fixture recovered to a new 20-day high and X1 sat it out"
+    kinds = [t["entry_kind"] for t in trades]
+    assert "reentry" in kinds and "base" in kinds
+
+    # ... and H5, which is H6 without the door, leaves the recovery on the table. That is the
+    # measurement: the difference between these two runs is X1 and nothing else.
+    f2, _ = recovery_frame()
+    _, _, h5_conf = bt.simulate(f2, preset("h5"))
+    assert h5_conf["reentries"] == 0
+    assert conf["entries"] > h5_conf["entries"]
+
+    # And the point of the ruling, on the tape: the fixture's re-entry is *below* where we sold.
+    # A rule anchored on our exit price would have waited for a level the stock never needed.
+    sold = next(t for t in trades if t["entry_kind"] == "base")["exit_price"]
+    assert next(t for t in trades if t["entry_kind"] == "reentry")["entry_price"] < sold
+
+
+def test_x1_re_enters_with_a_stop_and_a_pyramid_of_its_own():
+    """A re-entry has no base and therefore no contraction low. It must still be protected, and it
+    must not inherit the dead pivot — the adds ladder off the new entry."""
+    f, _ = recovery_frame()
+    trades, _, _ = bt.simulate(f, preset("h6"))
+    back_in = [t for t in trades if t["entry_kind"] == "reentry"]
+    assert back_in, "no re-entry to check"
+    for t in back_in:
+        assert t["initial_stop"] is not None and 0 < t["initial_stop"] < t["entry_price"]
+        assert t["pivot"] == pytest.approx(t["entry_price"], rel=0.02)
+
+
+def test_an_undeclared_reentry_fails_conformance():
+    """The same guard the variant exits get: a run may buy through a door §3.2 does not name, but
+    it has to say so, or a variant could pass as law-v0."""
+    conf = dict(m4_evaluated=1, m4_known=1, blackout_decisions=1, blackout_known=1,
+                entries=1, entries_refused_below_70=0, reentries=3)
+    entry = lambda hyp: next(c for c in bt.conformance(conf, [], [], hyp=hyp)
+                             if c["fn"] == "signals.entry_order")
+    assert entry(dict(bt.LAW))["violations"] == 3
+    h6 = dict(bt.LAW); h6.update(bt.PRESETS["h6"])
+    assert entry(h6)["violations"] == 0
+    assert entry(h6)["reentries"] == 3
+
+
 # --------------------------------------------------------------------------- the law, written once
 #
 # The whole point of the rewrite. `backtest_compounders.py` records what happens without this
@@ -393,7 +607,10 @@ SHARED_RULES = ["market_gate", "trend_template", "base_scan", "momentum_quality"
                 "setup_proximity", "mcn", "m4_acceleration", "confirmation_state",
                 "pyramid_orders", "entry_order", "ratchet_stop", "momentum_size",
                 "enterable", "stalled_pyramid", "in_blackout", "holds_through_earnings",
-                "pct_rank", "weekly_closes"]
+                "pct_rank", "weekly_closes",
+                # the hypothesis set lives in signals.py too, for the same reason: a variant that
+                # graduates has to be the code arming.py already calls, not a copy of it
+                "volatility_stop", "stagnant", "atr_fraction", "volatility_tolerance", "resumed"]
 
 
 @pytest.mark.parametrize("rule", SHARED_RULES)

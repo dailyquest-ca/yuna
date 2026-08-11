@@ -69,8 +69,14 @@ def market_gate(dates, closes, previous=None, window=30, lookback_weeks=4):
 # ---------------------------------------------------------------------------- M2 trend template
 
 
-def trend_template(close):
-    """M2 — Minervini's six conditions, at the current price (§3.2)."""
+def trend_template(close, *, off_high=0.25):
+    """M2 — Minervini's six conditions, at the current price (§3.2).
+
+    `off_high` is the last condition — how far below the 52-week high the price may sit. The law's
+    25% rejects the names that produce +100% years 36% of the time, because those names correct
+    hard on the way up; a caller may scale it to the stock's own volatility (see
+    `volatility_tolerance`). Default is the law.
+    """
     c = np.asarray(close, dtype=float)
     if len(c) < 252:
         return False
@@ -78,10 +84,46 @@ def trend_template(close):
     s200_21 = float(np.mean(c[-221:-21]))
     lo52, hi52, px = float(np.min(c[-252:])), float(np.max(c[-252:])), float(c[-1])
     return bool(px > s150 and px > s200 and s150 > s200 and s200 > s200_21 and px > s50
-                and px >= lo52 * 1.30 and px >= hi52 * 0.75)
+                and px >= lo52 * 1.30 and px >= hi52 * (1 - off_high))
 
 
 # ---------------------------------------------------------------------------- M3 base detection
+
+
+def volatility_tolerance(atr_pct, *, floor, mult, ceiling=0.60):
+    """How much give a rule should allow a name, scaled to how much it actually moves.
+
+    §3.2's numbers — a base no deeper than 25%, a price no more than 25% off its 52-week high —
+    describe an orderly stock. A stock that doubles in a year corrects **42% on the way**, so those
+    two clauses reject it seven times out of eight and a third of the time respectively. Measured
+    over the names that produced +100% years, relaxing depth to 40% takes their valid-base
+    frequency from 5.9% of days to 29.3%; shortening the base from 25 sessions to 12 moves it to
+    6.8%. Depth is worth twenty-three points and base length is worth one.
+
+    A flat 40% would hand a quiet name a licence it does not need, so this scales: the floor is
+    the law's number, and a name gets more only in proportion to its own ATR.
+    """
+    if atr_pct is None or not np.isfinite(atr_pct) or atr_pct <= 0:
+        return floor
+    return float(min(max(floor, mult * float(atr_pct)), ceiling))
+
+
+def resumed(closes, *, window=20):
+    """Buying back into strength — the close clears the highest close of the prior `window`.
+
+    Deliberately not anchored on our own exit price. Of 200 positions stopped out, 96% traded back
+    above the exit inside 60 days and the average best subsequent move was +26.8% — we are wrong
+    about the moment, not the name. But where we happened to sell is our history, not the stock's,
+    and §3.2 has no way back in at all: re-entry needs a fresh valid base, which for a name that
+    corrects 42% takes months it does not have. A new high is the market's own statement that the
+    move resumed.
+    """
+    c = np.asarray(closes, dtype=float)
+    if len(c) < window + 1 or not np.isfinite(c[-1]):
+        return False
+    prior = c[-(window + 1):-1]
+    prior = prior[np.isfinite(prior)]
+    return bool(len(prior) and c[-1] > prior.max())
 
 
 def base_scan(high, low, close, *, look_back=120, min_age=25, grace=0.005, max_depth=0.25,
@@ -159,6 +201,20 @@ def atr(high, low, close, *, window=14):
         return np.array([])
     tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
     return np.convolve(tr, np.ones(window) / window, mode="valid")
+
+
+def atr_fraction(high, low, close):
+    """ATR(14) as a fraction of the last close — the unit `volatility_tolerance` scales by.
+
+    Distinct from `setup_proximity`'s `atr_pct`, which is an inverted own-history *percentile*
+    (0..100) used for ranking. This is the raw amount the name moves in a day, and on our own
+    L1-M names it runs 2.86% at the median.
+    """
+    a = atr(high, low, close)
+    px = float(np.asarray(close, dtype=float)[-1]) if len(close) else np.nan
+    if not len(a) or not np.isfinite(px) or px <= 0:
+        return None
+    return float(a[-1]) / px
 
 
 def setup_proximity(high, low, close, volume, *, own_window=252):

@@ -31,7 +31,7 @@ on:
         description: 'starting capital, USD'
         default: '200000'
       hypothesis:
-        description: 'hypothesis preset — blank = law-v0 (the baseline), or h1 / h2 / h3'
+        description: 'hypothesis preset — blank = law-v0 (the baseline), or h1..h6'
         default: ''
       hair_trigger_pending:
         description: 'exit a pending breakout that closes below its pivot (rejected reading — ruled 2026-08-10 to wait out the window). Set true only to price the ruling.'

@@ -60,6 +60,11 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            press_on_next_base=False,   # P1  — a stalled pyramid only ever exits
            press_grace=20,             #       sessions the next base has to show up in
            stagnation_days=None,       # H4  — resolve a position that stops making new highs
+           depth_atr_mult=None,        # D1  — base depth allowance scaled to the name's own ATR
+           off_high_atr_mult=None,     # D2  — 52-week-high tolerance scaled the same way
+           min_base_age=25,            # D3  — sessions a base runs before its pivot is tradeable
+           reentry_window=None,        # X1  — buy back on a new N-session closing high
+           reentry_cooloff=5,          #       sessions after an exit before a name is buyable
            max_names=None)             # P2  — from config (4)
 
 PRESETS = {
@@ -84,6 +89,33 @@ PRESETS = {
     "h4": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
                atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
                stagnation_days=20),
+    # H5 · H4 plus eligibility scaled to how much the name actually moves. Everything above this
+    # line changes what we do with a position; this changes which names can produce one at all.
+    # The funnel decomposition found the winners were excluded before ranking ever saw them: a name
+    # that produces a +100% year corrects 42% on the way, so §3.2's flat 25% depth clause gives it
+    # a valid base on 5.9% of days against 29.3% at 40%. The multiplier is 8, chosen against the
+    # measured median ATR of 2.86%: a median name gets 8 x 2.86% = 22.9%, below the 25% floor, so
+    # it keeps the law exactly, and only a genuinely volatile name is given more.
+    #
+    # `min_base_age` is in here to close Zak's question about the 25-session minimum rather than
+    # because it is expected to matter — measured, shortening it to 12 moves the winners' base
+    # frequency from 5.9% to 6.8% while depth moves it to 29.3%. Depth is worth twenty-three
+    # points and base length is worth one. If H5 wins, ablate the base age first.
+    "h5": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20,
+               depth_atr_mult=8.0, off_high_atr_mult=8.0, min_base_age=12),
+    # H6 · H5 plus a way back in. §3.2 has none: once we exit, the name needs a fresh valid base,
+    # which for something correcting 42% takes months it does not have — and of 200 stopped-out
+    # positions, 96% traded back above the exit inside 60 days and the average best subsequent move
+    # was +26.8%. The trigger is deliberately NOT our exit price, which is our history rather than
+    # the stock's: it is a new 20-session closing high, the market's own statement that the move
+    # resumed, on a name that still passes M2, M4 and the MCN floor.
+    "h6": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20,
+               depth_atr_mult=8.0, off_high_atr_mult=8.0, min_base_age=12,
+               reentry_window=20, reentry_cooloff=5),
 }
 
 
@@ -202,6 +234,29 @@ def own_bars(valid, j, t, back=0, n=TAIL):
     return v[k - n:k] if k >= n else None
 
 
+def _reentry_ready(tk, j, t, valid, C, exited, hyp):
+    """X1 — may we buy this name back today, having sold it before?
+
+    Three conditions, all of them the stock's rather than ours: we held it and let it go, the
+    cool-off has passed, and last night it closed above every close of the prior `reentry_window`
+    sessions. A name we never held cannot re-enter, and one that delisted cannot come back.
+    """
+    if not hyp["reentry_window"]:
+        return False
+    last = exited.get(tk)
+    if last is None or t - last < int(hyp["reentry_cooloff"]):
+        return False
+    rows = own_bars(valid, j, t, back=1)
+    if rows is None:
+        return False
+    return sg.resumed(C[rows, j], window=int(hyp["reentry_window"]))
+
+
+def _tolerance(atr_frac, mult, floor=0.25):
+    """The law's flat allowance, or that allowance widened in proportion to the name's own ATR."""
+    return floor if not mult else sg.volatility_tolerance(atr_frac, floor=floor, mult=float(mult))
+
+
 def rank(frame, t, cols, arrays, valid, hyp):
     """L1-M as `rank.py` builds it: M2 + M4, ranked by MCN, top 150 — same calls, same order.
 
@@ -233,8 +288,13 @@ def rank(frame, t, cols, arrays, valid, hyp):
         cl_f, hi_f, lo_f = C[f_rows, j], H[f_rows, j], L[f_rows, j]
         ac, hh, ll, cc, vv = (X[m_rows, j] for X in (A, H, L, C, V))
 
-        m2[tk] = sg.trend_template(cl_f)
-        bases[tk] = sg.base_scan(hi_f, lo_f, cl_f)
+        # D1/D2: eligibility scaled to the name's own daily range. Both default to the law's flat
+        # 25% — `volatility_tolerance` floors at it, so a quiet name is judged exactly as §3.2
+        # judges it and only a name that actually moves is given room.
+        apct = sg.atr_fraction(hi_f, lo_f, cl_f)
+        m2[tk] = sg.trend_template(cl_f, off_high=_tolerance(apct, hyp["off_high_atr_mult"]))
+        bases[tk] = sg.base_scan(hi_f, lo_f, cl_f, min_age=int(hyp["min_base_age"]),
+                                 max_depth=_tolerance(apct, hyp["depth_atr_mult"]))
         quality[tk] = sg.momentum_quality(ac, vol_divisor=hyp["mq_vol_divisor"])
         subs = sg.setup_proximity(hh, ll, cc, vv)
         atr_pct[tk], dryup[tk], near_high[tk] = subs["atr_pct"], subs["dryup"], subs["near_high"]
@@ -298,16 +358,58 @@ def simulate(frame, cfg):
 
     nav = cash = cfg["start_nav"]
     book, trades, equity, pending = {}, [], [], {}
+    exited = {}                 # ticker -> the session we last let it go (X1's cool-off clock)
     fired, queue, conf = {}, None, dict(m4_evaluated=0, m4_known=0, blackout_decisions=0,
                                         blackout_known=0, rank_dates=0, entries=0,
                                         entries_refused_below_70=0, gap_no_fill=0,
-                                        pressed=0, press_windows=0, press_expired=0)
+                                        pressed=0, press_windows=0, press_expired=0,
+                                        reentries=0)
 
     def spread(j, t):
         """§ WO-12: half-spread by ADDV bucket, per side. Wide names cost more to touch."""
         advv = np.nanmedian(C[max(0, t - 49):t + 1, j] * V[max(0, t - 49):t + 1, j])
         bps = cfg["spread_bps"][0] if advv >= cfg["addv_break"] else cfg["spread_bps"][1]
         return bps / 10_000.0
+
+    def _blacked_out(frame, conf, tk, day):
+        """§3.3: the earnings wall cancels a resting order. Counted per door tried, because the
+        coverage ratio only means anything if the denominator is the decisions we actually made."""
+        nxt = _next_report(frame["reports"].get(tk), day)
+        conf["blackout_decisions"] += 1
+        conf["blackout_known"] += 1 if _knowable(nxt, day) else 0
+        return nxt is not None and sg.in_blackout(day, nxt)
+
+    def base_trigger(j, t, base, rows):
+        """Door one — the breakout §3.2 names. Returns the fill, or None if nothing triggered."""
+        pivot = base["pivot"]
+        hi, op = H[t, j], O[t, j]
+        if hyp["confirm_before_entry"]:
+            # E1. Nothing rests at the broker. The trigger is a session that *closes* above the
+            # pivot carrying >= 1.4x its own 50-day, and the fill is the next open — so a breakout
+            # that did not carry is never bought, rather than bought and then discovered. Costs a
+            # session of drift; removes the entire unconfirmed bucket, which lost money under both
+            # readings of the hair-trigger.
+            vj = valid[j]
+            kk = int(np.searchsorted(vj, t, side="left"))
+            if kk == 0:
+                return None
+            trig = vj[kk - 1]
+            if not (C[trig, j] > pivot) or not sg.breakout_confirmed([V[trig, j]], [v50[trig, j]]):
+                return None
+            fill = op if not np.isnan(op) else C[trig, j]
+            if fill > pivot * cfg["confirm_limit"]:
+                conf["gap_no_fill"] += 1
+                return None                               # gapped past the ceiling — let it go
+            return dict(kind="base", fill=fill, pivot=pivot, confirmed=True)
+        if np.isnan(hi) or hi < pivot:
+            return None
+        order = sg.entry_order(pivot, base["contraction_low"],
+                               limit_over=cfg["limit_over"], max_stop=cfg["max_stop"])
+        fill = pivot if (np.isnan(op) or op <= pivot) else op
+        if fill > order["limit"]:
+            conf["gap_no_fill"] += 1
+            return None                                   # gapped through the limit — no fill
+        return dict(kind="base", fill=fill, pivot=pivot, confirmed=None)
 
     def close_position(tk, day, price, reason, t, gross_price=None):
         p = book.pop(tk)
@@ -333,7 +435,10 @@ def simulate(frame, cfg):
             cost_usd=(gross - proceeds) + (p["invested"] - p["gross_invested"]),
             dividend_usd=dividend,
             bars_held=t - p["entry_idx"], max_favorable=p["mfe"], max_adverse=p["mae"],
-            exit_reason=reason, confirmed=p["confirmed"]))
+            exit_reason=reason, confirmed=p["confirmed"], entry_kind=p.get("kind", "base")))
+        # A delisted name has no way back; everything else is only a moment we were wrong about.
+        if reason != "delisted":
+            exited[tk] = t
         return proceeds
 
     for t in range(WARMUP, n):
@@ -443,7 +548,11 @@ def simulate(frame, cfg):
                     conf["press_windows"] += 1
                 pressed = False
                 nb_rows = own_bars(valid, j, t, back=1)
-                nb = (sg.base_scan(H[nb_rows, j], L[nb_rows, j], C[nb_rows, j])
+                nb = (sg.base_scan(H[nb_rows, j], L[nb_rows, j], C[nb_rows, j],
+                                   min_age=int(hyp["min_base_age"]),
+                                   max_depth=_tolerance(sg.atr_fraction(H[nb_rows, j], L[nb_rows, j],
+                                                                        C[nb_rows, j]),
+                                                        hyp["depth_atr_mult"]))
                       if nb_rows is not None else None)
                 if nb and nb["valid"] and not np.isnan(hi) and hi >= nb["pivot"]:
                     dollars = p["target"] * (3 - p["step"]) * 0.25
@@ -534,59 +643,52 @@ def simulate(frame, cfg):
                 rows = own_bars(valid, j, t, back=back)
                 if rows is None:
                     continue
-                base = sg.base_scan(H[rows, j], L[rows, j], C[rows, j])
-                if not base["valid"]:
+                apct = sg.atr_fraction(H[rows, j], L[rows, j], C[rows, j])
+                base = sg.base_scan(H[rows, j], L[rows, j], C[rows, j],
+                                    min_age=int(hyp["min_base_age"]),
+                                    max_depth=_tolerance(apct, hyp["depth_atr_mult"]))
+                # Two doors, tried in that order. §3.2 has only the first; a valid base that did
+                # not trigger today must not shut the second, which is what an if/elif on the base
+                # would do — the recovering name has an intact old pivot overhead for months.
+                got = None
+                if base["valid"] and fired.get(tk) != round(float(base["pivot"]), 4):
+                    if not _blacked_out(frame, conf, tk, day):
+                        got = base_trigger(j, t, base, rows)
+                if got is None and _reentry_ready(tk, j, t, valid, C, exited, hyp):
+                    # X1. No base, or one that will not trigger for months: a name that corrected
+                    # 42% needs that long to build another, and by then the move it was going to
+                    # make has happened. The way back in is the market's own statement that the
+                    # move resumed — a close above every close of the prior `reentry_window`
+                    # sessions, on a name that still passes M2, M4 and the MCN floor. Not our exit
+                    # price: where we happened to sell is our history, not the stock's, and 96% of
+                    # stopped-out names traded back through it inside 60 days anyway.
+                    #
+                    # Same timing discipline as E1 — judged at last night's close, filled at this
+                    # open. The new high IS the confirmation, so no volume multiple is demanded on
+                    # top of it; that is the clause to falsify if the bucket churns.
+                    if not _blacked_out(frame, conf, tk, day):
+                        px = O[t, j]
+                        if np.isnan(px):
+                            px = C[own_bars(valid, j, t, back=1)[-1], j]
+                        # the pivot is the fill: the adds ladder off the entry, there being no base
+                        got = dict(kind="reentry", fill=px, pivot=px, confirmed=True)
+                if got is None:
                     continue
-                pivot = base["pivot"]
-                if fired.get(tk) == round(float(pivot), 4):
-                    continue                              # this order already filled once
-                nxt = _next_report(frame["reports"].get(tk), day)
-                conf["blackout_decisions"] += 1
-                conf["blackout_known"] += 1 if _knowable(nxt, day) else 0
-                if nxt is not None and sg.in_blackout(day, nxt):
-                    continue                              # §3.3: the wall cancels resting orders
-                hi, op = H[t, j], O[t, j]
-
-                if hyp["confirm_before_entry"]:
-                    # E1. Nothing rests at the broker. The trigger is a session that *closes* above
-                    # the pivot carrying >= 1.4x its own 50-day, and the fill is the next open — so
-                    # a breakout that did not carry is never bought, rather than bought and then
-                    # discovered. Costs a session of drift; removes the entire unconfirmed bucket,
-                    # which lost money under both readings of the hair-trigger.
-                    vj = valid[j]
-                    kk = int(np.searchsorted(vj, t, side="left"))
-                    if kk == 0:
-                        continue
-                    trig = vj[kk - 1]
-                    if not (C[trig, j] > pivot):
-                        continue
-                    if not sg.breakout_confirmed([V[trig, j]], [v50[trig, j]]):
-                        continue
-                    fill = op if not np.isnan(op) else C[trig, j]
-                    if fill > pivot * cfg["confirm_limit"]:
-                        conf["gap_no_fill"] += 1
-                        continue                          # gapped past the ceiling — let it go
-                    born_confirmed = True
-                else:
-                    if np.isnan(hi) or hi < pivot:
-                        continue
-                    order = sg.entry_order(pivot, base["contraction_low"],
-                                           limit_over=cfg["limit_over"], max_stop=cfg["max_stop"])
-                    fill = pivot if (np.isnan(op) or op <= pivot) else op
-                    if fill > order["limit"]:
-                        conf["gap_no_fill"] += 1
-                        continue                          # gapped through the limit — no fill
-                    born_confirmed = None
-
+                kind, fill, pivot = got["kind"], got["fill"], got["pivot"]
+                born_confirmed = got["confirmed"]
+                if not np.isfinite(fill) or fill <= 0:
+                    continue
                 # R1: the stop is the name's own noise, not a fixed percentage floored at the
                 # contraction low — that floor is what makes the law's stop tight enough to fire
-                # before any multi-month move can happen.
+                # before any multi-month move can happen. A re-entry has no base and therefore no
+                # contraction low, so it takes the volatility stop or a flat cap.
                 if hyp["atr_stop_mult"]:
                     a14 = sg.atr(H[rows, j], L[rows, j], C[rows, j])
                     stop = sg.volatility_stop(fill, float(a14[-1]) if len(a14) else None,
                                               mult=hyp["atr_stop_mult"], max_stop=hyp["max_stop"])
                 else:
-                    stop = sg.initial_stop(fill, base["contraction_low"], max_stop=hyp["max_stop"])
+                    stop = sg.initial_stop(fill, None if kind == "reentry"
+                                           else base["contraction_low"], max_stop=hyp["max_stop"])
                 dist = max((fill - stop) / fill, 1e-4)
                 size = sg.momentum_size(nav=nav, mcn_score=row["mcn"], stop_distance=dist)
                 if not size:
@@ -600,9 +702,13 @@ def simulate(frame, cfg):
                 paid = dollars * (1 + spread(j, t))
                 cash -= paid
                 exposure += dollars
-                fired[tk] = round(float(pivot), 4)
+                if kind == "base":
+                    fired[tk] = round(float(pivot), 4)
+                else:
+                    conf["reentries"] += 1
                 conf["entries"] += 1
-                book[tk] = dict(ticker=tk, lots=[(dollars, fill, A[t, j] if np.isfinite(A[t, j]) else fill)],
+                book[tk] = dict(ticker=tk, kind=kind,
+                                lots=[(dollars, fill, A[t, j] if np.isfinite(A[t, j]) else fill)],
                                 qty=dollars / fill, invested=paid, gross_invested=dollars,
                                 avg_cost=paid / (dollars / fill), stop=stop, pivot=pivot,
                                 hi_close=fill, hi_at=t, step=1, target=target, mcn=row["mcn"],
@@ -682,6 +788,13 @@ def _knowable(nxt, day, horizon=CALENDAR_HORIZON):
 
 
 # =============================================================================== conformance
+def _declare(hyp, key, law_text, variant_text):
+    """What a clause was actually enforced at. A widened threshold is not a violation, but a
+    conformance table that still prints the law's number while the run used another one is a lie."""
+    mult = (hyp or {}).get(key)
+    return law_text if not mult else variant_text.format(mult)
+
+
 def conformance(conf, trades, equity, hyp=None):
     """Every §3.2/§3.3 clause the run claims to implement, and how much of the window had the data
     to enforce it. A green tick on a clause that was unenforceable for most of the test is the
@@ -696,12 +809,22 @@ def conformance(conf, trades, equity, hyp=None):
     cov = lambda a, b: (a / b) if b else None
     return [
         dict(clause="M1 latch — weekly, 30-week SMA", fn="signals.market_gate", coverage=1.0),
-        dict(clause="M2 trend template — six conditions", fn="signals.trend_template", coverage=1.0),
-        dict(clause="M3 base detection, checked daily", fn="signals.base_scan", coverage=1.0),
+        dict(clause="M2 trend template — six conditions", fn="signals.trend_template",
+             coverage=1.0, off_high=_declare(hyp, "off_high_atr_mult", "25% flat",
+                                             "max(25%, {} x ATR), capped 60%")),
+        dict(clause="M3 base detection, checked daily", fn="signals.base_scan", coverage=1.0,
+             depth=_declare(hyp, "depth_atr_mult", "25% flat",
+                            "max(25%, {} x ATR), capped 60%"),
+             min_age=int((hyp or {}).get("min_base_age", 25))),
         dict(clause="M4 earnings acceleration", fn="signals.m4_acceleration",
              coverage=cov(conf["m4_known"], conf["m4_evaluated"])),
         dict(clause="MCN — three components, windows end t-10", fn="signals.mcn", coverage=1.0),
-        dict(clause="Entry — GTC stop-limit, pivot / pivot+2%", fn="signals.entry_order", coverage=1.0),
+        dict(clause="Entry — GTC stop-limit, pivot / pivot+2%", fn="signals.entry_order",
+             coverage=1.0,
+             # §3.2 knows one way into a name: a fresh valid base. A run that bought any other way
+             # has to say so here, with the count, or a variant could pass as law-v0.
+             reentries=conf.get("reentries", 0),
+             violations=(0 if (hyp or {}).get("reentry_window") else conf.get("reentries", 0))),
         dict(clause="EOD confirmation, freeze at 50%, late window",
              fn="signals.confirmation_state", coverage=1.0),
         dict(clause="Pyramid +2%/+4%, both limits pivot x 1.05", fn="signals.pyramid_orders",
@@ -862,11 +985,11 @@ def main():
                     cur.executemany("""insert into backtest_trades(run_id,ticker,entry_date,
                           entry_price,qty,exit_date,exit_price,mcn,pivot,initial_stop,size_pct,
                           pyramid_steps,pnl_cad,pnl_pct,bars_held,max_favorable,max_adverse,
-                          exit_reason)
+                          exit_reason,entry_kind)
                         values (%(run_id)s,%(ticker)s,%(entry_date)s,%(entry_price)s,%(qty)s,
                           %(exit_date)s,%(exit_price)s,%(mcn)s,%(pivot)s,%(initial_stop)s,
                           %(size_pct)s,%(pyramid_steps)s,%(pnl_usd)s,%(pnl_pct)s,%(bars_held)s,
-                          %(max_favorable)s,%(max_adverse)s,%(exit_reason)s)""",
+                          %(max_favorable)s,%(max_adverse)s,%(exit_reason)s,%(entry_kind)s)""",
                         [{**t, "run_id": rid} for t in trades])
                     cur.executemany("""insert into backtest_equity(run_id,d,nav,exposure,positions,
                                          gate,benchmark) values (%s,%s,%s,%s,%s,%s,%s)""",
