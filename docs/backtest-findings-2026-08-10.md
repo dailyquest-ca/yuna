@@ -210,6 +210,79 @@ available.** That is a mechanics problem, not a timing one.
 
 ---
 
+## 7b. The hypothesis grid (2026-08-11)
+
+Zak's direction: *stop planning for the median, catch the big winners, press where there is
+conviction, be looser on the stops.* The eight proposals in §8 were coded as opt-in variants —
+law-v0 untouched, every default the law — and staged into presets so that each contains the one
+before it. All runs sit on the same tape: 5,276 tickers, M4 coverage 97.9%, VOO +15.46%.
+
+| | law-v0 | H1 | H2 | H3 | H3b |
+|---|---:|---:|---:|---:|---:|
+| | *baseline* | *+S1 S2 S3 E1* | *+R1 R2 R3* | *+P1 P2* | *P1 fixed* |
+| CAGR | −0.52% | **+0.20%** | −0.32% | −0.54% | −0.66% |
+| Expectancy | −0.429% | −0.732% | −0.491% | −0.708% | −0.805% |
+| Win rate | 29.8% | 16.0% | 16.3% | 15.8% | 13.7% |
+| Average win | +5.29% | +11.58% | +11.48% | +11.15% | — |
+| **Payoff** | 1.85:1 | 3.77:1 | **4.08:1** | 3.80:1 | — |
+| Break-even win rate | 35.1% | 21.0% | **19.7%** | 20.8% | — |
+| **Gap to break-even** | 5.3 pts | 5.0 pts | **3.4 pts** | 5.0 pts | — |
+| Trades > +50% | **0** | 2 | 2 | 2 | — |
+| Best trade | +35.1% | **+89.6%** | +89.6% | +89.6% | — |
+| Max drawdown | **−13.7%** | −16.2% | −14.6% | −15.6% | −16.7% |
+| Exposure | **12.3%** | 8.67% | 6.35% | 7.16% | 7.60% |
+| Reached full size | 22% | 56% | **62%** | 62% | — |
+
+**Nothing beat VOO. Nothing turned expectancy positive.** What the grid did establish is which
+of the eight changes are real, and one of them is the opposite of what anyone expected.
+
+### E1 is the one clear win
+
+Confirming before entry deletes the `unconfirmed` bucket by construction — **−$20,726 gone** — and
+flips `stop` from −$11,702 to **+$16,413**, because a position that reaches full size arms its
+breakeven. The payoff ratio doubles, and a right tail exists for the first time: best trade +89.6%
+against the law's +35.1%, two trades over +50% where nine years of law-v0 produced none.
+
+### E1 also destroys the law's only profit centre
+
+`stalled` was **+$29,284 of a −$9,090 total.** Under H1 it collapses to −$1,484, and not because
+the rule changed: completing the pyramid on 56–62% of positions instead of 22% means "below full
+size at four weeks" stops describing anything, so the clock never fires.
+
+**That clock was profit-taking and nobody designed it as such.** It read as housekeeping — "no
+permanent sub-scale positions" — and it only worked because a 29% volume-confirmation rate left
+two thirds of the book sub-scale by accident. Every gain E1 makes is roughly cancelled by the rule
+it silently switches off.
+
+### The press layer is dead, and it inverts the premise
+
+P1 was the mechanism for "press where there is conviction." Its first implementation demanded a
+valid base *and* a breakout on the exact session the four-week clock expired — a coincidence, not
+a rule, and it fired **zero times in 285 trades**. That was a bug in the proposal, not a result;
+the uninitialised counter is what proved it (a green run with `conf["pressed"] += 1` in the path
+means the path never ran).
+
+Rebuilt with a 20-session window (H3b), it fired **once in 284 trades** — 25 windows opened, 1
+press, 2 expiries, and 22 positions that leaked out through stops and template exits while
+waiting. H3b is the worst run in the grid.
+
+P2 is dead too: ten seats moved exposure from 6.35% to 7.16%. **The funnel is the exposure
+constraint, not the seat count** — the screen does not produce enough qualifying names to fill
+four seats, let alone ten.
+
+So the two tests point the same way, against the instinct that motivated them: **what paid was
+exiting a position that stopped advancing, not adding to it.**
+
+### R1 narrowed the gap but moved the leak
+
+The volatility stop gave H2 the best per-trade economics in the grid — 4.08:1, needing 19.7% wins
+against 16.3% actual. Stop exits fell 154 → 111. But `template` exits jumped **6 → 32 at −4.21%
+each**, and §2's forward-return table already showed `template` sells names that then beat the
+market by two points. The binding constraint moved from the stop to the trend-template exit; it
+was not removed.
+
+---
+
 ## 8. Proposals (§5.8, drafted — none of these is law)
 
 **A · §5.1 entry mechanic — confirm before entering.**
