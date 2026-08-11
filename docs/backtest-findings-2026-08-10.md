@@ -404,9 +404,151 @@ Every re-entry is stamped `backtest_trades.entry_kind = 'reentry'`, and on a run
 declare `reentry_window` it counts as a **conformance violation**, so a variant can never pass as
 law-v0.
 
-### Results
+### Results — H5 and H6 are both refuted
 
-*Dispatched 2026-08-11 against pinned baseline `backtest_runs.id = 18`. Pending.*
+| | H4 *(reference)* | H5 | H6 |
+|---|---:|---:|---:|
+| CAGR | **+0.04%** | −1.79% | −1.63% |
+| Expectancy | **−0.304%** | −1.232% | −1.394% |
+| Trades | 252 | 402 | 458 |
+| Average loss | **−2.83%** | −3.57% | −3.44% |
+| Max drawdown | **−12.4%** | −21.0% | −20.8% |
+| Total P&L | **+$641** | −$29,752 | −$27,288 |
+| **Best trade** | **+89.6%** | **+89.6%** | **+89.6%** |
+
+The last row is the finding. 150 extra positions under H5, 206 under H6, and **the best trade does
+not move by a hundredth of a point.** The widening admitted volume, not tail.
+
+**The pre-run measurement that justified H5 was one-sided, and this is the lesson to keep.** It
+asked whether the +100% names get a valid base under each clause — the numerator — and never asked
+how many ordinary setups each clause also admits. `min_base_age=12` turns every twelve-day-old
+local high into a candidate pivot, and no sweep over the winners could have shown that.
+
+There is also a mechanical reason the depth clause cannot work as wired. A name that fell 40% has
+its pivot at the pre-crash high, and under E1 the entry needs a close **above** the pivot — so we
+buy only after the name has round-tripped, by which point the recovery is the move we missed. The
+winners' +100% years happen *during* the climb back. Widening what counts as a valid base does not
+help while the trigger sits at the top of the hole.
+
+### X1 — re-entry on the best base, not the worst
+
+H6 measures re-entry stacked on a widening that lost money, so X1 re-ran it on H4.
+
+| | H4 | X1 |
+|---|---:|---:|
+| CAGR | **+0.04%** | −0.56% |
+| Trades / of which re-entries | 252 / — | 362 / **209** |
+| Win rate | 16.7% | **19.1%** |
+| Average loss | **−2.83%** | −3.65% |
+| Total P&L | **+$641** | −$9,746 |
+| Best trade, re-entry bucket | — | +45.9% |
+
+The falsifier written into the rule — *"that is the clause to falsify if the bucket churns"* —
+fired: **209 re-entries.** And re-entry does not add to the strategy, it **displaces** it. The book
+caps at four names, so those 209 crowded H4's 252 base entries down to 153. Per trade the
+re-entries are slightly better than the base entries beside them (−1.15% against −1.06% in H6,
+20.6% wins against 17.0%) and they hold longer, but their best is +45.9% against the base door's
++89.6%. A 20-session high catches bounces, not the names that run.
+
+---
+
+## 7e. The duration set — and the one thing that ever worked (2026-08-11)
+
+Five variants had now tried to put more names in the book and every one lost money, while the only
+profitable bucket in the whole grid was `stagnant`: +17.20% over 36.3 sessions. **Average hold
+across every run ever measured is 10 to 13 sessions. A +100% year takes 250.** So the question
+changed from what we buy to what cuts the hold short.
+
+Three diagnostics ran first, and two of them saved a run each:
+
+* **`gap` is not earnings.** Zero of H4's 43 `gap` exits fall within two days of a report — the
+  blackout and cushion rules are working.
+* **`gap` is the breakeven rung wearing a disguise.** 38 of the 43 are between −4.1% and −0.1%,
+  6.4 sessions in. That is not a stock gapping through a 14% volatility stop; it is a position that
+  popped, ratcheted its stop to average cost, and got taken out at cost on the first pullback. The
+  109 `stop` exits at −0.49% and 9.4 sessions are the same event. **Together, 60% of H4's exits.**
+
+| | H4 | T1 *(no template exit)* | B2 *(no euphoria)* | B3 *(stall clock 40)* | B1 *(no breakeven)* | **B5** *(rung ½R under cost)* |
+|---|---:|---:|---:|---:|---:|---:|
+| CAGR | +0.04% | −0.01% | −0.17% | −0.32% | −0.21% | **+0.10%** |
+| Trades | 252 | 246 | 252 | 252 | 183 | 195 |
+| **Avg hold** | 11.9 | 12.8 | 11.9 | 12.0 | **23.9** | **21.7** |
+| **Win rate** | 16.7% | 17.1% | 16.7% | 16.3% | **37.2%** | **33.8%** |
+| Average win | +12.33% | +12.30% | +11.32% | +11.48% | +10.79% | +11.00% |
+| Average loss | −2.83% | −2.94% | −2.83% | −2.82% | −7.60% | −6.13% |
+| Max drawdown | −12.4% | −13.2% | −13.7% | −14.6% | −13.9% | **−10.96%** |
+| Total P&L | +$641 | −$204 | −$3,031 | −$5,652 | −$3,760 | **+$1,874** |
+
+**T1 — the template exit is a label, not a leak.** Deleting H4's worst bucket (29 exits, −$8,272)
+recovers almost none of it: `stagnant` goes 10 → 20 exits for the same total dollars and `stop` and
+`gap` absorb the rest. The positions it was selling did not go on to make money for us; another
+rule took them out days later for the same loss.
+
+**B2 — refuted in the opposite direction to the one predicted.** Removing the euphoria tightening
+left trade count, win rate and average loss *identical* and made the winners **smaller** (average
+win 12.33% → 11.32%, best 89.6% → 84.9%). A 5% trail on a parabolic leg captures more of that leg
+than a 25% trail does. §3.2 is right and the prediction against it was wrong.
+
+**B3 — a rule can be slowed until it ceases to exist.** B3 is H4 with the stall clock at 40
+sessions instead of 20; H2 is H4 with no stall clock at all. They produced the same 252 trades and
+the same final NAV, **$194,348.12, to the cent.** Nothing survives 40 sessions, so the clock never
+fires. The same happened to B4 (breakeven earned at 3R): byte-identical to B1, because with a
+14–20% stop, 3R is +42% and nothing reaches it. `stagnant` is therefore not well described as
+profit-taking — it is *the only rule in the system that ever meets a position at 36 sessions*.
+
+**B1 and B5 — the rung, and where it sits.** Deleting the breakeven rung doubled the hold (11.9 →
+23.9) and more than doubled the win rate (16.7% → 37.2%). It is the only intervention in fourteen
+runs that moved duration at all. It also tripled the average loss, because every loser then runs
+the full volatility stop. **The rung is not the enemy; a rung parked exactly on cost is** — price
+oscillates around entry, so a stop sitting there is a magnet. B5 moves it half a risk *under* cost
+and keeps nearly all of B1's duration at a third of the cost: best CAGR, best drawdown, and the
+only positive P&L besides H4.
+
+## 7f. The exposure ceiling — why none of this could ever have reached VOO
+
+| | law-v0 | H4 | B5 | **VOO** |
+|---|---:|---:|---:|---:|
+| Days holding anything | 65.9% | 59.8% | 64.2% | **100%** |
+| **Average exposure** | 12.31% | 6.20% | 9.76% | **100%** |
+| Average names held | — | 1.28 | 1.82 | — |
+| Days completely flat | — | 40.2% | 35.8% | **0%** |
+| CAGR | −0.52% | +0.04% | +0.10% | **+15.46%** |
+
+§3.2 sizes a position at `risk budget / stop distance`, capped by a 12% band. The budget is
+0.7–0.9% of NAV, so against B5's 20% volatility stop a position is **4.5% of the account**, and the
+book averages under two names. Fourteen runs were grading a ~10%-invested sleeve against a
+100%-invested index. No entry, exit, stop or holding rule can close a 10× gap in capital at work.
+
+**Zak's ruling, 2026-08-11:** *"to be fair we should say 100k USD is the amount and we can use all
+of it... with up to 25% on high conviction... and that's vs. 100% in VOO."* Preset `z1` implements
+it — budgets raised until a full-conviction name reaches a 25% ceiling against its own stop
+(ordinary names land at 12.5%), sleeve cap 100%, $100k, and the whole position taken at entry
+rather than §3.2's half-at-the-pivot, which hedges an unconfirmed breakout that E1 has already
+confirmed.
+
+## 7g. The trim ladder (M1)
+
+Zak's own method: *"trimming 25% at 50% or so and trimming 25% at 100%. And then letting the rest
+ride until the stock completely dies."*
+
+§3.2 has no partial exit anywhere — a position is opened once and closed once — so this is the
+first variant that required the **engine** to change rather than a threshold. `realise()` books any
+quantity out of a position and writes that slice its own trade row, so `trim50`, `trim100` and the
+runner's eventual exit are separately measurable; the lots shrink pro rata, leaving the basis, the
+stop and the next rung measured against what the position actually paid. Each rung is a resting
+limit sell at avg cost × (1 + level), not an end-of-day decision, so it cannot use a price the
+session had not yet printed.
+
+**"Until the stock completely dies" is read as immunity from the housekeeping exits** — template,
+MCN floor, stall clock, stagnation clock — because those are how a position that is merely
+*resting* gets closed, and a trimmed position is not resting. The runner keeps its stop, the market
+gate and delisting. **That reading is an assumption**, and it is the first thing to revisit if the
+runner bucket bleeds.
+
+Trims are declared in the conformance table and count as a violation on any run that did not ask
+for them, the same guard the variant exits and the re-entry door get.
+
+*Dispatched 2026-08-11 at $100k under the new capital regime. Pending.*
 
 ---
 
