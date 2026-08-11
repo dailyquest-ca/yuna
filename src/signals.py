@@ -452,7 +452,8 @@ def volatility_stop(entry, atr_now, *, mult=5.0, max_stop=0.20):
 def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_step=0,
                  full_step=3, trail10_from=0.15, trail10=0.10, euphoria_trail=0.05,
                  euphoria_sd=2.0, sd_window=50, breakeven_r=None, init_stop=None,
-                 breakeven=True, euphoria=True):
+                 breakeven=True, euphoria=True, breakeven_on_full_size=True,
+                 breakeven_giveback=0.0):
     """The stop ladder (§3.2 Stops) — ratchets up, never down.
 
     Full size moves the stop to breakeven; +15% from average cost starts a 10% trail below the
@@ -465,6 +466,20 @@ def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_
     `breakeven_r` on purpose: that one *moves* the breakeven trigger, and setting it to None
     restores §3.2's "at full pyramid size", which under E1 fires on most positions — so there was
     no way to ask what a position does with no breakeven under it at all.
+
+    B1 answered that question and the answer was two-sided: deleting the rung **doubled the
+    average hold, 11.9 sessions to 23.9, and more than doubled the win rate, 16.7% to 37.2%** —
+    the diagnosis was right — but the average loss went -2.83% to -7.60%, because every loser now
+    runs the full volatility stop. The rung is not the enemy; a rung sitting exactly at cost is,
+    because price oscillates around entry and a stop parked there is a magnet.
+
+    So two further knobs, both interpolating between those poles:
+
+      * `breakeven_on_full_size` — whether *reaching full pyramid size* trips the rung at all, so
+        a caller can keep the earned-it trigger (`breakeven_r`) and drop the sizing one.
+      * `breakeven_giveback` — where the rung sits, as a fraction of the initial risk left under
+        cost. 0.0 is §3.2 (exactly cost); 1.0 leaves the initial stop untouched and reproduces B1;
+        0.5 halves the risk instead of erasing it, which is room without abandoning protection.
     """
     c = np.asarray(closes, dtype=float)
     if not len(c):
@@ -481,17 +496,22 @@ def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_
     # Hypothesis R2: breakeven when the position has earned back its own risk, rather than when
     # the pyramid completes. The law ties risk management to a *sizing* milestone that three of
     # four positions never reach, so 129 stops gave back +6.56% unrealised to exit at -2.05%.
-    at_1r = False
-    if breakeven_r is not None and avg_cost and init_stop:
+    at_1r, risk = False, None
+    if avg_cost and init_stop:
         risk = (float(avg_cost) - float(init_stop)) / float(avg_cost)
-        at_1r = risk > 0 and (px / float(avg_cost) - 1) >= breakeven_r * risk
+        if breakeven_r is not None:
+            at_1r = risk > 0 and (px / float(avg_cost) - 1) >= breakeven_r * risk
 
     if euphoric:
         candidate, mode = hc * (1 - euphoria_trail), "trail5"
     elif avg_cost and px / float(avg_cost) - 1 >= trail10_from:
         candidate, mode = hc * (1 - trail10), "trail10"
-    elif breakeven and avg_cost and (pyramid_step >= full_step or at_1r):
-        candidate, mode = float(avg_cost), "breakeven"
+    elif breakeven and avg_cost and ((breakeven_on_full_size and pyramid_step >= full_step)
+                                     or at_1r):
+        rung = float(avg_cost)
+        if breakeven_giveback and risk:
+            rung *= 1 - float(breakeven_giveback) * risk
+        candidate, mode = rung, "breakeven"
     else:
         candidate, mode = current_stop, "initial"
 

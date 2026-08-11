@@ -332,8 +332,33 @@ def test_the_ablations_each_move_exactly_one_clause_off_h4():
         p = bt.PRESETS[name]
         assert h4.items() <= p.items(), f"{name} is not H4 plus something"
         assert set(p) - set(h4) == keys, f"{name} moves more than its one clause"
-    b3 = bt.PRESETS["b3"]                         # b3 changes a value H4 already sets
-    assert {k for k in b3 if b3[k] != h4.get(k)} == {"stagnation_days"}
+    for name, keys in (("b3", {"stagnation_days"}),          # these change a value H4 already sets
+                       ("b4", {"breakeven_r", "breakeven_on_full_size"}),
+                       ("b5", {"breakeven_giveback"})):
+        p = bt.PRESETS[name]
+        assert {k for k in p if p[k] != h4.get(k)} == keys, f"{name} moves more than its clause"
+
+
+def test_b5_leaves_room_under_cost_instead_of_parking_the_stop_on_it():
+    """Price oscillates around entry, so a rung at exactly cost is a magnet — 38 of H4's 43 `gap`
+    exits are shallow scratches six sessions in. Giveback interpolates H4 (0.0) to B1 (1.0)."""
+    closes = list(np.linspace(96.0, 104.0, 49)) + [104.0]
+    kw = dict(closes=closes, avg_cost=100.0, current_stop=90.0, pyramid_step=3, init_stop=90.0)
+    assert sg.ratchet_stop(**kw)["stop"] == pytest.approx(100.0)                 # §3.2: on cost
+    assert sg.ratchet_stop(**kw, breakeven_giveback=0.5)["stop"] == pytest.approx(95.0)
+    assert sg.ratchet_stop(**kw, breakeven_giveback=1.0)["stop"] == pytest.approx(90.0)  # == B1
+
+
+def test_b4_keeps_the_earned_it_trigger_and_drops_the_sizing_one():
+    """§3.2 trips the rung on full pyramid size, which under E1 nearly every position reaches —
+    so it fires on positions that have earned nothing. B4 requires 3R instead."""
+    flat = list(np.linspace(96.0, 104.0, 49)) + [104.0]          # +4%, well under 3R
+    kw = dict(avg_cost=100.0, current_stop=90.0, pyramid_step=3, init_stop=90.0)
+    assert sg.ratchet_stop(closes=flat, **kw)["mode"] == "breakeven"
+    b4 = dict(breakeven_on_full_size=False, breakeven_r=3.0)
+    assert sg.ratchet_stop(closes=flat, **kw, **b4)["mode"] == "initial"
+    earned = list(np.linspace(96.0, 104.0, 49)) + [131.0]        # +31% = 3.1R on a 10% risk
+    assert sg.ratchet_stop(closes=earned, **kw, **b4)["mode"] in ("breakeven", "trail10", "trail5")
 
 
 def test_b1_removes_the_breakeven_rung_that_breakeven_r_cannot_reach():

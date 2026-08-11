@@ -57,6 +57,8 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            max_stop=0.08,
            breakeven_r=None,           # R2  — breakeven at full pyramid size
            breakeven=True,             # B1  — a breakeven rung exists at all
+           breakeven_on_full_size=True,# B4  — full pyramid size trips it, per §3.2
+           breakeven_giveback=0.0,     # B5  — how much of the initial risk the rung leaves under
            euphoria=True,              # B2  — >2sd above the 50-day tightens the trail to 5%
            trail_from=0.15, trail=0.10,# R3  — 10% trail from +15%
            press_on_next_base=False,   # P1  — a stalled pyramid only ever exits
@@ -174,6 +176,29 @@ PRESETS = {
     "b3": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
                atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
                stagnation_days=40),
+    # ---- B1 was the most informative run in the grid and it cut both ways. Deleting the
+    # breakeven rung DOUBLED the average hold (11.9 -> 23.9 sessions) and more than doubled the
+    # win rate (16.7% -> 37.2%), so the diagnosis was right: that rung is what caps the hold. But
+    # the average loss went -2.83% -> -7.60%, because every loser then runs the full volatility
+    # stop, and that swamped the gain (payoff 4.36:1 -> 1.42:1).
+    #
+    # The rung is not the problem. A rung sitting *exactly at cost* is: price oscillates around
+    # entry, so a stop parked there is a magnet — 38 of H4's 43 `gap` exits are shallow scratches
+    # 6.4 sessions in, and 109 `stop` exits average -0.49% at 9.4 sessions. Both are this.
+    # B4 and B5 interpolate between H4 and B1 from the two directions that exist.
+    #
+    # B4 · earn it first. Keep the rung, drop the sizing trigger, and require 3x the initial risk
+    # before the stop moves to cost. §3.2 trips it on full pyramid size, which under E1 nearly
+    # every position reaches — so the rung currently fires on positions that have earned nothing.
+    "b4": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=3.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_on_full_size=False),
+    # B5 · halve the risk instead of erasing it. Same triggers as H4, but the rung sits half the
+    # initial risk under cost rather than on it, so an ordinary pullback through entry costs
+    # nothing and the downside is still cut by half.
+    "b5": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5),
 }
 
 
@@ -675,7 +700,9 @@ def simulate(frame, cfg):
                                   highest_close=p["hi_close"], pyramid_step=p["step"],
                                   trail10_from=hyp["trail_from"], trail10=hyp["trail"],
                                   breakeven_r=hyp["breakeven_r"], init_stop=p["init_stop"],
-                                  breakeven=hyp["breakeven"], euphoria=hyp["euphoria"])
+                                  breakeven=hyp["breakeven"], euphoria=hyp["euphoria"],
+                                  breakeven_on_full_size=hyp["breakeven_on_full_size"],
+                                  breakeven_giveback=hyp["breakeven_giveback"])
             if out["stop"] is not None:
                 p["stop"] = out["stop"]
             p["last_mark"] = cl
