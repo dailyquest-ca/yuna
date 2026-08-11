@@ -216,11 +216,18 @@ PRESETS = {
     # budgets are raised until a full-conviction name reaches the 25% ceiling against its own
     # stop, the sleeve cap goes to 100%, and E1's confirmation makes §3.2's half-now first tranche
     # a hedge against a risk that no longer exists.
+    #
+    # `breakeven_on_full_size=False` is forced by `entry_fraction=1.0`, not chosen. A position that
+    # opens full is marked step 3, which trips §3.2's "breakeven at full pyramid size" on its FIRST
+    # session — so B5's rung, whose whole value is that it sits below cost and only after the
+    # position has earned +1R, would instead become an initial stop of half the intended width
+    # applied before the position has earned anything. Run 33 is what that costs: the `stop` bucket
+    # alone was -$81,536 of a -$30,036 total, on 95 exits at -3.48% against an intended ~10%.
     "z1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
                atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
                stagnation_days=20, breakeven_giveback=0.5,
                budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
-               entry_fraction=1.0, max_names=5),
+               entry_fraction=1.0, max_names=5, breakeven_on_full_size=False),
     # M1 · Zak's own ladder, on top of the capital regime: sell a quarter at +50%, a quarter at
     # +100%, and let the remaining half ride "until the stock completely dies". The rungs are
     # resting limit sells at avg cost x (1 + level). The ride is implemented as immunity from the
@@ -232,7 +239,7 @@ PRESETS = {
                atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
                stagnation_days=20, breakeven_giveback=0.5,
                budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
-               entry_fraction=1.0, max_names=5,
+               entry_fraction=1.0, max_names=5, breakeven_on_full_size=False,
                trim_at=(0.50, 1.00), trim_frac=0.25, runner_immunity=True),
 }
 

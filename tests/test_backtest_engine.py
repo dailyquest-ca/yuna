@@ -764,6 +764,30 @@ def test_z1_takes_the_whole_position_at_entry_because_e1_already_confirmed():
     assert trades and all(t["pyramid_steps"] == 3 for t in trades)
 
 
+@pytest.mark.parametrize("name", ["z1", "m1"])
+def test_opening_full_must_not_trip_the_breakeven_rung_on_day_one(name):
+    """A position that opens full is marked step 3, which trips §3.2's "breakeven at full pyramid
+    size" on its first session. B5's rung is worth something *because* it sits below cost and only
+    after +1R; fired at entry it is just an initial stop of half the intended width.
+
+    Run 33 shipped without this pairing and the `stop` bucket alone was -$81,536 of a -$30,036
+    total, 95 exits at -3.48% against an intended ~10%. Any preset that opens full has to turn the
+    sizing trigger off, so this asserts the pairing rather than trusting it.
+    """
+    p = bt.PRESETS[name]
+    if p.get("entry_fraction", 0.5) >= 1.0:
+        assert p.get("breakeven_on_full_size") is False, (
+            f"{name} opens full size and would ratchet to breakeven before earning anything")
+    # and the rung must genuinely not fire on an unearned position
+    hyp = dict(bt.LAW); hyp.update(p)
+    flat = list(np.linspace(96.0, 104.0, 49)) + [104.0]
+    out = sg.ratchet_stop(closes=flat, avg_cost=100.0, current_stop=80.0, pyramid_step=3,
+                          init_stop=80.0, breakeven_r=hyp["breakeven_r"],
+                          breakeven_giveback=hyp["breakeven_giveback"],
+                          breakeven_on_full_size=hyp["breakeven_on_full_size"])
+    assert out["stop"] == pytest.approx(80.0), "the stop tightened before the position earned it"
+
+
 def test_an_undeclared_reentry_fails_conformance():
     """The same guard the variant exits get: a run may buy through a door §3.2 does not name, but
     it has to say so, or a variant could pass as law-v0."""
