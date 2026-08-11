@@ -736,6 +736,110 @@ none of the eighteen runs has tested.
 
 ---
 
+## 9. The census of winners — the gates are inverted (2026-08-11)
+
+Zak: *"those can't be the ONLY stocks that performed really well... it's almost like our grading
+criteria is off... Can we do a query on every stock that performed 70%+ in a 3-6 month window...
+and ask what their similarities are?"*
+
+Built `research_monthly` — 425,341 monthly bars, all 5,276 US names including the delisted, 2016-08
+to 2026-08 — and defined a winner-month as one where the name's high reaches **+70% within six
+months**. Restricted to L0 liquidity (close ≥ $5, ADDV ≥ $10M, 12 months of history): **230,007
+name-months, of which 15,155 are winner-months across 2,390 distinct names.** Half the liquid
+universe produced a 70% six-month run at some point in the decade. Base rate **6.59%**.
+
+### What a winner looks like the month before it runs
+
+| median, the month before | non-winners (212,320) | **winners (14,990)** |
+|---|---:|---:|
+| Off its 12-month high | −15.3% | **−29.9%** |
+| **12-month depth (low vs high)** | −40.9% | **−65.5%** |
+| Prior 3-month return | — | positive |
+| Prior 6-month return | +4.2% | +8.4% |
+| **Prior 12-month return** | **+8.5%** | **+7.7%** |
+| Price | $53.10 | $26.30 |
+
+**Trailing twelve-month return does not discriminate at all** — the winners' is marginally *lower*.
+The entire MCN quality score is a trailing-momentum measure (S1: slope × R² ÷ volatility over 90
+days), which is why §3 found MCN does not rank within its own band. It is measuring something that
+does not predict the thing we care about.
+
+### The two core gates are anti-predictive
+
+Lift = a rule's hit rate ÷ the 6.59% base rate. Below 1.00 means the rule selects names **less**
+likely to run than a coin flip over the liquid universe.
+
+| rule | n | hit rate | **lift** | share of all winners |
+|---|---:|---:|---:|---:|
+| DEEP (>50% off) + TURNING (3m > +10%) + 25%+ off high | 9,577 | 20.33% | **3.08×** | 13.0% |
+| DEEP + TURNING | 35,382 | 15.63% | **2.37×** | 36.9% |
+| 12-month depth worse than 50% | 78,609 | 15.37% | **2.33×** | **80.6%** |
+| trailing 12m return, top quintile | 37,201 | 12.01% | 1.82× | 29.8% |
+| more than 25% off the high | 72,786 | 11.65% | 1.77× | 56.6% |
+| **— base rate —** | 227,310 | **6.59%** | 1.00× | 100% |
+| **M2: within 25% of the 52-week high** | 154,524 | **4.21%** | **0.64×** | 43.4% |
+| **M3: base depth ≤ 25%** | 23,590 | **0.25%** | **0.04×** | **0.4%** |
+
+**M3's depth clause has a lift of 0.04.** A name passing it is twenty-five times *less* likely to
+produce a 70% move than a random liquid stock, and **99.6% of every winner in the decade fails
+it.** M2's off-high clause is also below the base rate at 0.64×. §7c said the depth clause was
+excluding the winners; this says it is very close to a perfect filter for doing so.
+
+### It is not a regime artefact — it holds in all ten years
+
+| year | base rate | deep+turning | M2 near-high | M3 shallow base |
+|---|---:|---:|---:|---:|
+| 2017 | 3.37% | **12.98%** | 2.38% | 0.60% |
+| 2018 | 2.80% | **8.76%** | 1.94% | 0.21% |
+| 2019 | 2.95% | **9.06%** | 1.73% | 0.03% |
+| 2020 | 19.43% | **29.05%** | 13.18% | 1.78% |
+| 2021 | 4.07% | **7.33%** | 3.15% | 0.00% |
+| 2022 | 3.75% | **8.12%** | 1.38% | 0.09% |
+| 2023 | 4.86% | **11.34%** | 2.88% | 0.09% |
+| 2024 | 5.15% | **13.02%** | 3.35% | 0.19% |
+| 2025 | 11.39% | **27.36%** | 8.20% | 0.38% |
+| 2026 | 6.11% | **10.85%** | 4.29% | 0.00% |
+
+Deep+turning beats the base rate in ten years out of ten. M2 is below it in ten out of ten. M3 is
+near zero in ten out of ten.
+
+### And the hit rate is not the whole story — the forward returns agree
+
+Hit rate could reward volatility rather than edge, so the same buckets by actual six-month
+close-to-close return:
+
+| bucket | n | mean fwd 6m | median | % up | mean worst drawdown | 90th pct |
+|---|---:|---:|---:|---:|---:|---:|
+| DEEP + TURNING + 25%+ off high | 8,653 | **+16.51%** | +6.94% | 56.1% | −26.3% | **+76.0%** |
+| DEEP + TURNING | 31,545 | **+12.93%** | +5.92% | 57.0% | −22.9% | +63.6% |
+| top-quintile 12m momentum | 32,569 | +6.94% | +0.16% | 50.2% | −23.7% | +51.8% |
+| all liquid names | 209,855 | +5.71% | +1.96% | 53.5% | −19.6% | +39.2% |
+| M2 only | 142,632 | +4.06% | +1.91% | 53.8% | −17.6% | +33.4% |
+| **M2 + M3 (what we buy)** | 22,161 | **+0.28%** | +0.39% | 51.0% | −14.3% | **+19.5%** |
+
+**The set our two gates admit returns +0.28% over six months** — against +5.71% for picking a
+liquid US stock at random, and +16.51% for the deep-and-turning set. Its 90th percentile is +19.5%,
+so the gates do not merely miss the tail, they select a population that **has no tail to miss**.
+They do buy the calmest names — worst drawdown −14.3% against −26.3% — which is the trade §3.2
+made, and it is the wrong one for a sleeve whose whole return is supposed to come from the tail.
+
+### What this does and does not establish
+
+It establishes that §3.2's selection is pointed at the wrong population, in every year, on both
+hit rate and forward return, and that the alternative is not a loosened version of the same idea —
+it is close to the opposite one. This is why H5 failed: widening depth from 25% to 40% still
+selects on shallowness, and the winners live past 50%.
+
+It does **not** establish that a deep-and-turning sleeve is tradeable. The bucket's mean worst
+drawdown is −26.3% and 44% of it goes down. A signal with 3× lift and a 20% hit rate still needs
+the entry, sizing, stop and hold discipline the B/M/A series built — and those were developed
+against a different population, so none of their calibration transfers for free.
+
+**This is a proposal for a new selection hypothesis, not a ruling.** §3.2's M2 and M3 stand until a
+run beats law-v0 on the same rails.
+
+---
+
 ## 8. Proposals (§5.8, drafted — none of these is law)
 
 **A · §5.1 entry mechanic — confirm before entering.**
