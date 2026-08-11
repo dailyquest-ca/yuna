@@ -838,6 +838,113 @@ against a different population, so none of their calibration transfers for free.
 **This is a proposal for a new selection hypothesis, not a ruling.** §3.2's M2 and M3 stand until a
 run beats law-v0 on the same rails.
 
+## 9b. Moving averages, volume, volatility, and the financials
+
+Zak: *"is there some kind of pattern to catch, before they gained momentum. Is there anything in
+their financials or otherwise about them as a stock... or in their DMAs?"*
+
+Same census, one feature at a time. Lift against the 6.59% base rate.
+
+| signal | n | precision | **lift** | recall |
+|---|---:|---:|---:|---:|
+| **dollar volume 2x its own 12-month average** | 6,738 | 22.16% | **3.36×** | 10.0% |
+| volume expanding + deep + turning | 10,470 | 20.68% | 3.14× | 14.4% |
+| volume expanding (1.5x) + deep | 14,687 | 20.54% | 3.11× | 20.1% |
+| volume expanding (1.5x) | 20,939 | 15.64% | 2.37× | 21.8% |
+| price under $20 | 43,604 | 13.96% | 2.12× | 40.6% |
+| **6-month average range > 12% (it moves)** | 162,424 | 9.05% | 1.37× | **98.0%** |
+| MA stack *down* (close < ma3 < ma7 < ma10) | 36,965 | 7.64% | 1.16× | 18.8% |
+| long MA still falling | 89,980 | 7.50% | 1.14× | 45.0% |
+| below the 200-day | 96,983 | 7.03% | 1.07× | 45.5% |
+| **— base rate —** | 227,310 | **6.59%** | 1.00× | 100% |
+| **MA stack up (the trend template)** | 64,973 | **6.37%** | **0.97×** | 27.6% |
+| **6-month average range < 6% (calm)** | 2,557 | **0.47%** | **0.07×** | 0.1% |
+
+**The moving averages carry no information whatsoever.** Minervini's stack — the spine of M2 — has
+a lift of **0.97**: indistinguishable from picking at random. Being *below* the 200-day is very
+slightly better (1.07). Every DMA condition in §3.2 could be deleted without changing the odds.
+
+**Volume is the best single predictor found anywhere in this work.** Dollar volume at twice its own
+twelve-month average: **3.36× lift**. Money arriving is visible before the move.
+
+**And volatility is a hard gate in the direction opposite to §3.2's.** A name whose six-month
+average range is under 6% has a **0.47%** chance of a 70% move — lift 0.07. Range above 12%
+captures **98% of every winner in the decade**. This is Zak's "high beta" instinct, and it is the
+single most reliable thing in the census: **you cannot get a 70% move out of a calm stock.** §3.2's
+ATR-tightness sub-score and its 25% depth clause both explicitly select for calm.
+
+### The financials say the same thing, and it breaks a rule we just built
+
+Point-in-time, using only quarters *reported before* the observation month (`research_eps`,
+297,761 rows, 4,616 names).
+
+| signal | n | precision | **lift** | recall |
+|---|---:|---:|---:|---:|
+| still losing money, but the loss is shrinking | 12,088 | 17.74% | **2.74×** | 14.8% |
+| **latest reported EPS is negative** | 34,104 | 17.54% | **2.71×** | **41.4%** |
+| loss a year ago, profit now (the S3 swing) | 11,938 | 10.98% | 1.69× | 9.1% |
+| **missed** the estimate | 57,978 | 7.95% | 1.23× | 31.9% |
+| beat by more than 20% | 46,217 | 7.52% | 1.16× | 24.0% |
+| **— base rate —** | 223,074 | **6.48%** | 1.00× | 100% |
+| beat the estimate | 150,130 | 5.92% | 0.91× | 61.5% |
+| **M4: EPS growing ≥25% year on year** | 57,619 | **4.96%** | **0.76×** | 19.8% |
+| **latest reported EPS is positive** | 188,970 | **4.48%** | **0.69×** | 58.6% |
+
+**M4 — our earnings-acceleration gate — has a lift of 0.76.** Worse: **being profitable at all has
+a lift of 0.69**, and being unprofitable has 2.71 and captures 41% of all winners. Beating the
+estimate is mildly anti-predictive (0.91); missing it is mildly predictive (1.23).
+
+**This directly contradicts A4, the forever hold.** Its release condition is
+`profitability_dead` — two consecutive reported quarters at or below zero. On this census that
+condition describes **the entry state of 41% of all winners**, so as written it would sell the
+best candidates on day one. A4 was designed against the population §3.2 selects (profitable,
+calm, near its highs) and does not transfer to the population that actually runs.
+
+### The net, tuned the way Zak proposed
+
+Start with a net that catches nearly all of them, then tighten. Each row adds one condition:
+
+| step | n | precision | recall | lift | mean fwd 6m |
+|---|---:|---:|---:|---:|---:|
+| 0 · every liquid US name | 212,407 | 6.76% | 100% | 1.00 | +6.01% |
+| 1 · + it moves at all (range > 12%) | 150,243 | 9.37% | **98.1%** | 1.39 | +7.79% |
+| 2 · + it has fallen hard (depth > 50%) | 70,188 | 16.44% | 80.4% | 2.43 | +13.15% |
+| 3 · + still 25%+ off its high | 38,460 | 18.50% | 49.6% | 2.74 | +14.78% |
+| **4 · + turning up (3m > +10%)** | **8,644** | **21.67%** | 13.1% | **3.21** | **+19.07%** |
+| 5 · + money arriving (adv 1.5×) | 1,601 | 31.92% | 3.6% | 4.72 | +15.01% |
+| 6 · + money arriving hard (2×) | 1,087 | 34.22% | 2.6% | **5.07** | +15.37% |
+
+The method works — precision rises monotonically from 6.76% to 34.22%, a 5× lift — but **mean
+forward return peaks at step 4 and then falls.** Steps 5 and 6 keep raising the odds of a +70%
+move while *lowering* the average outcome, because the volume filter also admits names with worse
+downside. Precision and expectancy are not the same objective, and the tell only appears because
+both were measured.
+
+Step 3 or 4 is the tradeable region: step 3 keeps half of every winner in the decade at 2.74× lift
+and +14.78% mean; step 4 gives 3.21× and +19.07% on ~72 candidates a month, which is far more than
+a five-name book needs.
+
+### The synthesis
+
+Every gate in §3.2's momentum sleeve selects for the same latent quality — an orderly, profitable,
+calm stock near its highs — and that quality is **anti-correlated with the outcome the sleeve
+exists to capture**. Not weakly correlated. Anti-correlated, in all ten years, on hit rate and on
+forward return, in the price data and in the earnings data independently.
+
+| §3.2 gate | lift |
+|---|---:|
+| M3 base depth ≤ 25% | **0.04×** |
+| M2 within 25% of the 52-week high | 0.64× |
+| M4 EPS accelerating ≥25% | 0.76× |
+| M2 moving-average stack | 0.97× |
+| *(implied) profitable company* | 0.69× |
+| *(implied) low ATR — the S2 tightness score* | 0.07× |
+
+That is the whole answer to "how could our net grab so many losers but miss so many winners". The
+net was never mis-tuned; it was pointed at the opposite population. And it explains every earlier
+result at once: why MCN does not rank (§3), why the winners are missed (§7c), why widening depth
+admitted 150 positions and no tail (H5), and why A1 found exactly one candidate per decade.
+
 ---
 
 ## 8. Proposals (§5.8, drafted — none of these is law)
