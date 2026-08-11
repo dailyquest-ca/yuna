@@ -720,6 +720,21 @@ def test_the_runner_outlives_the_housekeeping_exits():
     assert [t["exit_reason"] for t in plain if t["ticker"] == "N00.US"][:2] == ["trim50", "trim100"]
 
 
+def test_m2_gives_the_runner_a_wider_trail_than_the_position_it_came_from():
+    """Run 33's three runners all stopped 2-4 sessions after their second trim — MU at +91.7%,
+    AVAV at +102.7% — on the euphoria rung, because a name up 100% is by construction far above
+    its own 50-day and 5% is one ordinary session for it. B2 says that tightening pays on an
+    ordinary position, so it stays; a runner with two rungs banked is a different question."""
+    m2 = dict(bt.LAW); m2.update(bt.PRESETS["m2"])
+    assert m2["runner_trail"] > m2["trail"] and m2["runner_no_euphoria"] is True
+    parabolic = list(np.linspace(100.0, 150.0, 49)) + [230.0]
+    kw = dict(closes=parabolic, avg_cost=100.0, current_stop=150.0, pyramid_step=3)
+    tight = sg.ratchet_stop(**kw, trail10=m2["trail"])
+    ride = sg.ratchet_stop(**kw, trail10=m2["runner_trail"], euphoria=False)
+    assert tight["mode"] == "trail5"
+    assert ride["mode"] in ("trail10", "held") and ride["stop"] <= tight["stop"]
+
+
 def test_the_ladder_keeps_the_basis_of_what_is_left():
     """A trim must not change the average cost of the remainder, or the next rung, the stop and
     the breakeven ladder are all measured against a number the position never paid."""

@@ -72,6 +72,8 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            trim_at=None,               # M1  — unrealised gains at which to sell a slice
            trim_frac=0.25,             #     — how much of the full position each slice is
            runner_immunity=False,      #     — what is left after a trim rides on the stop alone
+           runner_trail=None,          # M2  — the trail the runner rides on, if not the position's
+           runner_no_euphoria=False,   #     — whether the runner is exempt from the 5% tightening
            depth_atr_mult=None,        # D1  — base depth allowance scaled to the name's own ATR
            off_high_atr_mult=None,     # D2  — 52-week-high tolerance scaled the same way
            min_base_age=25,            # D3  — sessions a base runs before its pivot is tradeable
@@ -241,6 +243,24 @@ PRESETS = {
                budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
                entry_fraction=1.0, max_names=5, breakeven_on_full_size=False,
                trim_at=(0.50, 1.00), trim_frac=0.25, runner_immunity=True),
+    # M2 · let the runner actually run. Run 33's ladder worked exactly as Zak described it — MU
+    # trimmed at +49.9% and +99.9%, AVAV at +49.8% and +99.7% — and then **all three runners
+    # stopped out two to four sessions after their second trim**: MU at +91.7%, AVAV at +102.7%,
+    # CAMT at +9.9%. Not the housekeeping exits, which runner immunity had already switched off.
+    # The euphoria rung. A name up 100% is by construction far above its own 50-day, so the trail
+    # cuts to 5%, and 5% is one ordinary session for it.
+    #
+    # B2 showed that tightening pays on an ordinary position and it stays on for those. A runner is
+    # different in kind: two rungs of profit are already banked, so the question is no longer how
+    # much of this gain survives but how far the name can go. It rides a 35% trail and is exempt
+    # from the tightening.
+    "m2": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0, max_names=5, breakeven_on_full_size=False,
+               trim_at=(0.50, 1.00), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True),
 }
 
 
@@ -798,9 +818,18 @@ def simulate(frame, cfg):
                                       ~np.isnan(C[max(0, p["entry_idx"]):t + 1, j])],
                                   avg_cost=p["avg_cost"], current_stop=p["stop"],
                                   highest_close=p["hi_close"], pyramid_step=p["step"],
-                                  trail10_from=hyp["trail_from"], trail10=hyp["trail"],
+                                  trail10_from=hyp["trail_from"],
+                                  trail10=(hyp["runner_trail"] if riding and hyp["runner_trail"]
+                                           else hyp["trail"]),
                                   breakeven_r=hyp["breakeven_r"], init_stop=p["init_stop"],
-                                  breakeven=hyp["breakeven"], euphoria=hyp["euphoria"],
+                                  breakeven=hyp["breakeven"],
+                                  # A runner has already banked two rungs of profit. The euphoria
+                                  # tightening pays on an ordinary position (B2 proved that) but on
+                                  # a trimmed one it is what ends the ride: in run 33 all three
+                                  # runners stopped out 2-4 sessions after their second trim, on a
+                                  # 5% trail, at +91.7% (MU), +102.7% (AVAV) and +9.9% (CAMT).
+                                  euphoria=hyp["euphoria"] and not (riding
+                                                                    and hyp["runner_no_euphoria"]),
                                   breakeven_on_full_size=hyp["breakeven_on_full_size"],
                                   breakeven_giveback=hyp["breakeven_giveback"])
             if out["stop"] is not None:
