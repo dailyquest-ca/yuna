@@ -700,6 +700,40 @@ repeatability, and the position has not been sold: the +524% is a price on 2026-
 * 4 trims and 2 forever holds across nine years is a very small sample for the mechanism carrying
   the whole thesis.
 
+### The pre-MU window settles it — and reframes the problem
+
+Same variant, window ending 2025-08-31, before MU is entered:
+
+| | A1 to 2026-08 | **A1 to 2025-08** |
+|---|---:|---:|
+| CAGR | +3.24% | **−1.43%** |
+| Total return | +33.0% | **−10.9%** |
+| Return on deployed | +3.43% | **−1.21%** |
+| Best trade | +524.3% | **+74.7%** |
+| **Trim slices in nine years** | 4 | **2** |
+| Average hold | 34.8 | 32.6 |
+| Max drawdown | −16.5% | −15.4% |
+
+**A1's entire positive result is MU.** Without it the same rules lose 10.9% over nine years.
+
+But the number that matters is not the CAGR, it is **2**. Across 2016–2025 — nine years, 84
+trades — exactly **one position** ever reached the +35% rung: AVAV, which then produced the two
+slices and the 4.5-year hold. One tail candidate per decade.
+
+**This closes the loop the grid opened.** The capture problem is solved: A1 holds MU for 240
+sessions and 524%, and AVAV for 1,158 sessions, which is everything the 2026-07-31 findings said
+the system could not do. What A1 cannot fix is that **the funnel delivers roughly one tail
+candidate every nine years**, and no amount of holding discipline can compound a sample of one.
+
+That is the same wall §7c identified from the other side, and H5/H6/X1 failed to move: the gates
+are individually reasonable and jointly describe a stock that does not go up 100% in a year. The
+difference is that we now know it is the *only* remaining problem — the mechanics behind it work.
+
+**So the next question is not "how do we hold better" but "how does a name like MU get into the
+book more than once a decade", and the answer is not a wider depth clause** — that was H5, and it
+admitted 150 positions without moving the tail at all. It is something about the selection that
+none of the eighteen runs has tested.
+
 ---
 
 ## 8. Proposals (§5.8, drafted — none of these is law)
