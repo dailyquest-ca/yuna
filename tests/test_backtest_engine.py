@@ -1067,3 +1067,26 @@ def test_a_forever_hold_is_not_released_for_merely_losing_money():
     assert sg.profitability_dead(worse, worsening=True) is True
     assert sg.profitability_dead([-0.5, -0.5], worsening=True) is False   # no year-ago quarter
     assert bt.PRESETS["c2"]["dead_needs_worsening"] is True
+
+
+def test_the_exit_is_the_quarter_not_the_cheapness():
+    """C2 is why. Requiring +10% of profit before the screen could sell made the run worse than
+    taking the signal raw or ignoring it entirely — the gate did not protect winners, it stopped
+    the rule cutting losers, so the rule was never a profit-take. Of `deep_recovery`'s four
+    clauses only `r3` moves on its own; depth and off-high also fail when the 252-day window rolls
+    over, which says nothing about the stock."""
+    c4 = dict(bt.LAW); c4.update(bt.PRESETS["c4"])
+    assert c4["momentum_exit_r3"] == 0.10 and c4["screen_exit"] is False
+    assert bt.LAW["momentum_exit_r3"] is None
+    # the clause it keys on is the one that means "the move stopped"
+    rising = np.concatenate([np.linspace(100.0, 40.0, 250), np.linspace(40.0, 60.0, 63)])
+    stalled = np.concatenate([np.linspace(100.0, 40.0, 250), np.linspace(40.0, 41.0, 63)])
+    assert sg.deep_recovery(rising * 1.02, rising * 0.98, rising)["r3"] > 0.10
+    assert sg.deep_recovery(stalled * 1.02, stalled * 0.98, stalled)["r3"] < 0.10
+
+    f, _ = runner_frame(top=3.0)
+    _, _, conf = bt.simulate(f, preset("c4"))
+    table = bt.conformance(conf, [dict(exit_reason="momentum_died", mcn=80.0)], [],
+                           hyp=preset("c4")["hyp"])
+    exits = next(c for c in table if c["clause"].startswith("Exits"))
+    assert exits["unknown_reasons"] == [] and "momentum_died" in exits["variant_reasons"]

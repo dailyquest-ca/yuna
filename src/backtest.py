@@ -84,6 +84,7 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            screen_exit_min_gain=None,  #     — but only from profit, not when the 52w high ages out
            dead_needs_worsening=False, # C3  — a forever hold needs the loss DEEPENING, not merely
                                        #       negative: 41% of winners are unprofitable at entry
+           momentum_exit_r3=None,      # C4  — sell when the trailing quarter stops being up
            runner_trail=None,          # M2  — the trail the runner rides on, if not the position's
            runner_no_euphoria=False,   #     — whether the runner is exempt from the 5% tightening
            depth_atr_mult=None,        # D1  — base depth allowance scaled to the name's own ATR
@@ -337,6 +338,19 @@ PRESETS = {
                strength_at=0.25, strength_trail=0.40,
                screen="deep_recovery", require_m4=False,
                screen_exit=True, screen_exit_min_gain=None, dead_needs_worsening=True),
+    # C4 · the screen exit, reduced to the only clause that carries information. No gain gate, no
+    # dependence on a 252-day window rolling over: sell when the trailing quarter stops being up.
+    "c4": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.30, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0 / 3.0, pyramid_spacing=0.05, pyramid_tranches=3,
+               max_names=5, breakeven_on_full_size=False, heat_cap=0.06,
+               trim_at=(0.35, 0.75), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True,
+               strength_at=0.25, strength_trail=0.40,
+               screen="deep_recovery", require_m4=False,
+               dead_needs_worsening=True, momentum_exit_r3=0.10),
     # ---- A · Zak's compounder reading of the momentum sleeve (2026-08-11): "what if our biggest
     # winners that made it to +100%... we never sold. We just kept them long-term?"
     #
@@ -870,6 +884,24 @@ def simulate(frame, cfg):
             # out of the cheap band, or the old 52-week high simply aged out of the window — and
             # only the first is a reason to take money off the table. `screen_exit_min_gain` keeps
             # the first and discards the second.
+            # C4. C2 is why this exists. Requiring +10% of profit before the screen could sell made
+            # the run WORSE than either taking the signal raw (C1, +$4,624) or ignoring it
+            # entirely (C1b, -$8,459): -$12,773, average loss -10.21% -> -13.24%, drawdown -18% ->
+            # -35%. The gate did not protect winners, it stopped the rule cutting losers — which
+            # means the rule was never a profit-take at all.
+            #
+            # `deep_recovery` has four clauses and only one of them moves on its own: `r3 > 0.10`,
+            # the trailing quarter. Depth and off-high fail when the old high or low simply ages
+            # out of the 252-day window, which says nothing; the quarter failing says the move
+            # stopped. So the exit is that clause by itself, judged on the stock and not on our
+            # P&L, which is how every other exit in §3.2 works.
+            if hyp["momentum_exit_r3"] is not None and not riding:
+                r3 = sg.deep_recovery(H[own_bars(valid, j, t), j], L[own_bars(valid, j, t), j],
+                                      C[own_bars(valid, j, t), j])["r3"] \
+                     if own_bars(valid, j, t) is not None else None
+                if r3 is not None and r3 < float(hyp["momentum_exit_r3"]):
+                    pending[tk] = "momentum_died"
+                    continue
             if hyp["screen"] and hyp["screen_exit"] and not riding \
                     and row is not None and row["m2"] is False \
                     and (hyp["screen_exit_min_gain"] is None
@@ -1215,6 +1247,8 @@ def conformance(conf, trades, equity, hyp=None):
         declared.add("profitability")
     if (hyp or {}).get("screen_exit"):
         declared.add("no_longer_cheap")
+    if (hyp or {}).get("momentum_exit_r3") is not None:
+        declared.add("momentum_died")
     cov = lambda a, b: (a / b) if b else None
     return [
         dict(clause="M1 latch — weekly, 30-week SMA", fn="signals.market_gate", coverage=1.0),
