@@ -682,13 +682,17 @@ def _knowable(nxt, day, horizon=CALENDAR_HORIZON):
 
 
 # =============================================================================== conformance
-def conformance(conf, trades, equity):
+def conformance(conf, trades, equity, hyp=None):
     """Every §3.2/§3.3 clause the run claims to implement, and how much of the window had the data
     to enforce it. A green tick on a clause that was unenforceable for most of the test is the
     failure this table exists to end (learnings #19 — green is not a result)."""
     reasons = {t["exit_reason"] for t in trades}
     legal = {"stop", "gap", "gate_off", "unconfirmed", "template", "score", "earnings",
              "stalled", "delisted", "end_of_test"}
+    # A hypothesis may introduce an exit the law does not name. That is not a violation, but it is
+    # not conformance either — it has to be declared, so a variant can never quietly pass as
+    # law-v0. law-v0 declares nothing and so still fails on any unknown reason.
+    declared = {"stagnant"} if (hyp or {}).get("stagnation_days") else set()
     cov = lambda a, b: (a / b) if b else None
     return [
         dict(clause="M1 latch — weekly, 30-week SMA", fn="signals.market_gate", coverage=1.0),
@@ -705,7 +709,8 @@ def conformance(conf, trades, equity):
         dict(clause="Stops — initial, breakeven, 10% trail, euphoria", fn="signals.ratchet_stop",
              coverage=1.0),
         dict(clause="Exits — stop, template, MCN < 55", fn="driver",
-             coverage=1.0, unknown_reasons=sorted(reasons - legal)),
+             coverage=1.0, unknown_reasons=sorted(reasons - legal - declared),
+             variant_reasons=sorted(reasons & declared)),
         dict(clause="Earnings blackout — 5 trading days", fn="signals.in_blackout",
              coverage=cov(conf["blackout_known"], conf["blackout_decisions"])),
         dict(clause="Sizing — budget / stop distance", fn="signals.momentum_size", coverage=1.0),
@@ -718,7 +723,7 @@ def conformance(conf, trades, equity):
     ]
 
 
-def summarise(trades, equity, frame, conf):
+def summarise(trades, equity, frame, conf, hyp=None):
     eq = pd.DataFrame(equity, columns=["d", "nav", "exposure", "positions", "gate", "bench"])
     eq["d"] = pd.to_datetime(eq["d"])
     nav = eq.nav
@@ -729,7 +734,7 @@ def summarise(trades, equity, frame, conf):
     b = eq.bench.dropna()
     bench_total = (b.iloc[-1] / b.iloc[0] - 1) if len(b) > 1 else None
     invested = sum(t["qty"] * t["entry_price"] for t in trades) or 1.0
-    table = conformance(conf, trades, equity)
+    table = conformance(conf, trades, equity, hyp=hyp)
     return dict(
         start_date=eq.d.iloc[0].date(), end_date=eq.d.iloc[-1].date(), trading_days=len(eq),
         start_nav=float(nav.iloc[0]), end_nav=float(nav.iloc[-1]),
@@ -816,7 +821,7 @@ def main():
                   f"| bench {BENCH} | gate {frame['gate_source']}")
 
             trades, equity, conf = simulate(frame, cfg)
-            summary = summarise(trades, equity, frame, conf)
+            summary = summarise(trades, equity, frame, conf, hyp=hyp)
             print(f"  {summary['trades']} trades | CAGR {summary['cagr']:.1%} "
                   f"vs {BENCH} {summary['benchmark_cagr'] or 0:.1%} | "
                   f"maxDD {summary['max_drawdown']:.1%} | "
