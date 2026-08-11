@@ -59,6 +59,7 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            trail_from=0.15, trail=0.10,# R3  — 10% trail from +15%
            press_on_next_base=False,   # P1  — a stalled pyramid only ever exits
            press_grace=20,             #       sessions the next base has to show up in
+           stagnation_days=None,       # H4  — resolve a position that stops making new highs
            max_names=None)             # P2  — from config (4)
 
 PRESETS = {
@@ -76,6 +77,13 @@ PRESETS = {
     "h3": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
                atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
                press_on_next_base=True, max_names=10),
+    # H4 · H2 plus the profit-taking the stall clock was doing by accident. The grid showed E1
+    # deletes law-v0's only profitable bucket as a side effect of completing the pyramid; this
+    # puts it back on a rule that does not depend on position size, and keeps runners because a
+    # name still making new highs never triggers.
+    "h4": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20),
 }
 
 
@@ -378,7 +386,8 @@ def simulate(frame, cfg):
                                        "gap" if gapped else "stop", t, gross_price=fill)
                 continue
 
-            p["hi_close"] = max(p["hi_close"], cl)
+            if cl > p["hi_close"]:
+                p["hi_close"], p["hi_at"] = cl, t
             p["mfe"] = max(p["mfe"], hi / p["avg_cost"] - 1)
             p["mae"] = min(p["mae"], lo / p["avg_cost"] - 1)
 
@@ -412,6 +421,11 @@ def simulate(frame, cfg):
             if row is not None and row["mcn"] == row["mcn"] and row["mcn"] < cfg["mcn_exit"]:
                 pending[tk] = "score"
                 continue
+            if sg.stagnant(sessions_since_high=t - p["hi_at"],
+                           limit=hyp["stagnation_days"]):
+                pending[tk] = "stagnant"
+                continue
+
             # §3.2: a stalled pyramid "either completes on the next base or exits". Only the exit
             # branch was ever built. P1 builds the other one — the press.
             #
@@ -591,7 +605,7 @@ def simulate(frame, cfg):
                 book[tk] = dict(ticker=tk, lots=[(dollars, fill, A[t, j] if np.isfinite(A[t, j]) else fill)],
                                 qty=dollars / fill, invested=paid, gross_invested=dollars,
                                 avg_cost=paid / (dollars / fill), stop=stop, pivot=pivot,
-                                hi_close=fill, step=1, target=target, mcn=row["mcn"],
+                                hi_close=fill, hi_at=t, step=1, target=target, mcn=row["mcn"],
                                 entry_date=day, entry_idx=t, stall_from=t, init_stop=stop,
                                 size=size["size_pct"], mfe=0.0, mae=0.0, last_mark=fill,
                                 confirmed=born_confirmed, stale=0)

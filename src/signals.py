@@ -273,6 +273,24 @@ def confirmation_state(volumes, baselines, *, closes=None, pivot=None,
                 sessions_left=max(0, sessions - seen))
 
 
+def stagnant(*, sessions_since_high, limit):
+    """H4 — a position that has stopped making progress, whatever size it reached.
+
+    §3.2's stalled-pyramid rule turned out to be the law's only profit centre: +$29,284 of a
+    -$9,090 total, exiting at +4.39% after 21 sessions. Nobody designed it as profit-taking. It
+    read as housekeeping — "no permanent sub-scale positions" — and it only fired on positions
+    *below full size*, which under the law was two thirds of the book by accident of a 29%
+    volume-confirmation rate.
+
+    Confirming before entry completes the pyramid on 56-62% of positions, so the clock stops
+    firing and the profit centre disappears with it. This generalises what the clock was actually
+    doing, without depending on the pyramid: resolve a position that has not made a new high in
+    `limit` sessions. A name still printing new highs never triggers, so it keeps the runners the
+    fixed four-week clock would have cut.
+    """
+    return bool(limit) and sessions_since_high >= limit
+
+
 def stalled_pyramid(*, pyramid_step, sessions_held, full_step=3, weeks=4, sessions_per_week=5):
     """§3.2: "A pyramid stalled below full size for 4 weeks either completes on the next base or
     exits — no permanent sub-scale positions." Four weeks is 20 sessions, not 28 days."""
