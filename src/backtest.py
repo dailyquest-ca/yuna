@@ -116,6 +116,25 @@ PRESETS = {
                stagnation_days=20,
                depth_atr_mult=8.0, off_high_atr_mult=8.0, min_base_age=12,
                reentry_window=20, reentry_cooloff=5),
+    # H5 came back at -1.79% against H4's +0.04% — 150 extra trades, a worse average loss, and
+    # **the identical best trade**, so the widening produced no new right tail at all. It bundles
+    # three changes, and the pre-run measurement only ever tested them on the numerator (do the
+    # winners get a valid base?) and never on the denominator (how much junk does each admit?).
+    # These four ablate H5 one clause at a time, each against H4 rather than against H5.
+    "d1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, depth_atr_mult=8.0),
+    "d2": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, off_high_atr_mult=8.0),
+    "d3": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, min_base_age=12),
+    # X1 on the best base rather than on the worst. H6 measures re-entry on top of a widening that
+    # lost money; this measures it on H4, which is the run we would actually adopt.
+    "x1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, reentry_window=20, reentry_cooloff=5),
 }
 
 

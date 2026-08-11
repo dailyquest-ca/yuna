@@ -322,6 +322,17 @@ def test_the_presets_stage_the_changes_in_dependency_order():
     assert P["h2"].items() <= P["h4"].items() <= P["h5"].items() <= P["h6"].items()
 
 
+def test_the_ablations_each_move_exactly_one_clause_off_h4():
+    """H5 bundled three changes and lost money; the ablations exist to say which one did it, which
+    only works if each differs from H4 in a single key."""
+    h4 = bt.PRESETS["h4"]
+    for name, keys in (("d1", {"depth_atr_mult"}), ("d2", {"off_high_atr_mult"}),
+                       ("d3", {"min_base_age"}), ("x1", {"reentry_window", "reentry_cooloff"})):
+        p = bt.PRESETS[name]
+        assert h4.items() <= p.items(), f"{name} is not H4 plus something"
+        assert set(p) - set(h4) == keys, f"{name} moves more than its one clause"
+
+
 def test_e1_refuses_the_breakout_the_law_buys():
     """The whole point of confirming first: a breakout with no volume is never bought at all,
     instead of bought and then discovered. On the fixture the law takes it and E1 does not."""
