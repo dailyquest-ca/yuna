@@ -589,7 +589,7 @@ def deep_recovery(high, low, close, *, min_range=0.12, min_depth=0.50, min_off_h
     return dict(passes=bool(ok), rng=rng, depth=depth, off_high=off_high, r3=r3)
 
 
-def profitability_dead(eps_by_quarter, *, quarters=2):
+def profitability_dead(eps_by_quarter, *, quarters=2, worsening=False):
     """Has the business stopped making money — the only thing that ends a forever hold.
 
     Zak's rule (2026-08-11): a name that ran past the last trim rung "rides through the highs and
@@ -601,11 +601,24 @@ def profitability_dead(eps_by_quarter, *, quarters=2):
     **reported** quarters are at or below zero — one bad quarter is a stumble, two consecutive is
     the profitability going away. Unknown is not dead: with no earnings we hold, because the
     alternative is selling the position on a data gap.
+
+    `worsening` fixes what the census broke. "Two quarters at or below zero" describes the **entry
+    state of 41% of every winner in 2016-2026** — being unprofitable has a lift of 2.71 against
+    the base rate and being profitable 0.69 — so as a release condition it sells the best
+    candidates on the day they are bought. With `worsening=True` the loss must also be **deeper
+    than the same quarter a year ago**: a business losing money and getting better is not a
+    business that died, and it is the single most common shape among the names that go on to run.
     """
     vals = [v for v in (eps_by_quarter or []) if v is not None and np.isfinite(v)]
     if len(vals) < quarters:
         return False
-    return all(v <= 0 for v in vals[:quarters])
+    if not all(v <= 0 for v in vals[:quarters]):
+        return False
+    if not worsening:
+        return True
+    if len(vals) <= 4:
+        return False                     # no year-ago quarter to compare: unknown is not dead
+    return bool(vals[0] < vals[4])
 
 
 def momentum_size(*, nav, mcn_score, stop_distance, budgets=(0.007, 0.009), band=(0.08, 0.12),

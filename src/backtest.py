@@ -80,6 +80,10 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            forever=False,              # A3  — past the last rung, only the financials can sell it
            screen=None,                # C1  — 'deep_recovery' replaces M2+M3 with the census screen
            require_m4=True,            #     — M4 has a lift of 0.76; a variant may decline it
+           screen_exit=False,          # C2  — sell when the screen stops passing (no longer cheap)
+           screen_exit_min_gain=None,  #     — but only from profit, not when the 52w high ages out
+           dead_needs_worsening=False, # C3  — a forever hold needs the loss DEEPENING, not merely
+                                       #       negative: 41% of winners are unprofitable at entry
            runner_trail=None,          # M2  — the trail the runner rides on, if not the position's
            runner_no_euphoria=False,   #     — whether the runner is exempt from the 5% tightening
            depth_atr_mult=None,        # D1  — base depth allowance scaled to the name's own ATR
@@ -305,6 +309,34 @@ PRESETS = {
                runner_trail=0.35, runner_no_euphoria=True,
                strength_at=0.25, strength_trail=0.40,
                screen="deep_recovery", require_m4=False),
+    # C2 · the exit test. C1 sold on the screen (accidentally) and made +$4,624; C1b never did and
+    # lost $8,459. The screen failing is real information — but it fires for two different reasons,
+    # and only one of them is a reason to sell. Take the money when the position has actually made
+    # some; ignore it when the 52-week high merely rolled out of the window.
+    "c2": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.30, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0 / 3.0, pyramid_spacing=0.05, pyramid_tranches=3,
+               max_names=5, breakeven_on_full_size=False, heat_cap=0.06,
+               trim_at=(0.35, 0.75), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True,
+               strength_at=0.25, strength_trail=0.40,
+               screen="deep_recovery", require_m4=False,
+               screen_exit=True, screen_exit_min_gain=0.10, dead_needs_worsening=True),
+    # C3 · the control. Same, with no gain requirement — this is what run 39 did by accident, now
+    # done on purpose, so the min-gain gate can be priced against it rather than against a bug.
+    "c3": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.30, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0 / 3.0, pyramid_spacing=0.05, pyramid_tranches=3,
+               max_names=5, breakeven_on_full_size=False, heat_cap=0.06,
+               trim_at=(0.35, 0.75), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True,
+               strength_at=0.25, strength_trail=0.40,
+               screen="deep_recovery", require_m4=False,
+               screen_exit=True, screen_exit_min_gain=None, dead_needs_worsening=True),
     # ---- A · Zak's compounder reading of the momentum sleeve (2026-08-11): "what if our biggest
     # winners that made it to +100%... we never sold. We just kept them long-term?"
     #
@@ -790,7 +822,8 @@ def simulate(frame, cfg):
             if forever:
                 p["stop"] = None
                 eps = frame["eps"].get(tk)
-                if eps is not None and sg.profitability_dead(eps_as_of(eps, day)):
+                if eps is not None and sg.profitability_dead(
+                        eps_as_of(eps, day), worsening=bool(hyp["dead_needs_worsening"])):
                     pending[tk] = "profitability"
                     continue
                 p["last_mark"] = cl
@@ -829,6 +862,19 @@ def simulate(frame, cfg):
             if hyp["template_exit"] and not hyp["screen"] and not riding \
                     and row is not None and row["m2"] is False:
                 pending[tk] = "template"
+                continue
+            # C2. Run 39 did this by accident and it was the best bucket in the run: +$18,831 over
+            # 142 exits. Run 40 removed it and lost $13,083 — the hold doubled, the best trade went
+            # to +271%, and the account got worse. So the screen failing IS information; it is just
+            # not a stop. `deep_recovery` stops passing for two different reasons — the price rose
+            # out of the cheap band, or the old 52-week high simply aged out of the window — and
+            # only the first is a reason to take money off the table. `screen_exit_min_gain` keeps
+            # the first and discards the second.
+            if hyp["screen"] and hyp["screen_exit"] and not riding \
+                    and row is not None and row["m2"] is False \
+                    and (hyp["screen_exit_min_gain"] is None
+                         or cl / p["avg_cost"] - 1 >= float(hyp["screen_exit_min_gain"])):
+                pending[tk] = "no_longer_cheap"
                 continue
             if not riding and row is not None and row["mcn"] == row["mcn"] \
                     and row["mcn"] < cfg["mcn_exit"]:
@@ -1167,6 +1213,8 @@ def conformance(conf, trades, equity, hyp=None):
     declared |= {f"trim{int(round(x * 100))}" for x in ((hyp or {}).get("trim_at") or ())}
     if (hyp or {}).get("forever"):
         declared.add("profitability")
+    if (hyp or {}).get("screen_exit"):
+        declared.add("no_longer_cheap")
     cov = lambda a, b: (a / b) if b else None
     return [
         dict(clause="M1 latch — weekly, 30-week SMA", fn="signals.market_gate", coverage=1.0),

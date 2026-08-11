@@ -1043,3 +1043,27 @@ def test_an_entry_screen_is_never_used_as_a_hold_condition():
     # the law is untouched: no screen means the template exit still fires
     law = bt.conformance(conf, trades, [], hyp=dict(bt.LAW))
     assert next(c for c in law if c["clause"].startswith("Exits"))["suppressed"] == []
+
+
+def test_the_cheapness_exit_only_fires_from_profit():
+    """`deep_recovery` stops passing for two reasons — the price rose out of the cheap band, or the
+    52-week high aged out of the window. Only the first is a reason to sell. Run 39 took both and
+    still made money; C2 keeps the signal and drops the accident."""
+    c2 = dict(bt.LAW); c2.update(bt.PRESETS["c2"])
+    c3 = dict(bt.LAW); c3.update(bt.PRESETS["c3"])
+    assert c2["screen_exit"] and c2["screen_exit_min_gain"] == 0.10
+    assert c3["screen_exit"] and c3["screen_exit_min_gain"] is None
+    assert bt.LAW["screen_exit"] is False, "law-v0 has no screen and no screen exit"
+    assert {k for k in c2 if c2[k] != c3.get(k)} == {"screen_exit_min_gain"}
+
+
+def test_a_forever_hold_is_not_released_for_merely_losing_money():
+    """41% of every winner in the census is unprofitable at entry, so "two quarters at or below
+    zero" would sell the best candidates on the day they are bought."""
+    improving = [-0.2, -0.4, 0.1, 0.2, -0.9]      # losing, but better than a year ago
+    worse = [-0.9, -0.4, 0.1, 0.2, -0.2]          # losing, and deeper than a year ago
+    assert sg.profitability_dead(improving) is True            # the old, broken reading
+    assert sg.profitability_dead(improving, worsening=True) is False
+    assert sg.profitability_dead(worse, worsening=True) is True
+    assert sg.profitability_dead([-0.5, -0.5], worsening=True) is False   # no year-ago quarter
+    assert bt.PRESETS["c2"]["dead_needs_worsening"] is True
