@@ -42,6 +42,55 @@ LAW_STAMP = os.environ.get("LAW_STAMP", "2026-08-09")
 START_DATE = os.environ.get("START_DATE") or None
 END_DATE = os.environ.get("END_DATE") or None
 HAIR_TRIGGER_PENDING = os.environ.get("HAIR_TRIGGER_PENDING", "false").lower() in ("1", "true", "yes")
+HYPOTHESIS = os.environ.get("HYPOTHESIS", "").strip()
+
+# The 2026-08-10 hypothesis set. Every default below is the law; a variant is opt-in, recorded in
+# `params.hypothesis`, and changes nothing about law-v0 — which stays the baseline until a run
+# earns the change. The presets stage the way the changes depend on each other: risk widening is
+# pointless while unconfirmed breakouts are still being bought, and pressing is dangerous until
+# expectancy turns.
+LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by volatility
+           mcn_drop_atr=False,         # S2  — ATR-tightness inside the ranking
+           m4_swing=False,             # S3  — loss-to-profit swing scores no growth rate
+           confirm_before_entry=False, # E1  — mechanical fill at the pivot, volume judged after
+           atr_stop_mult=None,         # R1  — fixed 8% cap, floored at the contraction low
+           max_stop=0.08,
+           breakeven_r=None,           # R2  — breakeven at full pyramid size
+           trail_from=0.15, trail=0.10,# R3  — 10% trail from +15%
+           press_on_next_base=False,   # P1  — a stalled pyramid only ever exits
+           max_names=None)             # P2  — from config (4)
+
+PRESETS = {
+    # H1 · selection + entry. Does expectancy cross zero once we stop screening for quiet names
+    # and stop paying to discover that a breakout had no volume?
+    "h1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True),
+    # H2 · H1 plus room to breathe. Does the tail show up once the stop stops firing first?
+    # The multiplier is 5, not the conventional 2.5: ATR(14) on our own names runs 2.86% of price
+    # at the median, so 2.5x reproduces the law's 7.57% stop almost exactly and would have tested
+    # nothing. 5x gives ~14% on a median name and hits the 20% cap on the volatile ones — which is
+    # the range that survives a 125-session hold.
+    "h2": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25),
+    # H3 · H2 plus pressing. Does adding to what already works, across more names, pay?
+    "h3": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               press_on_next_base=True, max_names=10),
+}
+
+
+def hypothesis():
+    """The law, with a preset laid over it, with individual env overrides laid over that."""
+    h = dict(LAW)
+    h.update(PRESETS.get(HYPOTHESIS, {}))
+    for k in list(h):
+        raw = os.environ.get(k.upper())
+        if raw is None or raw == "":
+            continue
+        low = raw.strip().lower()
+        h[k] = (True if low in ("1", "true", "yes") else
+                False if low in ("0", "false", "no") else
+                None if low == "none" else float(raw) if "." in raw else int(raw))
+    return h
 
 WARMUP = 280            # >= 266, the deepest window any rule reads (see tests/test_tail_equivalence)
 TAIL = 280
@@ -144,7 +193,7 @@ def own_bars(valid, j, t, back=0, n=TAIL):
     return v[k - n:k] if k >= n else None
 
 
-def rank(frame, t, cols, arrays, valid):
+def rank(frame, t, cols, arrays, valid, hyp):
     """L1-M as `rank.py` builds it: M2 + M4, ranked by MCN, top 150 — same calls, same order.
 
     Gates and stops read current price; MCN reads windows ending 10 sessions ago (§3.2, "rank is
@@ -177,7 +226,7 @@ def rank(frame, t, cols, arrays, valid):
 
         m2[tk] = sg.trend_template(cl_f)
         bases[tk] = sg.base_scan(hi_f, lo_f, cl_f)
-        quality[tk] = sg.momentum_quality(ac)
+        quality[tk] = sg.momentum_quality(ac, vol_divisor=hyp["mq_vol_divisor"])
         subs = sg.setup_proximity(hh, ll, cc, vv)
         atr_pct[tk], dryup[tk], near_high[tk] = subs["atr_pct"], subs["dryup"], subs["near_high"]
         ind = frame["industry"].get(tk)
@@ -197,13 +246,17 @@ def rank(frame, t, cols, arrays, valid):
     day = frame["dates"][t]
     out, m4_known = {}, 0
     for tk in ranked:
-        setup = float(np.nanmean([atr_pct[tk], d_p[tk], x_p[tk]]))
+        # S2: the ATR-tightness sub-score rewards quiet. Tightness belongs at the pivot, where
+        # M3 already measures the base contraction — as a ranking term it tilts the whole book
+        # toward names that cannot produce a tail.
+        parts = [d_p[tk], x_p[tk]] if hyp["mcn_drop_atr"] else [atr_pct[tk], d_p[tk], x_p[tk]]
+        setup = float(np.nanmean(parts))
         ind = frame["industry"].get(tk)
         grp = group_pct.get(ind, 50.0) if ind else 50.0
         score = sg.mcn(q_p[tk], setup, grp)
         entry = frame["eps"].get(tk)
         if entry is not None:
-            m4 = sg.m4_acceleration(eps_as_of(entry, day))["passes"]
+            m4 = sg.m4_acceleration(eps_as_of(entry, day), swing=hyp["m4_swing"])["passes"]
             m4_known += 1
         else:
             m4 = None                       # unknown is not a pass; §3.3 never guesses a component
@@ -220,6 +273,7 @@ def rank(frame, t, cols, arrays, valid):
 def simulate(frame, cfg):
     """The day loop. Pure: no database, no clock — `tests/test_backtest_engine.py` runs it on
     hand-built bars, which is the only way to assert what the engine refuses to do."""
+    hyp = cfg["hyp"]
     dates, cols = frame["dates"], frame["cols"]
     arrays = frame["arrays"]
     O, H, L, C, A, V = (arrays[k] for k in ("open", "high", "low", "close", "adj", "vol"))
@@ -292,7 +346,7 @@ def simulate(frame, cfg):
 
         # ---- weekly re-rank (§3.0 cadence: M2 and M4 weekly, MCN weekly)
         if pd.Timestamp(day).weekday() == 4 or queue is None:
-            got = rank(frame, t, cols, arrays, valid)
+            got = rank(frame, t, cols, arrays, valid, hyp)
             if got is not None:
                 queue = got
                 conf["rank_dates"] += 1
@@ -329,10 +383,17 @@ def simulate(frame, cfg):
             # ---- §3.2 breakout confirmation, judged at EOD on the sessions since entry
             k = t - p["entry_idx"] + 1
             window = range(p["entry_idx"], min(p["entry_idx"] + sg.CONFIRM_SESSIONS, t + 1))
-            state = sg.confirmation_state(
-                [V[i, j] for i in window], [v50[i, j] for i in window],
-                closes=[C[i, j] for i in window], pivot=p["pivot"],
-                hair_trigger_while_pending=cfg["hair_trigger_while_pending"])
+            if hyp["confirm_before_entry"]:
+                # E1: the breakout was confirmed before a share was bought, so there is nothing to
+                # classify, nothing to freeze, no late window and no hair-trigger. The entire
+                # apparatus §3.2 needed to manage an unconfirmed fill simply does not arise.
+                state = dict(confirmed=True, pyramid_armed=True, fraction=1.0,
+                             exit_next_open=False, closed_below_pivot=False)
+            else:
+                state = sg.confirmation_state(
+                    [V[i, j] for i in window], [v50[i, j] for i in window],
+                    closes=[C[i, j] for i in window], pivot=p["pivot"],
+                    hair_trigger_while_pending=cfg["hair_trigger_while_pending"])
             p["confirmed"] = state["confirmed"]
 
             if not on:
@@ -349,9 +410,35 @@ def simulate(frame, cfg):
             if row is not None and row["mcn"] == row["mcn"] and row["mcn"] < cfg["mcn_exit"]:
                 pending[tk] = "score"
                 continue
-            if sg.stalled_pyramid(pyramid_step=p["step"], sessions_held=k - 1):
-                pending[tk] = "stalled"
-                continue
+            if sg.stalled_pyramid(pyramid_step=p["step"], sessions_held=t - p["stall_from"]):
+                # §3.2: a stalled pyramid "either completes on the next base or exits". Only the
+                # exit branch was ever built. P1 builds the other one — the press: a position that
+                # is working and forms a fresh base gets taken to full size instead of thrown away.
+                pressed = False
+                if hyp["press_on_next_base"] and p["step"] < 3:
+                    nb_rows = own_bars(valid, j, t, back=1)
+                    nb = (sg.base_scan(H[nb_rows, j], L[nb_rows, j], C[nb_rows, j])
+                          if nb_rows is not None else None)
+                    if nb and nb["valid"] and not np.isnan(hi) and hi >= nb["pivot"]:
+                        dollars = p["target"] * (3 - p["step"]) * 0.25
+                        if cash >= dollars:
+                            fillp = max(nb["pivot"], op if not np.isnan(op) else nb["pivot"])
+                            paid = dollars * (1 + spread(j, t))
+                            cash -= paid
+                            p["lots"].append((dollars, fillp,
+                                              A[t, j] if np.isfinite(A[t, j]) else fillp))
+                            p["qty"] += dollars / fillp
+                            p["invested"] += paid
+                            p["gross_invested"] += dollars
+                            p["avg_cost"] = p["invested"] / p["qty"]
+                            p["step"] = 3
+                            p["stall_from"] = t
+                            p["pressed"] = p.get("pressed", 0) + 1
+                            conf["pressed"] += 1
+                            pressed = True
+                if not pressed:
+                    pending[tk] = "stalled"
+                    continue
 
             nxt = _next_report(frame["reports"].get(tk), day)
             conf["blackout_decisions"] += 1
@@ -388,7 +475,9 @@ def simulate(frame, cfg):
             out = sg.ratchet_stop(closes=C[max(0, p["entry_idx"]):t + 1, j][
                                       ~np.isnan(C[max(0, p["entry_idx"]):t + 1, j])],
                                   avg_cost=p["avg_cost"], current_stop=p["stop"],
-                                  highest_close=p["hi_close"], pyramid_step=p["step"])
+                                  highest_close=p["hi_close"], pyramid_step=p["step"],
+                                  trail10_from=hyp["trail_from"], trail10=hyp["trail"],
+                                  breakeven_r=hyp["breakeven_r"], init_stop=p["init_stop"])
             if out["stop"] is not None:
                 p["stop"] = out["stop"]
             p["last_mark"] = cl
@@ -411,7 +500,8 @@ def simulate(frame, cfg):
                 # base broken by the very breakout it is supposed to trigger — the scan says
                 # "spent" the moment a high clears pivot x 1.005 — so nothing but marginal touches
                 # could ever fill.
-                rows = own_bars(valid, j, t, back=1)
+                back = 2 if hyp["confirm_before_entry"] else 1
+                rows = own_bars(valid, j, t, back=back)
                 if rows is None:
                     continue
                 base = sg.base_scan(H[rows, j], L[rows, j], C[rows, j])
@@ -426,22 +516,55 @@ def simulate(frame, cfg):
                 if nxt is not None and sg.in_blackout(day, nxt):
                     continue                              # §3.3: the wall cancels resting orders
                 hi, op = H[t, j], O[t, j]
-                if np.isnan(hi) or hi < pivot:
-                    continue
-                order = sg.entry_order(pivot, base["contraction_low"],
-                                       limit_over=cfg["limit_over"], max_stop=cfg["max_stop"])
-                fill = pivot if (np.isnan(op) or op <= pivot) else op
-                if fill > order["limit"]:
-                    conf["gap_no_fill"] += 1
-                    continue                              # gapped through the limit — no fill
-                size = sg.momentum_size(nav=nav, mcn_score=row["mcn"],
-                                        stop_distance=order["stop_distance"])
+
+                if hyp["confirm_before_entry"]:
+                    # E1. Nothing rests at the broker. The trigger is a session that *closes* above
+                    # the pivot carrying >= 1.4x its own 50-day, and the fill is the next open — so
+                    # a breakout that did not carry is never bought, rather than bought and then
+                    # discovered. Costs a session of drift; removes the entire unconfirmed bucket,
+                    # which lost money under both readings of the hair-trigger.
+                    vj = valid[j]
+                    kk = int(np.searchsorted(vj, t, side="left"))
+                    if kk == 0:
+                        continue
+                    trig = vj[kk - 1]
+                    if not (C[trig, j] > pivot):
+                        continue
+                    if not sg.breakout_confirmed([V[trig, j]], [v50[trig, j]]):
+                        continue
+                    fill = op if not np.isnan(op) else C[trig, j]
+                    if fill > pivot * cfg["confirm_limit"]:
+                        conf["gap_no_fill"] += 1
+                        continue                          # gapped past the ceiling — let it go
+                    born_confirmed = True
+                else:
+                    if np.isnan(hi) or hi < pivot:
+                        continue
+                    order = sg.entry_order(pivot, base["contraction_low"],
+                                           limit_over=cfg["limit_over"], max_stop=cfg["max_stop"])
+                    fill = pivot if (np.isnan(op) or op <= pivot) else op
+                    if fill > order["limit"]:
+                        conf["gap_no_fill"] += 1
+                        continue                          # gapped through the limit — no fill
+                    born_confirmed = None
+
+                # R1: the stop is the name's own noise, not a fixed percentage floored at the
+                # contraction low — that floor is what makes the law's stop tight enough to fire
+                # before any multi-month move can happen.
+                if hyp["atr_stop_mult"]:
+                    a14 = sg.atr(H[rows, j], L[rows, j], C[rows, j])
+                    stop = sg.volatility_stop(fill, float(a14[-1]) if len(a14) else None,
+                                              mult=hyp["atr_stop_mult"], max_stop=hyp["max_stop"])
+                else:
+                    stop = sg.initial_stop(fill, base["contraction_low"], max_stop=hyp["max_stop"])
+                dist = max((fill - stop) / fill, 1e-4)
+                size = sg.momentum_size(nav=nav, mcn_score=row["mcn"], stop_distance=dist)
                 if not size:
                     continue
                 target = size["size_pct"] * nav
                 if exposure + target > cfg["sleeve_cap"] * nav:
                     continue
-                dollars = target * order["fraction"]       # step 1 — 50%
+                dollars = target * 0.5                     # step 1 — 50% (§3.2 pyramid)
                 if cash < dollars * (1 + 0.01):
                     continue
                 paid = dollars * (1 + spread(j, t))
@@ -451,11 +574,11 @@ def simulate(frame, cfg):
                 conf["entries"] += 1
                 book[tk] = dict(ticker=tk, lots=[(dollars, fill, A[t, j] if np.isfinite(A[t, j]) else fill)],
                                 qty=dollars / fill, invested=paid, gross_invested=dollars,
-                                avg_cost=paid / (dollars / fill), stop=order["stop"], pivot=pivot,
+                                avg_cost=paid / (dollars / fill), stop=stop, pivot=pivot,
                                 hi_close=fill, step=1, target=target, mcn=row["mcn"],
-                                entry_date=day, entry_idx=t, init_stop=order["stop"],
+                                entry_date=day, entry_idx=t, stall_from=t, init_stop=stop,
                                 size=size["size_pct"], mfe=0.0, mae=0.0, last_mark=fill,
-                                confirmed=None, stale=0)
+                                confirmed=born_confirmed, stale=0)
 
         # ---- mark
         held = 0.0
@@ -621,6 +744,7 @@ def main():
     with connect() as conn:
         with Heartbeat(conn, "backtest") as hb:
             with conn.cursor() as cur:
+                hyp = hypothesis()
                 frame = load(cur)
                 # The SAME config rows the nightly reads, spelled the same way. Inventing
                 # `momentum_min_mcn` here would have read a row that does not exist, fallen
@@ -630,12 +754,14 @@ def main():
                 thresholds = config(cur, "score_thresholds", {}) or {}
                 ceilings = config(cur, "sleeve_ceiling", {"momentum": 0.40}) or {}
                 cfg = dict(start_nav=START_NAV,
-                           max_names=int(config(cur, "momentum_max_names", 4)),
+                           max_names=int(hyp["max_names"]
+                                         or config(cur, "momentum_max_names", 4)),
                            sleeve_cap=float(ceilings.get("momentum", 0.40)),
                            min_mcn=float(thresholds.get("enter", 70)),
                            mcn_exit=float(thresholds.get("hold", 55)),
                            cushion=float(config(cur, "holdthrough_cushion", 1.08)),
-                           max_stop=0.08, limit_over=0.02, pyramid_ceiling=1.05,
+                           max_stop=hyp["max_stop"], limit_over=0.02,
+                           pyramid_ceiling=1.05, confirm_limit=1.05, hyp=hyp,
                            spread_bps=(5.0, 15.0), addv_break=50_000_000.0,
                            # Ruled 2026-08-10: wait out the window. The rejected reading stays
                            # runnable so the ruling can be priced against its alternative.
@@ -679,7 +805,8 @@ def main():
                                          addv_break=cfg["addv_break"]),
                               max_names=cfg["max_names"], sleeve_cap=cfg["sleeve_cap"],
                               min_mcn=cfg["min_mcn"],
-                              hair_trigger_while_pending=HAIR_TRIGGER_PENDING)
+                              hair_trigger_while_pending=HAIR_TRIGGER_PENDING,
+                              hypothesis=HYPOTHESIS or "law", hyp=cfg["hyp"])
                 with conn.cursor() as cur:
                     cur.execute("""insert into backtest_runs(label,params,start_date,end_date,
                           trading_days,start_nav,end_nav,total_return,cagr,max_drawdown,max_dd_date,

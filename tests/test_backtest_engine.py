@@ -130,12 +130,22 @@ def frame(hero_volume_multiple=3.0, hero_after=None, names=NAMES, days=DAYS):
 
 
 def cfg(**over):
-    base = dict(start_nav=200_000.0, max_names=4, sleeve_cap=0.40, min_mcn=70.0, mcn_exit=55.0,
-                cushion=1.08, max_stop=0.08, limit_over=0.02, pyramid_ceiling=1.05,
+    hyp = dict(bt.LAW)
+    hyp.update(over.pop("hyp", {}))
+    base = dict(start_nav=200_000.0, max_names=int(hyp["max_names"] or 4), sleeve_cap=0.40,
+                min_mcn=70.0, mcn_exit=55.0, cushion=1.08, max_stop=hyp["max_stop"],
+                limit_over=0.02, pyramid_ceiling=1.05, confirm_limit=1.05,
                 spread_bps=(5.0, 15.0), addv_break=50_000_000.0,
-                hair_trigger_while_pending=False)      # ruled 2026-08-10: wait out the window
+                hair_trigger_while_pending=False,      # ruled 2026-08-10: wait out the window
+                hyp=hyp)
     base.update(over)
     return base
+
+
+def preset(name, **over):
+    """A hypothesis preset, exactly as the dispatched run would resolve it."""
+    h = dict(bt.LAW); h.update(bt.PRESETS[name]); h.update(over)
+    return cfg(hyp=h)
 
 
 @pytest.fixture(scope="module")
@@ -258,6 +268,94 @@ def test_the_conformance_table_catches_a_run_the_law_forbids(confirmed_run):
     exits = next(c for c in table if c["clause"].startswith("Exits"))
     assert floor["violations"] == 1
     assert exits["unknown_reasons"] == ["volume unconfirmed"]
+
+
+# --------------------------------------------------------------------------- the hypothesis set
+#
+# The 2026-08-10 variants. Every one is opt-in and law-v0 is the baseline until a run earns the
+# change, so the first thing to pin is that the machinery is inert by default — and the second is
+# that each flag actually does something, because a dead flag reads exactly like a tested one.
+
+def test_the_hypothesis_machinery_is_inert_by_default(monkeypatch):
+    monkeypatch.delenv("HYPOTHESIS", raising=False)
+    for k in bt.LAW:
+        monkeypatch.delenv(k.upper(), raising=False)
+    assert bt.hypothesis() == bt.LAW
+
+
+def test_the_presets_stage_the_changes_in_dependency_order():
+    """Widening risk is pointless while unconfirmed breakouts are still bought, and pressing is
+    dangerous before expectancy turns — so each preset contains the one before it."""
+    h1, h2, h3 = (bt.PRESETS[k] for k in ("h1", "h2", "h3"))
+    assert h1.items() <= h2.items() <= h3.items()
+
+
+def test_e1_refuses_the_breakout_the_law_buys():
+    """The whole point of confirming first: a breakout with no volume is never bought at all,
+    instead of bought and then discovered. On the fixture the law takes it and E1 does not."""
+    f, _ = frame(hero_volume_multiple=0.5)
+    law, _, law_conf = bt.simulate(f, cfg())
+    f, _ = frame(hero_volume_multiple=0.5)
+    e1, _, e1_conf = bt.simulate(f, preset("h1"))
+    assert law_conf["entries"] >= 1
+    assert e1_conf["entries"] == 0
+
+
+def test_e1_positions_are_confirmed_the_moment_they_are_opened():
+    f, _ = frame(hero_volume_multiple=3.0)
+    trades, _, conf = bt.simulate(f, preset("h1"))
+    assert conf["entries"] >= 1
+    assert all(t["confirmed"] is True for t in trades)
+
+
+def test_r1_scales_the_stop_to_the_name_and_widens_the_ones_that_matter():
+    """65% of entries breach -8% within 125 sessions, so the law's stop and a multi-month hold are
+    mutually exclusive. ATR(14) on the names this system trades runs 2.24% / 2.86% / 3.78% / 4.90%
+    of price across the quartiles — the multiplier has to be read off that, not off convention.
+
+    A first attempt used 2.5x, which lands a median name at 7.2% — the law's 7.57% stop with a new
+    name on it. It would have tested nothing.
+    """
+    at = lambda pct: 100.0 - sg.volatility_stop(100.0, pct)
+    assert at(2.86) == pytest.approx(14.3)        # median name: genuinely wider than 8%
+    assert at(2.24) == pytest.approx(11.2)        # quiet name: still tighter than the cap
+    assert at(4.90) == pytest.approx(20.0)        # volatile name: the cap binds
+    assert all(at(p) <= 20.0 + 1e-9 for p in (2.24, 2.86, 3.78, 4.90, 12.0))
+    assert at(2.86) > 7.57, "the multiplier must beat the stop it is replacing"
+
+
+def test_r1_never_floors_the_stop_at_the_contraction_low():
+    """The contraction low is what makes the law's stop tight; flooring at it would undo R1."""
+    tight = sg.initial_stop(100.0, 96.0)                 # law: the contraction low wins
+    loose = sg.volatility_stop(100.0, 2.86)              # R1: the name's own noise
+    assert tight == pytest.approx(96.0)
+    assert loose < tight
+
+
+def test_s1_and_s2_change_which_names_rank():
+    """Dropping the volatility divisor and the tightness sub-score is the difference between
+    ranking the calmest name near its high and ranking the strongest."""
+    f, _ = frame()
+    law = bt.rank(f, DAYS - 12, f["cols"], f["arrays"],
+                  [np.flatnonzero(~np.isnan(f["arrays"]["close"][:, j]))
+                   for j in range(len(f["cols"]))], bt.LAW)
+    hyp = dict(bt.LAW); hyp.update(bt.PRESETS["h1"])
+    loud = bt.rank(f, DAYS - 12, f["cols"], f["arrays"],
+                   [np.flatnonzero(~np.isnan(f["arrays"]["close"][:, j]))
+                    for j in range(len(f["cols"]))], hyp)
+    assert law["l1m"] != loud["l1m"], "S1+S2 produced an identical ranking — the flags are dead"
+
+
+def test_s3_lets_a_loss_to_profit_swing_pass_m4():
+    """MU went -$1.07 to +$1.18 and scored no growth rate at all, because you cannot divide by a
+    negative base. It was invisible through the whole recovery, then ran +1,029%."""
+    eps = [1.18, -0.95, -1.07, -1.43, -1.91]     # newest first: latest positive, base a year ago
+    assert s_m4(eps, swing=False) is False
+    assert s_m4(eps, swing=True) is True
+
+
+def s_m4(eps, **kw):
+    return sg.m4_acceleration(eps, **kw)["passes"]
 
 
 # --------------------------------------------------------------------------- the law, written once

@@ -128,8 +128,14 @@ def base_scan(high, low, close, *, look_back=120, min_age=25, grace=0.005, max_d
 # ---------------------------------------------------------------------------- MCN
 
 
-def momentum_quality(adj_close, *, window=90):
-    """Annualised slope of the log-price regression x R^2, divided by volatility (§3.2)."""
+def momentum_quality(adj_close, *, window=90, vol_divisor=True):
+    """Annualised slope of the log-price regression x R^2, divided by volatility (§3.2).
+
+    `vol_divisor=False` is hypothesis S1. The divisor is Clenow's, and it belongs with
+    volatility-scaled position sizing; §3.2's stop cap flattens sizing to near-uniform, so the
+    law takes the ranking penalty without the sizing benefit and systematically de-ranks the only
+    names that produce a tail. Default is the law.
+    """
     a = np.asarray(adj_close, dtype=float)
     if len(a) < window + 1 or np.any(a[-(window + 1):] <= 0):
         return np.nan
@@ -140,6 +146,8 @@ def momentum_quality(adj_close, *, window=90):
     resid = y - (slope * xc + y.mean())
     ss_tot = float(((y - y.mean()) ** 2).sum()) or 1e-12
     r2 = max(0.0, 1.0 - float((resid ** 2).sum()) / ss_tot)
+    if not vol_divisor:
+        return slope * 252.0 * r2
     vol = float(np.std(np.diff(np.log(a[-(window + 1):])))) or 1e-9
     return slope * 252.0 * r2 / vol
 
@@ -271,7 +279,7 @@ def stalled_pyramid(*, pyramid_step, sessions_held, full_step=3, weeks=4, sessio
     return pyramid_step < full_step and sessions_held >= weeks * sessions_per_week
 
 
-def m4_acceleration(eps_by_quarter, *, strong=0.25, accelerating=0.15):
+def m4_acceleration(eps_by_quarter, *, strong=0.25, accelerating=0.15, swing=False):
     """§3.2 M4 — latest reported quarter YoY EPS growth >= 25%, **or** accelerating for two
     consecutive quarters with the latest >= 15%.
 
@@ -284,15 +292,27 @@ def m4_acceleration(eps_by_quarter, *, strong=0.25, accelerating=0.15):
     holds. Same arithmetic either way, which is the point of it living here.
     """
     eps = [e for e in eps_by_quarter if e is not None and np.isfinite(e)]
-    yoy = []
+    yoy, swung = [], False
     for i, v in enumerate(eps[:8]):
         base = eps[i + 4] if i + 4 < len(eps) else None
+        if base is not None and base <= 0 and v > 0:
+            # Hypothesis S3: a swing from a loss to a profit. No growth rate exists — you cannot
+            # divide by a negative base — so the law scores it as unknown and the name never
+            # reaches L1-M. MU went -$1.07 to +$1.18 across 2024, stayed invisible through the
+            # whole recovery, then ran +1,029%. §3.2's intent plainly covers it; the formula
+            # cannot express it.
+            if i == 0:
+                swung = True
+            yoy.append(None)
+            continue
         yoy.append((v / base - 1) if base and base > 0 else None)
     y0 = yoy[0] if yoy else None
     y1 = yoy[1] if len(yoy) > 1 else None
     passes = bool((y0 is not None and y0 >= strong)
-                  or (y0 is not None and y1 is not None and y0 > y1 and y0 >= accelerating))
-    return dict(passes=passes, yoy_latest=y0, yoy_prev=y1, quarters=len(eps))
+                  or (y0 is not None and y1 is not None and y0 > y1 and y0 >= accelerating)
+                  or (swing and swung))
+    return dict(passes=passes, yoy_latest=y0, yoy_prev=y1, quarters=len(eps),
+                loss_to_profit=swung)
 
 
 ENTER_FLOOR = 70.0
@@ -334,9 +354,30 @@ def initial_stop(entry, contraction_low, *, max_stop=0.08):
     return max(float(contraction_low), floor)
 
 
+def volatility_stop(entry, atr_now, *, mult=5.0, max_stop=0.20):
+    """Hypothesis R1 — a stop set by the name's own noise, not by a fixed percentage.
+
+    §3.2 caps the initial stop at 8% and floors it at the base's final-contraction low, which in
+    practice puts it 7.57% under entry. **65% of entries breach that inside 125 sessions**, so the
+    law's stop and a multi-month hold are mutually exclusive: the stop fires first on two thirds of
+    the names that would have produced the move. A 20% cap survives 73%.
+
+    The multiplier is not the conventional 2.5. ATR(14) across the names this system actually
+    trades runs 2.86% of price at the median, so 2.5x lands at 7.2% — the law's stop, renamed.
+    5x gives roughly 14% on a median name, 11% on a quiet one and the 20% cap on a volatile one.
+
+    Deliberately does NOT floor at the contraction low. The contraction low is what makes the law's
+    stop tight, and tightness is the thing under test. `max_stop` is the widest permitted, not a
+    target — a quiet name still gets a close stop because its ATR is small.
+    """
+    if atr_now is None or not np.isfinite(atr_now) or atr_now <= 0:
+        return entry * (1 - max_stop)
+    return max(float(entry) - mult * float(atr_now), float(entry) * (1 - max_stop))
+
+
 def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_step=0,
                  full_step=3, trail10_from=0.15, trail10=0.10, euphoria_trail=0.05,
-                 euphoria_sd=2.0, sd_window=50):
+                 euphoria_sd=2.0, sd_window=50, breakeven_r=None, init_stop=None):
     """The stop ladder (§3.2 Stops) — ratchets up, never down.
 
     Full size moves the stop to breakeven; +15% from average cost starts a 10% trail below the
@@ -356,11 +397,19 @@ def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_
         sd = float(np.std(w))
         euphoric = sd > 0 and px > float(np.mean(w)) + euphoria_sd * sd
 
+    # Hypothesis R2: breakeven when the position has earned back its own risk, rather than when
+    # the pyramid completes. The law ties risk management to a *sizing* milestone that three of
+    # four positions never reach, so 129 stops gave back +6.56% unrealised to exit at -2.05%.
+    at_1r = False
+    if breakeven_r is not None and avg_cost and init_stop:
+        risk = (float(avg_cost) - float(init_stop)) / float(avg_cost)
+        at_1r = risk > 0 and (px / float(avg_cost) - 1) >= breakeven_r * risk
+
     if euphoric:
         candidate, mode = hc * (1 - euphoria_trail), "trail5"
     elif avg_cost and px / float(avg_cost) - 1 >= trail10_from:
         candidate, mode = hc * (1 - trail10), "trail10"
-    elif pyramid_step >= full_step and avg_cost:
+    elif avg_cost and (pyramid_step >= full_step or at_1r):
         candidate, mode = float(avg_cost), "breakeven"
     else:
         candidate, mode = current_stop, "initial"
