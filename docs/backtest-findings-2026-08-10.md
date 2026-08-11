@@ -345,6 +345,71 @@ takes months it does not have.
 
 ---
 
+## 7d. H5 and H6 — the eligibility gate, and a second door (2026-08-11)
+
+Everything through H4 changes what we do with a position. §7c says the miss happens earlier than
+that: the winners are excluded before ranking ever sees them. Zak's ruling — *"allow bigger
+depths... allow buying back in on a name we trust... and it doesn't have to be where we sold... we
+have to just buy back into strength on a strong name"* — turns into two variants, split so that the
+contribution of each is separable.
+
+### Which clause to move, measured before writing any code
+
+Zak also asked whether the 25-session base minimum is right. It is worth measuring rather than
+arguing, so both clauses were swept over the +100% names' full history:
+
+| valid base on a given day | depth ≤ 25% (law) | depth ≤ 40% |
+|---|---:|---:|
+| **base age ≥ 25 (law)** | 5.9% | **29.3%** |
+| **base age ≥ 12** | 6.8% | 33.7% |
+
+**Depth is worth twenty-three points; base length is worth one.** The 25-session minimum is very
+nearly irrelevant — it is in H5 to close the question, and it is the first thing to ablate if H5
+wins. This is also the answer to "maybe there is a better indicator there": there is, and it is the
+depth clause sitting next to it.
+
+### H5 · eligibility scaled to how much the name moves
+
+A flat 40% would hand a quiet utility a licence it has no use for, and that is not the hypothesis.
+`signals.volatility_tolerance` floors at the law's number and widens only in proportion to the
+name's own ATR, ceiling 60%. The multiplier is **8**, read off the measured median ATR of 2.86% of
+price:
+
+| the name's ATR | 2.24% (quiet) | 2.86% (median) | 5.00% | 7.50%+ |
+|---|---:|---:|---:|---:|
+| depth allowed | 25% (the law) | 25% (the law) | 40% | 60% (capped) |
+
+So H5 is inert on the median name by construction. Applied to both the M3 depth clause and M2's
+"within 25% of the 52-week high", plus base age 12.
+
+One thing worth recording about the off-high half: it is narrower than it looks. An ordinary 30%
+drawdown also puts a name under its own 50- and 200-day, so those conditions reject it first and
+the off-high clause never gets a vote. It binds only where the SMA stack is far below — the shape
+a name that has already tripled actually has. Depth is the big term; off-high is the small one.
+
+### H6 · a way back in
+
+§3.2 has one door into a name and none back through it. The trigger is deliberately **not** our
+exit price: a close above every close of the prior 20 sessions, on a name that still passes M2, M4
+and the MCN floor, with a five-session cool-off. Where we happened to sell is our history, not the
+stock's — and 96% of stopped-out names traded back through it inside 60 days anyway, so anchoring
+on it would mostly re-buy at a level the market had already left behind.
+
+The new high is treated as the confirmation; no volume multiple is demanded on top of it. **That is
+the clause to falsify if the re-entry bucket churns.** Timing follows E1 exactly — judged at last
+night's close, filled at this open — and a re-entry gets its own volatility stop and pyramids off
+its own fill, since there is no base and therefore no contraction low.
+
+Every re-entry is stamped `backtest_trades.entry_kind = 'reentry'`, and on a run that did not
+declare `reentry_window` it counts as a **conformance violation**, so a variant can never pass as
+law-v0.
+
+### Results
+
+*Dispatched 2026-08-11 against pinned baseline `backtest_runs.id = 18`. Pending.*
+
+---
+
 ## 8. Proposals (§5.8, drafted — none of these is law)
 
 **A · §5.1 entry mechanic — confirm before entering.**
