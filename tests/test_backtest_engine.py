@@ -1027,3 +1027,19 @@ def test_c1_drops_m4_and_declares_the_screen():
     assert entry(c1)["screen"] == "deep_recovery" and entry(c1)["violations"] == 0
     # law-v0 buying through a door §3.2 does not name is a violation
     assert entry(dict(bt.LAW))["violations"] == 9
+
+
+def test_an_entry_screen_is_never_used_as_a_hold_condition():
+    """Run 39's failure mode, pinned. `deep_recovery` requires the name to be at least 25% under
+    its 52-week high, so a position that works stops passing it — and the template exit then sells
+    every winner for the crime of no longer being cheap. 142 of 253 exits, at 9.1 sessions."""
+    f, _ = runner_frame(top=3.0)
+    trades, _, conf = bt.simulate(f, preset("c1"))
+    assert not any(t["exit_reason"] == "template" for t in trades), (
+        "a screen run must not exit on the screen — it is an entry test")
+    table = bt.conformance(conf, trades, [], hyp=preset("c1")["hyp"])
+    exits = next(c for c in table if c["clause"].startswith("Exits"))
+    assert exits["suppressed"] == ["template"], "and the table has to say the rule is not enforced"
+    # the law is untouched: no screen means the template exit still fires
+    law = bt.conformance(conf, trades, [], hyp=dict(bt.LAW))
+    assert next(c for c in law if c["clause"].startswith("Exits"))["suppressed"] == []

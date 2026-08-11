@@ -820,7 +820,14 @@ def simulate(frame, cfg):
                 continue
 
             row = scored.get(tk)
-            if hyp["template_exit"] and not riding and row is not None and row["m2"] is False:
+            # An ENTRY screen is not a HOLD condition, and conflating the two cost run 39 its
+            # winners. `deep_recovery` requires the name to be at least 25% under its 52-week
+            # high — so the moment a position works, the screen stops passing and the template
+            # exit sells it. 142 of that run's 253 exits were `template` at 9.1 sessions: the
+            # rule was selling every name for the crime of no longer being cheap. With a screen
+            # in use, holding is governed by the stop, the trail, the rungs and the clocks.
+            if hyp["template_exit"] and not hyp["screen"] and not riding \
+                    and row is not None and row["m2"] is False:
                 pending[tk] = "template"
                 continue
             if not riding and row is not None and row["mcn"] == row["mcn"] \
@@ -1194,7 +1201,8 @@ def conformance(conf, trades, equity, hyp=None):
         dict(clause="Exits — stop, template, MCN < 55", fn="driver",
              coverage=1.0, unknown_reasons=sorted(reasons - legal - declared),
              variant_reasons=sorted(reasons & declared),
-             suppressed=[] if (hyp or {}).get("template_exit", True) else ["template"]),
+             suppressed=([] if ((hyp or {}).get("template_exit", True)
+                                and not (hyp or {}).get("screen")) else ["template"])),
         dict(clause="Earnings blackout — 5 trading days", fn="signals.in_blackout",
              coverage=cov(conf["blackout_known"], conf["blackout_decisions"])),
         dict(clause="Sizing — budget / stop distance", fn="signals.momentum_size", coverage=1.0,
