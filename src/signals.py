@@ -451,13 +451,20 @@ def volatility_stop(entry, atr_now, *, mult=5.0, max_stop=0.20):
 
 def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_step=0,
                  full_step=3, trail10_from=0.15, trail10=0.10, euphoria_trail=0.05,
-                 euphoria_sd=2.0, sd_window=50, breakeven_r=None, init_stop=None):
+                 euphoria_sd=2.0, sd_window=50, breakeven_r=None, init_stop=None,
+                 breakeven=True, euphoria=True):
     """The stop ladder (§3.2 Stops) — ratchets up, never down.
 
     Full size moves the stop to breakeven; +15% from average cost starts a 10% trail below the
     highest close since entry; a close more than 2 standard deviations above its own 50-day
     tightens that trail to 5%. The euphoria rule tightens, it never sells, and it has exactly
     one trigger — the second one was deleted from the plan in the S1-S5 round.
+
+    `breakeven` and `euphoria` switch off the two rungs that shorten a hold rather than protect
+    a gain, for hypotheses B1 and B2. Both default to the law. They are separate switches from
+    `breakeven_r` on purpose: that one *moves* the breakeven trigger, and setting it to None
+    restores §3.2's "at full pyramid size", which under E1 fires on most positions — so there was
+    no way to ask what a position does with no breakeven under it at all.
     """
     c = np.asarray(closes, dtype=float)
     if not len(c):
@@ -466,7 +473,7 @@ def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_
     hc = float(np.max(c)) if highest_close is None else max(float(highest_close), float(np.max(c)))
 
     euphoric = False
-    if len(c) >= sd_window:
+    if euphoria and len(c) >= sd_window:
         w = c[-sd_window:]
         sd = float(np.std(w))
         euphoric = sd > 0 and px > float(np.mean(w)) + euphoria_sd * sd
@@ -483,7 +490,7 @@ def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_
         candidate, mode = hc * (1 - euphoria_trail), "trail5"
     elif avg_cost and px / float(avg_cost) - 1 >= trail10_from:
         candidate, mode = hc * (1 - trail10), "trail10"
-    elif avg_cost and (pyramid_step >= full_step or at_1r):
+    elif breakeven and avg_cost and (pyramid_step >= full_step or at_1r):
         candidate, mode = float(avg_cost), "breakeven"
     else:
         candidate, mode = current_stop, "initial"

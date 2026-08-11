@@ -328,10 +328,35 @@ def test_the_ablations_each_move_exactly_one_clause_off_h4():
     h4 = bt.PRESETS["h4"]
     for name, keys in (("d1", {"depth_atr_mult"}), ("d2", {"off_high_atr_mult"}),
                        ("d3", {"min_base_age"}), ("x1", {"reentry_window", "reentry_cooloff"}),
-                       ("t1", {"template_exit"})):
+                       ("t1", {"template_exit"}), ("b1", {"breakeven"}), ("b2", {"euphoria"})):
         p = bt.PRESETS[name]
         assert h4.items() <= p.items(), f"{name} is not H4 plus something"
         assert set(p) - set(h4) == keys, f"{name} moves more than its one clause"
+    b3 = bt.PRESETS["b3"]                         # b3 changes a value H4 already sets
+    assert {k for k in b3 if b3[k] != h4.get(k)} == {"stagnation_days"}
+
+
+def test_b1_removes_the_breakeven_rung_that_breakeven_r_cannot_reach():
+    """`breakeven_r=None` does not mean "no breakeven" — it restores §3.2's "at full pyramid
+    size", which under E1 fires on most positions. B1 needs its own switch or it tests nothing."""
+    closes = list(np.linspace(96.0, 104.0, 49)) + [104.0]     # +4%: under the trail, not euphoric
+    kw = dict(closes=closes, avg_cost=100.0, current_stop=94.0, pyramid_step=3, init_stop=94.0)
+    assert sg.ratchet_stop(**kw)["mode"] == "breakeven"
+    assert sg.ratchet_stop(**kw, breakeven_r=None)["mode"] == "breakeven"   # still fires
+    assert sg.ratchet_stop(**kw, breakeven=False)["mode"] == "initial"      # only this removes it
+    assert sg.ratchet_stop(**kw, breakeven=False)["stop"] == 94.0
+
+
+def test_b2_stops_tightening_the_trail_on_exactly_the_names_we_want():
+    """A close >2sd above its own 50-day cuts the trail from 10% to 5%. That describes a stock in
+    the leg that makes a +100% year, and 5% is inside an ordinary pullback for it."""
+    closes = list(np.linspace(100.0, 118.0, 49)) + [180.0]
+    kw = dict(closes=closes, avg_cost=100.0, current_stop=94.0, pyramid_step=1)
+    law = sg.ratchet_stop(**kw)
+    calm = sg.ratchet_stop(**kw, euphoria=False)
+    assert law["mode"] == "trail5" and law["euphoric"] is True
+    assert calm["mode"] == "trail10" and calm["euphoric"] is False
+    assert calm["stop"] < law["stop"], "B2 must leave the position more room, not less"
 
 
 def test_e1_refuses_the_breakout_the_law_buys():

@@ -56,6 +56,8 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            atr_stop_mult=None,         # R1  — fixed 8% cap, floored at the contraction low
            max_stop=0.08,
            breakeven_r=None,           # R2  — breakeven at full pyramid size
+           breakeven=True,             # B1  — a breakeven rung exists at all
+           euphoria=True,              # B2  — >2sd above the 50-day tightens the trail to 5%
            trail_from=0.15, trail=0.10,# R3  — 10% trail from +15%
            press_on_next_base=False,   # P1  — a stalled pyramid only ever exits
            press_grace=20,             #       sessions the next base has to show up in
@@ -148,6 +150,30 @@ PRESETS = {
     "t1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
                atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
                stagnation_days=20, template_exit=False),
+    # ---- the duration set. Five variants have now tried to put MORE names in the book and every
+    # one lost money, while the only profitable bucket in the entire grid is `stagnant` — the one
+    # that holds 36 sessions. Average hold across every run is 10-13 sessions. A +100% year takes
+    # 250. So these three stop asking what we buy and ask what cuts the hold short.
+    #
+    # B1 · no breakeven rung. 109 of H4's 252 exits are `stop`, at 9.4 sessions and -0.49% — the
+    # signature of a position that earned +1R, ratcheted to breakeven, and got scratched by an
+    # ordinary pullback. Zak: "allow a little volatility as the buy gets moving."
+    "b1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven=False),
+    # B2 · no euphoria tightening. §3.2 cuts the trail to 5% when a close sits >2sd above its own
+    # 50-day — which is the *definition* of the names we are trying to catch. A stock in the leg
+    # that makes a +100% year is euphoric by this test for weeks at a time, and a 5% trail on a
+    # name whose ATR is 5% exits on an ordinary two-day pullback.
+    "b2": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, euphoria=False),
+    # B3 · give the stall clock twice as long. `stagnant` is the grid's only profit centre (+17.20%
+    # over 36.3 sessions) and it is a profit-*taking* rule, so the obvious question is whether it
+    # is taking profit too early on the names that were still going.
+    "b3": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=40),
 }
 
 
@@ -648,7 +674,8 @@ def simulate(frame, cfg):
                                   avg_cost=p["avg_cost"], current_stop=p["stop"],
                                   highest_close=p["hi_close"], pyramid_step=p["step"],
                                   trail10_from=hyp["trail_from"], trail10=hyp["trail"],
-                                  breakeven_r=hyp["breakeven_r"], init_stop=p["init_stop"])
+                                  breakeven_r=hyp["breakeven_r"], init_stop=p["init_stop"],
+                                  breakeven=hyp["breakeven"], euphoria=hyp["euphoria"])
             if out["stop"] is not None:
                 p["stop"] = out["stop"]
             p["last_mark"] = cl
