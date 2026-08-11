@@ -60,6 +60,7 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            press_on_next_base=False,   # P1  — a stalled pyramid only ever exits
            press_grace=20,             #       sessions the next base has to show up in
            stagnation_days=None,       # H4  — resolve a position that stops making new highs
+           template_exit=True,         # T1  — sell when M2 stops passing
            depth_atr_mult=None,        # D1  — base depth allowance scaled to the name's own ATR
            off_high_atr_mult=None,     # D2  — 52-week-high tolerance scaled the same way
            min_base_age=25,            # D3  — sessions a base runs before its pivot is tradeable
@@ -135,6 +136,18 @@ PRESETS = {
     "x1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
                atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
                stagnation_days=20, reentry_window=20, reentry_cooloff=5),
+    # T1 · H4 without the trend-template exit. It is H4's worst per-trade bucket — 29 exits at
+    # -5.48% for -$8,272 — and §2's forward returns showed twice that the names it sells go on to
+    # beat the market. Unlike every other variant this DELETES a §3.2 rule rather than widening
+    # one, so `template_exit` is declared in the conformance table: a run that silently stopped
+    # enforcing a clause is the exact failure that table exists to catch.
+    #
+    # Nothing replaces it yet. The question this answers is what the clause costs, not what should
+    # stand in its place — a position still has the volatility stop, the 25% trail from +30%, the
+    # MCN floor and the 20-session stagnation clock between it and forever.
+    "t1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, template_exit=False),
 }
 
 
@@ -539,7 +552,7 @@ def simulate(frame, cfg):
                 continue
 
             row = scored.get(tk)
-            if row is not None and row["m2"] is False:
+            if hyp["template_exit"] and row is not None and row["m2"] is False:
                 pending[tk] = "template"
                 continue
             if row is not None and row["mcn"] == row["mcn"] and row["mcn"] < cfg["mcn_exit"]:
@@ -850,9 +863,13 @@ def conformance(conf, trades, equity, hyp=None):
              coverage=1.0),
         dict(clause="Stops — initial, breakeven, 10% trail, euphoria", fn="signals.ratchet_stop",
              coverage=1.0),
+        # `unknown_reasons` catches an exit the law does not name. `suppressed` catches the other
+        # direction — a §3.2 exit the run stopped enforcing, which no count of reasons can show,
+        # because a rule that never fires looks exactly like a rule with nothing to fire on.
         dict(clause="Exits — stop, template, MCN < 55", fn="driver",
              coverage=1.0, unknown_reasons=sorted(reasons - legal - declared),
-             variant_reasons=sorted(reasons & declared)),
+             variant_reasons=sorted(reasons & declared),
+             suppressed=[] if (hyp or {}).get("template_exit", True) else ["template"]),
         dict(clause="Earnings blackout — 5 trading days", fn="signals.in_blackout",
              coverage=cov(conf["blackout_known"], conf["blackout_decisions"])),
         dict(clause="Sizing — budget / stop distance", fn="signals.momentum_size", coverage=1.0),

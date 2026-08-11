@@ -327,7 +327,8 @@ def test_the_ablations_each_move_exactly_one_clause_off_h4():
     only works if each differs from H4 in a single key."""
     h4 = bt.PRESETS["h4"]
     for name, keys in (("d1", {"depth_atr_mult"}), ("d2", {"off_high_atr_mult"}),
-                       ("d3", {"min_base_age"}), ("x1", {"reentry_window", "reentry_cooloff"})):
+                       ("d3", {"min_base_age"}), ("x1", {"reentry_window", "reentry_cooloff"}),
+                       ("t1", {"template_exit"})):
         p = bt.PRESETS[name]
         assert h4.items() <= p.items(), f"{name} is not H4 plus something"
         assert set(p) - set(h4) == keys, f"{name} moves more than its one clause"
@@ -592,6 +593,26 @@ def test_x1_re_enters_with_a_stop_and_a_pyramid_of_its_own():
     for t in back_in:
         assert t["initial_stop"] is not None and 0 < t["initial_stop"] < t["entry_price"]
         assert t["pivot"] == pytest.approx(t["entry_price"], rel=0.02)
+
+
+def test_t1_stops_selling_on_the_template_and_says_so():
+    """Every other variant widens a rule; T1 deletes one. A count of exit reasons cannot catch
+    that — a suppressed rule looks exactly like a rule with nothing to fire on — so the table has
+    to name it separately."""
+    # The leader gaps down after its breakout and sits there: below its 50-day, so M2 fails at the
+    # next weekly rank, but flat, so nothing else fires. The one shape that isolates this exit.
+    f, _ = frame(hero_after=0.80, breakout_at=DAYS - 14)
+    law_trades, _, _ = bt.simulate(f, preset("h4"))
+    f, _ = frame(hero_after=0.80, breakout_at=DAYS - 14)
+    t1_trades, _, t1_conf = bt.simulate(f, preset("t1"))
+    assert any(t["exit_reason"] == "template" for t in law_trades)
+    assert not any(t["exit_reason"] == "template" for t in t1_trades)
+
+    table = bt.conformance(t1_conf, t1_trades, [], hyp=preset("t1")["hyp"])
+    exits = next(c for c in table if c["clause"].startswith("Exits"))
+    assert exits["suppressed"] == ["template"]
+    law = bt.conformance(t1_conf, t1_trades, [], hyp=dict(bt.LAW))
+    assert next(c for c in law if c["clause"].startswith("Exits"))["suppressed"] == []
 
 
 def test_an_undeclared_reentry_fails_conformance():
