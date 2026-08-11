@@ -217,21 +217,43 @@ conviction, be looser on the stops.* The eight proposals in §8 were coded as op
 law-v0 untouched, every default the law — and staged into presets so that each contains the one
 before it. All runs sit on the same tape: 5,276 tickers, M4 coverage 97.9%, VOO +15.46%.
 
-| | law-v0 | H1 | H2 | H3 | H3b |
-|---|---:|---:|---:|---:|---:|
-| | *baseline* | *+S1 S2 S3 E1* | *+R1 R2 R3* | *+P1 P2* | *P1 fixed* |
-| CAGR | −0.52% | **+0.20%** | −0.32% | −0.54% | −0.66% |
-| Expectancy | −0.429% | −0.732% | −0.491% | −0.708% | −0.805% |
-| Win rate | 29.8% | 16.0% | 16.3% | 15.8% | 13.7% |
-| Average win | +5.29% | +11.58% | +11.48% | +11.15% | — |
-| **Payoff** | 1.85:1 | 3.77:1 | **4.08:1** | 3.80:1 | — |
-| Break-even win rate | 35.1% | 21.0% | **19.7%** | 20.8% | — |
-| **Gap to break-even** | 5.3 pts | 5.0 pts | **3.4 pts** | 5.0 pts | — |
-| Trades > +50% | **0** | 2 | 2 | 2 | — |
-| Best trade | +35.1% | **+89.6%** | +89.6% | +89.6% | — |
-| Max drawdown | **−13.7%** | −16.2% | −14.6% | −15.6% | −16.7% |
-| Exposure | **12.3%** | 8.67% | 6.35% | 7.16% | 7.60% |
-| Reached full size | 22% | 56% | **62%** | 62% | — |
+| | law-v0 | H1 | H2 | H3 | H3b | **H4** |
+|---|---:|---:|---:|---:|---:|---:|
+| | *baseline* | *+S1 S2 S3 E1* | *+R1 R2 R3* | *+P1 P2* | *P1 fixed* | *H2 + stagnation* |
+| CAGR | −0.52% | +0.20% | −0.32% | −0.54% | −0.66% | **+0.04%** |
+| Expectancy | −0.429% | −0.732% | −0.491% | −0.708% | −0.805% | **−0.304%** |
+| Win rate | 29.8% | 16.0% | 16.3% | 15.8% | 13.7% | 16.7% |
+| Average win | +5.29% | +11.58% | +11.48% | +11.15% | — | **+12.33%** |
+| **Payoff** | 1.85:1 | 3.77:1 | 4.08:1 | 3.80:1 | — | **4.36:1** |
+| Break-even win rate | 35.1% | 21.0% | 19.7% | 20.8% | — | **18.7%** |
+| **Gap to break-even** | 5.3 pts | 5.0 pts | 3.4 pts | 5.0 pts | — | **2.0 pts** |
+| Trades > +50% | **0** | 2 | 2 | 2 | — | 2 |
+| Best trade | +35.1% | +89.6% | +89.6% | +89.6% | — | +89.6% |
+| Max drawdown | −13.7% | −16.2% | −14.6% | −15.6% | −16.7% | **−12.4%** |
+| Exposure | **12.3%** | 8.67% | 6.35% | 7.16% | 7.60% | 6.20% |
+| Total P&L | −$9,090 | +$3,573 | −$5,652 | −$9,385 | — | **+$641** |
+
+**H4 is the best variant on every per-trade measure** — payoff 4.36:1, two points from break-even,
+the shallowest drawdown, and the only run besides H1 with positive total P&L. Its `stagnant` bucket
+is the single best in the entire grid: **10 exits, +17.20% average, +$18,919**, held 36.3 sessions.
+Making the stall clock's accidental profit-taking deliberate — and independent of pyramid size —
+recovers most of what E1 destroyed, and keeps the runners a fixed four-week clock would have cut.
+
+H4's remaining leaks are `gap` (−$10,514) and `template` (−$8,272 across 29 exits at −5.48%, the
+worst per-trade bucket in the run). §2's forward returns already showed `template` sells names that
+go on to beat the market.
+
+**And H4's selection is materially better**, which the capture diagnostic isolates:
+
+| | baseline | **H4** |
+|---|---:|---:|
+| What the rules captured | −0.51% | −0.08% |
+| Hold the same picks 125 sessions | +8.00% | **+9.27%** |
+| VOO over identical windows | +7.09% | +6.63% |
+| **Selection edge over the index** | **+0.91pp** | **+2.64pp** |
+
+S1 + S2 + S3 roughly tripled the six-month edge of the names chosen — from under 2%/yr to about
+5.4%/yr. The mechanics still destroy ~9pp a trade, but the raw material improved.
 
 **Nothing beat VOO. Nothing turned expectancy positive.** What the grid did establish is which
 of the eight changes are real, and one of them is the opposite of what anyone expected.
@@ -280,6 +302,46 @@ against 16.3% actual. Stop exits fell 154 → 111. But `template` exits jumped *
 each**, and §2's forward-return table already showed `template` sells names that then beat the
 market by two points. The binding constraint moved from the stop to the trend-template exit; it
 was not removed.
+
+---
+
+## 7c. Why the +100% names are missed — it is one clause
+
+The grid raised the obvious question: SMCI (+1,231% best year), MU (+1,029%), TSLA (+1,004%),
+PLTR (+656%), MRVL (+409%), AMD (+373%) were all in L0 with full price history for the whole
+window, and law-v0 traded **none of them**. NVDA once, for +12.6%. VST twice, for −2.9%.
+
+Decomposing the funnel over those names against the ones we did trade:
+
+| | names we traded | **big winners** |
+|---|---:|---:|
+| Base unbroken | 64.0% | 62.8% |
+| **Base depth ≤ 25%** | **37.9%** | **11.5%** |
+| **→ valid base on a given day** | **21.9%** | **5.9%** |
+| Passes M2's "within 25% of the 52-week high" | 80.4% | 63.7% |
+| **Average consolidation depth** | **29.4%** | **42.1%** |
+
+The base-*break* test does not discriminate at all — 64% against 63%. **The depth limit does.**
+A stock that doubles in a year corrects **42% on the way**, so §3.2 calls its base invalid seven
+times out of eight, and M2's off-high tolerance rejects it another third of the time.
+
+Every gate is individually reasonable and calibrated for orderly names: 25% depth, 25% off-high,
+an 8% stop, a volatility divisor in the score, an ATR-tightness bonus. Together they describe a
+stock that does not go up 100% in a year.
+
+### We are wrong about the moment, not the name
+
+Of 200 positions stopped out in H1:
+
+| After we sold | |
+|---|---:|
+| Recovered above our exit price within 60 days | **96.0%** |
+| 10% above our exit within 125 days | 68.5% |
+| 25% above our exit within 125 days | 41.0% |
+| Average best move after the exit | **+26.8%** |
+
+The law offers no way back: re-entry needs a fresh valid base, and for a 42%-correcting name that
+takes months it does not have.
 
 ---
 
