@@ -548,7 +548,73 @@ runner bucket bleeds.
 Trims are declared in the conformance table and count as a violation on any run that did not ask
 for them, the same guard the variant exits and the re-entry door get.
 
-*Dispatched 2026-08-11 at $100k under the new capital regime. Pending.*
+### Results — the edge turned positive and the account still lost
+
+| | H4 *($200k, §3.2 sizing)* | M1 *(void)* | **M1b** | **M2** |
+|---|---:|---:|---:|---:|
+| CAGR | +0.04% | −3.92% | −4.41% | −3.97% |
+| **Expectancy** | −0.304% | **+1.392%** | **+1.272%** | **+1.549%** |
+| Win rate | 16.7% | 33.9% | **39.6%** | 39.5% |
+| Average win | +12.33% | +15.75% | +15.14% | **+15.82%** |
+| Average loss | −2.83% | −5.98% | −7.82% | −7.78% |
+| **Avg hold** | 11.9 | 20.0 | **24.5** | **24.9** |
+| **Exposure** | 6.20% | 37.29% | 41.89% | **42.09%** |
+| **Best trade** | +89.6% | +102.7% | +102.7% | **+178.5%** |
+| **Max drawdown** | −12.4% | −49.4% | −53.5% | **−54.8%** |
+
+**Run 33 (M1) is void and is kept only as the record of a preset error.** `entry_fraction=1.0`
+marks a position step 3, which trips §3.2's "breakeven at full pyramid size" on its *first*
+session — so B5's rung, whose value is that it sits below cost only after +1R, became an initial
+stop of half the intended width applied before the position had earned anything. The `stop` bucket
+alone was −$81,536 of a −$30,036 total, 95 exits at −3.48% against an intended ~10%, while every
+other bucket netted +$51,500. The pairing is now asserted by test for any preset that opens full.
+
+**M1b — the corrected run, and the diagnosis flips.** With the stop at its intended width, the
+scratches stop (95 → 22 `stop` exits) but positions live long enough to fail the trend template
+instead: `template` goes 28 → **64 exits, −$37,121**, and the six gaps that do occur cost
+**−27.94%** each rather than −6%.
+
+**M2 — the runner rule, confirmed by the name Zak named.** In run 33 all three runners died two to
+four sessions after their second trim, on the euphoria rung: a stock up 100% is by construction far
+above its own 50-day, so §3.2 cuts its trail to 5%, and 5% is one ordinary session for it. Give the
+runner a 35% trail and exempt it:
+
+| MU.US | exit | P&L | held |
+|---|---|---:|---:|
+| entered 2025-09-08 | `trim50` | +49.9% | 20 |
+| | `trim100` | +99.9% | 67 |
+| | **runner** | **+178.5%** | **130** |
+
+Under M1b that runner was stopped at **+91.7% on bar 69**. AVAV went from a bar-60 exit at +102.7%
+to bar 78; ATI 58 → 62; FTAI to 48. **+178.5% is the largest single trade in the grid** — the
+number was welded to +89.6% through eleven variants of selection tinkering, went to +102.7% with
+the ladder, and to +178.5% once the runner was allowed to run.
+
+**Caveat on the record:** three of the five ladder positions exited on `gate_off` rather than on
+their own merits, MU among them. The March 2026 gate closure ends them, so the ladder's headline
+numbers are partly a function of where the window stops. Treat +178.5% as demonstrated-possible,
+not as representative, until the same behaviour appears on trades that complete mid-window.
+
+## 7h. Heat — the primitive §3.2 never needed
+
+Read the two headline numbers of M1b together: **average trade +1.27%, drawdown −53.5%.** A
+positive edge and a halved account are not a contradiction. That is what over-betting a real edge
+looks like, and the cause is a missing constraint rather than a bad rule.
+
+`sleeve_cap` limits how much of NAV is **invested**. Nothing limited how much could be **lost**.
+Under the capital regime a 25% position behind a 20% stop puts **5% of NAV at risk**, and the book
+holds four or five at once — so a fifth to a quarter of the account can be on the line
+simultaneously. §3.2 never needed the concept because its 0.7–0.9% budget made every position 4.5%
+and the question could not arise. Raising the budgets to honour "up to 25% on high conviction"
+raised the risk per name by the same factor, and nothing caught it.
+
+`heat_cap` sums what every open stop would cost if it all fired today and refuses an entry that
+would breach it. At 6% the book carries one full-conviction name at full stop width, or several
+whose stops have already ratcheted up — **heat rather than cash becomes the binding constraint**,
+which is the right way round for a sleeve meant to press on conviction. Refusals are counted in the
+conformance table so a heat-constrained run cannot look like one that found nothing to buy.
+
+*M3 = M2 + a 6% heat cap. Dispatched 2026-08-11.*
 
 ---
 
