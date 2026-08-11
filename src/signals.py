@@ -537,6 +537,58 @@ def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_
     return dict(stop=stop, mode=mode, highest_close=hc, euphoric=euphoric)
 
 
+def deep_recovery(high, low, close, *, min_range=0.12, min_depth=0.50, min_off_high=0.25,
+                  min_r3=0.10, window=252, quarter=63):
+    """The census screen (docs/backtest-findings-2026-08-10.md §9) — L1-M's replacement candidate.
+
+    §3.2's M2 and M3 select an orderly, calm stock near its highs, and against the 2016-2026 census
+    of every liquid US name that gained 70% inside six months, that description is *anti*-
+    predictive: M3's depth clause has a lift of 0.04 and 99.6% of all winners fail it; M2's off-high
+    clause is 0.64; the moving-average stack is 0.97, indistinguishable from random. The population
+    those two gates admit returned **+1.12% per six months** before costs, which is what nineteen
+    backtest runs produced from it.
+
+    The four conditions here are the census read forwards, in the order that tightened the net:
+
+      1. it moves at all — six-month average monthly range over 12%. Under 6% the hit rate is
+         0.47%; over 12% captures 98% of every winner in the decade.
+      2. it has fallen hard — the 52-week low is more than 50% under the 52-week high. Captures
+         80.6% of winners at 2.33x.
+      3. it is still cheap — price at least 25% under the 52-week high.
+      4. it has turned — up more than 10% over the last quarter, the market's statement that the
+         re-rating has begun.
+
+    Together: 21.67% hit rate against a 6.59% base rate, +19.07% mean six-month return, and — the
+    part that makes it tradeable — the winners' median drawdown after entry is -9.3% against the
+    losers' -24.9%, so a stop separates them instead of taxing them.
+
+    Returns the components as well as the verdict, because a screen whose parts cannot be seen is
+    a screen nobody can debug.
+    """
+    h, l, c = (np.asarray(x, dtype=float) for x in (high, low, close))
+    if len(c) < window or len(h) < window or len(l) < window:
+        return dict(passes=False, rng=None, depth=None, off_high=None, r3=None)
+    hw, lw, cw = h[-window:], l[-window:], c[-window:]
+    hi52, lo52, px = float(np.nanmax(hw)), float(np.nanmin(lw)), float(c[-1])
+    if not (np.isfinite(hi52) and np.isfinite(lo52) and np.isfinite(px)) or hi52 <= 0 or px <= 0:
+        return dict(passes=False, rng=None, depth=None, off_high=None, r3=None)
+
+    # monthly range, as the census measured it: mean of (high-low)/close over 21-session blocks
+    blocks = [(np.nanmax(hw[i:i + 21]), np.nanmin(lw[i:i + 21]), cw[i + 20])
+              for i in range(len(cw) - 21, max(len(cw) - 21 - 6 * 21, -1), -21)]
+    spans = [(bh - bl) / bc for bh, bl, bc in blocks if bc and np.isfinite(bc) and bc > 0]
+    rng = float(np.mean(spans)) if spans else None
+
+    depth = lo52 / hi52 - 1.0
+    off_high = px / hi52 - 1.0
+    base3 = float(c[-quarter - 1]) if len(c) > quarter and c[-quarter - 1] > 0 else None
+    r3 = (px / base3 - 1.0) if base3 else None
+
+    ok = (rng is not None and rng > min_range and depth < -min_depth
+          and off_high < -min_off_high and r3 is not None and r3 > min_r3)
+    return dict(passes=bool(ok), rng=rng, depth=depth, off_high=off_high, r3=r3)
+
+
 def profitability_dead(eps_by_quarter, *, quarters=2):
     """Has the business stopped making money — the only thing that ends a forever hold.
 

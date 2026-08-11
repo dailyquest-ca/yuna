@@ -945,6 +945,60 @@ net was never mis-tuned; it was pointed at the opposite population. And it expla
 result at once: why MCN does not rank (§3), why the winners are missed (§7c), why widening depth
 admitted 150 positions and no tail (H5), and why A1 found exactly one candidate per decade.
 
+## 9c. The stop separates them — which is the opposite of the old population
+
+Everything above says *what to buy*. This says whether it can be traded, and it is the best result
+in the session. For the step-4 bucket (moves + deep + off its high + turning up), the drawdown that
+comes **after** the observation:
+
+| | n | 25th pct | **median** | 75th pct | breach −20% in 3m | breach −35% |
+|---|---:|---:|---:|---:|---:|---:|
+| **the ones that run +70%** | 1,958 | −20.5% | **−9.3%** | −3.1% | **20.2%** | 7.4% |
+| the other 78% | 7,617 | −42.8% | **−24.9%** | −10.6% | **47.0%** | 21.5% |
+
+**A stop is a discriminator here, not a tax.** A −20% stop removes 47% of the losers and only 20%
+of the winners. §4 found the exact opposite on §3.2's population: the 8% stop was breached by 65%
+of entries inside 125 sessions, so it fired on the winners first. **The risk machinery built in the
+B/M/A series — volatility stops, the rung half a risk under cost, the heat cap — was built for a
+population it could not help. On this one it can.**
+
+### Expectancy with a stop, under a deliberately pessimistic assumption
+
+Any breach in the six months is treated as a stop-out even if the gain came first, so these are
+lower bounds. Six-month forward returns, no costs:
+
+| population | n | no stop | stop 15% | stop 20% | stop 30% | stop 40% |
+|---|---:|---:|---:|---:|---:|---:|
+| **A · what §3.2 buys** | 22,603 | **+1.12%** | +0.80% | +0.82% | +0.83% | +0.81% |
+| B · every liquid US name | 212,407 | +6.01% | +3.56% | +4.10% | +4.74% | +5.12% |
+| C · step 3 | 38,460 | +14.78% | +8.51% | +9.88% | +11.52% | +12.55% |
+| **D · step 4** | 8,644 | **+19.07%** | +11.44% | +12.67% | +13.59% | **+14.52%** |
+
+**§3.2's population returns +1.12% per six months before costs** — about +2%/yr, which is precisely
+what nineteen backtest runs produced from it. The census predicts the backtests, which is the
+strongest evidence that it is measuring the right thing. Step 4 with a 40% stop is +14.52% per six
+months on the same pessimistic basis.
+
+### Is it "sentiment and attention"? Not quite — and the difference is testable
+
+Zak's reading: *"high beta stocks that have high volume... as if we are riding sentiment and
+attention, regardless of financials."* Two thirds right.
+
+* **High beta — confirmed, hard.** Range under 6% → 0.47% hit rate. You cannot get a 70% move out
+  of a calm stock, ever.
+* **High volume — confirmed.** 2× its own twelve-month dollar volume is the strongest single
+  signal in the census at 3.36×.
+* **"Regardless of financials" — no.** The financials are not neutral, they are *inverted*.
+  Unprofitable is 2.71× and covers 41% of winners; profitable is 0.69×. We were not ignoring them,
+  we were reading them backwards.
+
+And the drawdown table argues against pure attention-chasing. If this were froth, winners and
+losers would be equally violent in both directions. Instead the winners are the **calmer** half
+once the move starts — median −9.3% against −24.9%. That is not noise being chased; it looks like
+**a depressed, high-operating-leverage business being re-rated**, where the market's re-rating,
+once begun, does not give much back. The 3-month turn-up is the market's statement that the
+re-rating has started; the volume is the money arriving to do it.
+
 ---
 
 ## 8. Proposals (§5.8, drafted — none of these is law)

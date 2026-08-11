@@ -78,6 +78,8 @@ LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by vol
            strength_at=None,           # A2  — gain at which a position has "proven strength"
            strength_trail=None,        #     — the trail it earns by proving it
            forever=False,              # A3  — past the last rung, only the financials can sell it
+           screen=None,                # C1  — 'deep_recovery' replaces M2+M3 with the census screen
+           require_m4=True,            #     — M4 has a lift of 0.76; a variant may decline it
            runner_trail=None,          # M2  — the trail the runner rides on, if not the position's
            runner_no_euphoria=False,   #     — whether the runner is exempt from the 5% tightening
            depth_atr_mult=None,        # D1  — base depth allowance scaled to the name's own ATR
@@ -283,6 +285,26 @@ PRESETS = {
                entry_fraction=1.0, max_names=5, breakeven_on_full_size=False,
                trim_at=(0.50, 1.00), trim_frac=0.25, runner_immunity=True,
                runner_trail=0.35, runner_no_euphoria=True, heat_cap=0.06),
+    # ---- C · the census screen. §9 of the findings: M3's depth clause has a lift of 0.04 against
+    # the population that actually produces 70% moves, M2's off-high clause 0.64, the moving-average
+    # stack 0.97, and M4 0.76 — every gate anti-predictive, in all ten years, on hit rate and on
+    # forward return. The set they admit returned +1.12% per six months, which is what nineteen
+    # runs produced from it. C1 replaces M2 and M3 with the four census conditions, drops M4, and
+    # enters on a new 20-session closing high because a name 50% off its low has no §3.2 base.
+    #
+    # Everything else is A1's machinery, which the drawdown table says should finally fit: on this
+    # population a 20% stop removes 47% of the losers and 20% of the winners, where on §3.2's it
+    # fired on the winners first.
+    "c1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.30, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0 / 3.0, pyramid_spacing=0.05, pyramid_tranches=3,
+               max_names=5, breakeven_on_full_size=False, heat_cap=0.06,
+               trim_at=(0.35, 0.75), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True,
+               strength_at=0.25, strength_trail=0.40,
+               screen="deep_recovery", require_m4=False),
     # ---- A · Zak's compounder reading of the momentum sleeve (2026-08-11): "what if our biggest
     # winners that made it to +100%... we never sold. We just kept them long-term?"
     #
@@ -485,9 +507,17 @@ def rank(frame, t, cols, arrays, valid, hyp):
         # 25% — `volatility_tolerance` floors at it, so a quiet name is judged exactly as §3.2
         # judges it and only a name that actually moves is given room.
         apct = sg.atr_fraction(hi_f, lo_f, cl_f)
-        m2[tk] = sg.trend_template(cl_f, off_high=_tolerance(apct, hyp["off_high_atr_mult"]))
-        bases[tk] = sg.base_scan(hi_f, lo_f, cl_f, min_age=int(hyp["min_base_age"]),
-                                 max_depth=_tolerance(apct, hyp["depth_atr_mult"]))
+        if hyp["screen"] == "deep_recovery":
+            # C1: M2 and M3 both go. The census screen is the whole eligibility test, and it has
+            # no pivot — the entry trigger is a new 20-session closing high (`signals.resumed`),
+            # the same door X1 opened, because a name 50% off its low has no §3.2 base and will
+            # not have one for months.
+            m2[tk] = sg.deep_recovery(hi_f, lo_f, cl_f)["passes"]
+            bases[tk] = dict(valid=False, pivot=None, contraction_low=None, depth=None)
+        else:
+            m2[tk] = sg.trend_template(cl_f, off_high=_tolerance(apct, hyp["off_high_atr_mult"]))
+            bases[tk] = sg.base_scan(hi_f, lo_f, cl_f, min_age=int(hyp["min_base_age"]),
+                                     max_depth=_tolerance(apct, hyp["depth_atr_mult"]))
         quality[tk] = sg.momentum_quality(ac, vol_divisor=hyp["mq_vol_divisor"])
         subs = sg.setup_proximity(hh, ll, cc, vv)
         atr_pct[tk], dryup[tk], near_high[tk] = subs["atr_pct"], subs["dryup"], subs["near_high"]
@@ -525,7 +555,8 @@ def rank(frame, t, cols, arrays, valid, hyp):
         out[tk] = dict(mcn=score, m2=bool(m2[tk]), m4=m4, base=bases[tk])
 
     # L1-M = M2 and M4 pass, ranked by MCN, top 150 (§3.2). An unknown M4 is not a pass.
-    eligible = [tk for tk in out if out[tk]["m2"] and out[tk]["m4"] is True
+    eligible = [tk for tk in out if out[tk]["m2"]
+                and (out[tk]["m4"] is True or not hyp["require_m4"])
                 and out[tk]["mcn"] == out[tk]["mcn"]]
     l1m = sorted(eligible, key=lambda tk: -out[tk]["mcn"])[:150]
     return dict(scored=out, l1m=l1m, evaluated=len(ranked), m4_known=m4_known)
@@ -556,7 +587,7 @@ def simulate(frame, cfg):
                                         blackout_known=0, rank_dates=0, entries=0,
                                         entries_refused_below_70=0, gap_no_fill=0,
                                         pressed=0, press_windows=0, press_expired=0,
-                                        reentries=0, trims=0, heat_refused=0)
+                                        reentries=0, trims=0, heat_refused=0, recoveries=0)
 
     def spread(j, t):
         """§ WO-12: half-spread by ADDV bucket, per side. Wide names cost more to touch."""
@@ -941,6 +972,14 @@ def simulate(frame, cfg):
                 if base["valid"] and fired.get(tk) != round(float(base["pivot"]), 4):
                     if not _blacked_out(frame, conf, tk, day):
                         got = base_trigger(j, t, base, rows)
+                if got is None and hyp["screen"] == "deep_recovery":
+                    rows1 = own_bars(valid, j, t, back=1)
+                    if rows1 is not None and sg.resumed(C[rows1, j], window=20) \
+                            and not _blacked_out(frame, conf, tk, day):
+                        px = O[t, j]
+                        if np.isnan(px):
+                            px = C[rows1[-1], j]
+                        got = dict(kind="recovery", fill=px, pivot=px, confirmed=True)
                 if got is None and _reentry_ready(tk, j, t, valid, C, exited, hyp):
                     # X1. No base, or one that will not trigger for months: a name that corrected
                     # 42% needs that long to build another, and by then the move it was going to
@@ -1012,6 +1051,8 @@ def simulate(frame, cfg):
                 exposure += dollars
                 if kind == "base":
                     fired[tk] = round(float(pivot), 4)
+                elif kind == "recovery":
+                    conf["recoveries"] += 1
                 else:
                     conf["reentries"] += 1
                 conf["entries"] += 1
@@ -1136,8 +1177,11 @@ def conformance(conf, trades, equity, hyp=None):
              coverage=1.0,
              # §3.2 knows one way into a name: a fresh valid base. A run that bought any other way
              # has to say so here, with the count, or a variant could pass as law-v0.
-             reentries=conf.get("reentries", 0),
-             violations=(0 if (hyp or {}).get("reentry_window") else conf.get("reentries", 0))),
+             reentries=conf.get("reentries", 0), recoveries=conf.get("recoveries", 0),
+             screen=(hyp or {}).get("screen") or "M2 trend template + M3 base (§3.2)",
+             m4_required=bool((hyp or {}).get("require_m4", True)),
+             violations=((0 if (hyp or {}).get("reentry_window") else conf.get("reentries", 0))
+                         + (0 if (hyp or {}).get("screen") else conf.get("recoveries", 0)))),
         dict(clause="EOD confirmation, freeze at 50%, late window",
              fn="signals.confirmation_state", coverage=1.0),
         dict(clause="Pyramid +2%/+4%, both limits pivot x 1.05", fn="signals.pyramid_orders",

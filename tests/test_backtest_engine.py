@@ -963,3 +963,67 @@ def test_unknown_m4_coverage_is_reported_not_assumed():
     m4 = next(c for c in table if c["clause"] == "M4 earnings acceleration")
     assert m4["coverage"] == 0.0
     assert trades == [], "M4 was unknown for every name, so L1-M should have been empty"
+
+
+# ------------------------------------------------- C: the census screen replaces M2 and M3
+#
+# docs/backtest-findings-2026-08-10.md §9. Against every liquid US name that gained 70% inside six
+# months, 2016-2026: M3's depth clause has a lift of 0.04 and 99.6% of all winners fail it; M2's
+# off-high clause 0.64; the moving-average stack 0.97; M4 0.76. The four conditions here are the
+# same census read forwards.
+
+def _series(n=300, *, top=100.0, trough=0.40, now=0.60, vol=0.05):
+    """A name that ran to `top`, fell to `trough` of it, and has recovered to `now` of it."""
+    peak = n // 4
+    up = np.linspace(top * 0.5, top, peak)
+    down = np.linspace(top, top * trough, n // 2)
+    back = np.linspace(top * trough, top * now, n - peak - len(down))
+    c = np.concatenate([up, down, back])
+    wobble = 1 + vol * np.sin(np.arange(len(c)) / 3.0)
+    return c * wobble
+
+
+def test_the_census_screen_takes_what_the_law_rejects():
+    c = _series()
+    h, l = c * 1.02, c * 0.98
+    assert sg.trend_template(c) is False, "the law must reject it — that is the whole point"
+    assert sg.base_scan(h, l, c)["valid"] is False
+    got = sg.deep_recovery(h, l, c)
+    assert got["passes"] is True
+    assert got["depth"] < -0.50 and got["off_high"] < -0.25 and got["r3"] > 0.10
+
+
+def test_the_census_screen_rejects_a_calm_name():
+    """Range under 6% has a 0.47% hit rate — you cannot get a 70% move out of a quiet stock.
+
+    Note the fixture: a name that falls 60% in a year is volatile *by construction*, so the only
+    way to be deep and calm at once is to have ground down slowly. That is the population the
+    range clause is there to exclude, and it is a real one — a slow decliner that ticks up 13% is
+    off its high, well below it, and turning, and it still must not qualify.
+    """
+    c = np.concatenate([np.linspace(100.0, 46.0, 300), np.linspace(46.0, 52.0, 63)])
+    got = sg.deep_recovery(c * 1.004, c * 0.996, c)
+    assert got["off_high"] < -0.25 and got["r3"] > 0.10, "the other clauses must be satisfied"
+    assert got["rng"] < 0.12 and got["passes"] is False
+
+
+def test_the_census_screen_rejects_a_name_that_has_not_turned():
+    c = np.concatenate([np.linspace(50.0, 100.0, 80), np.linspace(100.0, 35.0, 220)])
+    c = c * (1 + 0.05 * np.sin(np.arange(len(c)) / 3.0))
+    got = sg.deep_recovery(c * 1.02, c * 0.98, c)
+    assert got["passes"] is False and got["r3"] < 0.10
+
+
+def test_c1_drops_m4_and_declares_the_screen():
+    """M4's lift is 0.76 and 41% of all winners are unprofitable at entry, so C1 declines it — and
+    a conformance table that still claimed M2+M3 while running the census screen would be a lie."""
+    c1 = dict(bt.LAW); c1.update(bt.PRESETS["c1"])
+    assert c1["screen"] == "deep_recovery" and c1["require_m4"] is False
+    assert bt.LAW["screen"] is None and bt.LAW["require_m4"] is True
+    conf = dict(m4_evaluated=1, m4_known=1, blackout_decisions=1, blackout_known=1, entries=1,
+                entries_refused_below_70=0, reentries=0, trims=0, heat_refused=0, recoveries=9)
+    entry = lambda hyp: next(c for c in bt.conformance(conf, [], [], hyp=hyp)
+                             if c["fn"] == "signals.entry_order")
+    assert entry(c1)["screen"] == "deep_recovery" and entry(c1)["violations"] == 0
+    # law-v0 buying through a door §3.2 does not name is a violation
+    assert entry(dict(bt.LAW))["violations"] == 9
