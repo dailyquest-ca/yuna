@@ -614,7 +614,91 @@ whose stops have already ratcheted up — **heat rather than cash becomes the bi
 which is the right way round for a sleeve meant to press on conviction. Refusals are counted in the
 conformance table so a heat-constrained run cannot look like one that found nothing to buy.
 
-*M3 = M2 + a 6% heat cap. Dispatched 2026-08-11.*
+M3's result: CAGR −2.54% against M2's −3.97%, **drawdown −45.5% against −54.8%**, 127 trades with
+**176 entries refused on heat**, exposure 26.4%. The lever is real and 6% is still too loose.
+
+### A correction: expectancy never turned positive
+
+Four write-ups in this session reported that the M-series had turned expectancy positive. **That
+was an artefact of instrumentation added in the same change.** Partial exits made a trade row a
+*slice* rather than a position, and a trim rung can only be hit by a name already up 50% or 100% —
+the slices are winners by construction, and averaging them beside full exits is circular.
+
+| run 36 | n | equal-weighted | avg position | total |
+|---|---:|---:|---:|---:|
+| trim slices | 5 | +69.85% | $3,359 | +$11,706 |
+| **full exits** | **122** | **−0.56%** | $18,183 | **−$32,246** |
+
+Headline `expectancy` +2.208%; **return on the dollar deployed −1.45%.** `summarise` now reports
+`expectancy_full_exits`, `return_on_deployed`, `trim_slices` and `trim_usd`, and a test fails if
+the headline and the full-exit figure ever silently agree on a run that trims.
+
+---
+
+## 7i. A1 — average in, trim early, then never sell (2026-08-11)
+
+Zak: *"what if our biggest winners that made it to +100%... we never sold. We just kept them
+long-term? ... averaged in ... on proven strength we widen the stops ... 25% at 35% and 25% at 75%
+and if it makes it that high... never sell... unless the financials on the profitability of the
+company dies."*
+
+Four changes: three equal tranches 5% apart instead of §3.2's 50/25/25 at +0/+2/+4%; +25% of gain
+earns a 40% trail and exemption from the euphoria cut; rungs at +35%/+75%; and past the last rung
+the position stops being a trade — every §3.2 exit is a *price* exit, so the stop, trail, template,
+score, clocks **and the market gate** all go, leaving only `profitability_dead` (two consecutive
+reported quarters ≤ 0) and delisting.
+
+| | M3 | **A1** | VOO |
+|---|---:|---:|---:|
+| **CAGR** | −2.54% | **+3.24%** | +15.44% |
+| Total return | −20.5% | **+33.0%** | — |
+| Win rate | 39.4% | 37.8% | — |
+| Average win | +17.81% | **+25.75%** | — |
+| Average loss | −7.92% | **−5.51%** | — |
+| **Payoff** | 2.25:1 | **4.67:1** | — |
+| **Avg hold** | 24.5 | **34.8** | — |
+| **Max drawdown** | −45.5% | **−16.5%** | — |
+| **Best trade** | +178.5% | **+524.3%** | — |
+| Return on deployed | −1.45% | **+3.43%** | — |
+
+**The first positive run in the grid**, and it improves on every axis at once — payoff, hold,
+drawdown and tail. The forever hold does what it was designed to do:
+
+| name | rungs | the remainder |
+|---|---|---|
+| **MU** entered 2025-09-08 | +34.9% @ 19 bars, +74.9% @ 43 | **+524.3%, still held at 240 bars** |
+| **AVAV** entered 2018-06-27 | +34.9% @ 38 bars, +74.7% @ 56 | held **1,158 sessions (4.5 years)**, exited `profitability` Dec-2022 at +40.7% |
+
+AVAV is the design working exactly as specified — held four and a half years through everything
+price could say, and released only when the earnings test failed.
+
+### The result is one position, and it is not closed
+
+| A1's +$33,003 | n | USD |
+|---|---:|---:|
+| Realised | 89 | **−$4,999** |
+| **Still open, marked to market (MU)** | **1** | **+$38,002** |
+| Everything except MU | 87 | **−$8,980** |
+
+**Every dollar of A1's profit is one unrealised position.** Strip MU and the run is −$8,980; strip
+only the open mark and the realised book is −$4,999.
+
+Two readings, and both are true. This is what a momentum sleeve is *supposed* to look like — the
+tail is the whole return, and a strategy built to hold one name for 240 sessions and take 524% out
+of it is behaving as designed. But a single open mark carrying the entire result is not evidence of
+repeatability, and the position has not been sold: the +524% is a price on 2026-08-10, not money.
+
+**Before A1 is treated as better than law-v0, the things to settle:**
+
+* Re-run ending 2025-08 and 2024-08. If the result is positive only on windows whose last year
+  contains MU, that is the finding.
+* `template` remains the largest realised loss: 15 exits, −7.72%, **−$11,207**.
+* A4 removed the §3.3 crash protocol from a live position. A1's −16.5% drawdown does **not** test
+  that — the forever holds never met a bear market while open, since AVAV was released in Dec-2022
+  by the earnings rule rather than by 2022's decline. A window with a forever hold running through
+  2008 or 2022 would.
+* 4 trims and 2 forever holds across nine years is a very small sample for the mechanism carrying
+  the whole thesis.
 
 ---
 
