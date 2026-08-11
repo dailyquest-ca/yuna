@@ -1,0 +1,16 @@
+{
+  "extraKnownMarketplaces": {
+    "daily-quest": {
+      "source": {
+        "source": "github",
+        "repo": "dailyquest-ca/claude-standards"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "dq-core@daily-quest": true,
+    "dq-fintech@daily-quest": true,
+    "pyright-lsp@claude-plugins-official": true,
+    "supabase@claude-plugins-official": true
+  }
+}
