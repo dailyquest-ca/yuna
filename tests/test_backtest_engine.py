@@ -1094,3 +1094,38 @@ def test_the_exit_is_the_quarter_not_the_cheapness():
                            hyp=preset("c4")["hyp"])
     exits = next(c for c in table if c["clause"].startswith("Exits"))
     assert exits["unknown_reasons"] == [] and "momentum_died" in exits["variant_reasons"]
+
+
+# --------------------------------------------------------------------- the books have to balance
+
+def test_a_completed_run_leaves_the_books_balanced(confirmed_run):
+    """`simulate` reconciles cash against the trade list before it returns, so reaching this line
+    at all is the assertion. Stated as a test so the property is named somewhere a reader looks."""
+    trades, equity, conf, _ = confirmed_run
+    assert trades, "the fixture took no trades, so the reconciliation proved nothing"
+
+
+def test_the_reconciliation_fires_when_cash_goes_missing():
+    """A guard nobody has watched fail is a guard nobody knows works.
+
+    The failure this catches is silent by construction: a position closed without crediting cash,
+    a trim counted twice, a fill debited at one price and booked at another. None of them disturb
+    the return, the drawdown or the win rate enough for a reader to notice — the money simply
+    stops adding up. One dollar is enough to trip it.
+    """
+    trades = [dict(pnl_usd=250.0), dict(pnl_usd=-100.0)]
+    bt._assert_books_balance(200_150.0, 200_000.0, trades)          # exact: balances
+
+    with pytest.raises(bt.AccountingError) as e:
+        bt._assert_books_balance(200_149.0, 200_000.0, trades)      # one dollar short
+    assert "do not balance" in str(e.value)
+    assert "discrepancy" in str(e.value)
+
+
+def test_the_reconciliation_tolerates_float_noise_but_not_a_cent():
+    """The tolerance exists for accumulated float error over hundreds of round trips, not as a
+    licence to be approximately right about money."""
+    trades = [dict(pnl_usd=1_234.56)]
+    bt._assert_books_balance(201_234.56 + 1e-7, 200_000.0, trades)  # noise: fine
+    with pytest.raises(bt.AccountingError):
+        bt._assert_books_balance(201_234.56 + 0.02, 200_000.0, trades)   # two cents: not fine

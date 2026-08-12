@@ -408,6 +408,30 @@ class DataIntegrityError(RuntimeError):
     plausible number, and a plausible wrong number is the expensive kind."""
 
 
+def _assert_books_balance(cash, start_nav, trades):
+    """Cash must be the starting capital plus every realised trade, once the book is empty.
+
+    `pnl_usd` is `proceeds - invested` and `invested` is exactly what left the account, so this is
+    an identity, not an estimate — the tolerance is float noise across a few hundred round trips.
+    A module-level function rather than an inline block so the guard can be fired on demand: a
+    check nobody has ever seen fail is a check nobody knows works.
+    """
+    realised = sum(tr["pnl_usd"] for tr in trades)
+    expected = start_nav + realised
+    if abs(cash - expected) > max(0.01, abs(expected) * 1e-9):
+        raise AccountingError(
+            f"the books do not balance: ended holding {cash:,.2f} in cash, but start_nav "
+            f"{start_nav:,.2f} plus {len(trades)} realised trades totalling {realised:,.2f} is "
+            f"{expected:,.2f} — a discrepancy of {cash - expected:,.2f}.")
+
+
+class AccountingError(RuntimeError):
+    """The books do not balance. Distinct from DataIntegrityError: the tape can be perfect and the
+    arithmetic on top of it still wrong, and that failure is invisible in every summary statistic —
+    a return, a drawdown and a win rate all read as normal numbers whether or not cash was
+    conserved. Nothing else in the engine checks this, so it is asserted on every run."""
+
+
 # ------------------------------------------------------------------ integrity thresholds
 #
 # 2026-08-12. The first version of this guard halted the run on ANY adjusted daily move beyond
@@ -1403,6 +1427,16 @@ def simulate(frame, cfg):
                 p["last_mark"] = px
             held += p["qty"] * px
         nav = cash + held
+        # NO IMPLICIT LEVERAGE. The momentum sleeve is unlevered — §2.5's facilities are a separate
+        # layer this engine does not model — so cash below zero means the backtest bought with money
+        # it never had, and every later return compounds on the loan. Sizing is a fraction of NAV
+        # while the money available is CASH, so the two can diverge whenever the book is already
+        # full; nothing in the fill path enforces the difference. A negative balance would not show
+        # up in any summary statistic, so it halts here instead.
+        if cash < -0.01:
+            raise AccountingError(
+                f"cash went negative on {day}: {cash:,.2f} with {len(book)} positions held and NAV "
+                f"{nav:,.2f}. The sleeve is unlevered, so this is the simulation borrowing.")
         equity.append((day, nav, held / nav if nav else 0.0, len(book),
                        "ON" if on else "OFF", frame["bench_by_day"].get(day)))
 
@@ -1411,6 +1445,18 @@ def simulate(frame, cfg):
         px = C[n - 1, j]
         cash += close_position(tk, dates[n - 1], px if not np.isnan(px) else book[tk]["last_mark"],
                                "end_of_test", n - 1)
+
+    # THE BOOKS MUST BALANCE. Every position is closed by the loop above, so the account is pure
+    # cash and there is exactly one number it can legally be: the starting capital plus every
+    # realised trade. `pnl_usd` is `proceeds - invested` and `invested` is what left the account, so
+    # the identity is exact rather than approximate — the tolerance below is float noise on ~1e5
+    # dollars across ~400 round trips, nothing more.
+    #
+    # This is the check that would have caught a position closed without crediting cash, a trim
+    # counted twice, or a fill debited at one price and booked at another. None of those change a
+    # single summary statistic in a way a reader could notice: the return, the drawdown and the win
+    # rate all stay plausible while the money quietly stops adding up.
+    _assert_books_balance(cash, cfg["start_nav"], trades)
     return trades, equity, conf
 
 
