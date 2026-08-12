@@ -49,7 +49,9 @@ HYPOTHESIS = os.environ.get("HYPOTHESIS", "").strip()
 # earns the change. The presets stage the way the changes depend on each other: risk widening is
 # pointless while unconfirmed breakouts are still being bought, and pressing is dangerous until
 # expectancy turns.
-LAW = dict(mq_vol_divisor=True,        # S1  — momentum quality divided by volatility
+LAW = dict(park_idle=False,            # K1  — idle capital sits in cash, earning nothing
+           cash_target=None,           # K2  — the cash fraction the park rebalances toward
+           mq_vol_divisor=True,        # S1  — momentum quality divided by volatility
            mcn_drop_atr=False,         # S2  — ATR-tightness inside the ranking
            m4_swing=False,             # S3  — loss-to-profit swing scores no growth rate
            confirm_before_entry=False, # E1  — mechanical fill at the pivot, volume judged after
@@ -377,7 +379,18 @@ PRESETS = {
                trim_at=(0.35, 0.75), trim_frac=0.25, runner_immunity=True,
                runner_trail=0.35, runner_no_euphoria=True,
                strength_at=0.25, strength_trail=0.40, forever=True),
+
 }
+
+# A1, with the capital layer Zak ruled on 2026-08-12: "we only have 10% cash available at any time,
+# rest is in VOO if it isn't being used by momentum." Derived from `a1` rather than copied, so the
+# two cannot drift apart and the only difference is the capital rule under test.
+#
+# Momentum keeps FIRST CALL on the money. The park is where idle capital waits, not a position
+# competing for slots, so an entry that cannot be funded from cash sells the index to fund itself.
+# Without that, the 10% floor would quietly starve the sleeve — every entry guard in the day loop
+# already skips a name it cannot afford — and the run would measure the starvation, not the rule.
+PRESETS["a1v"] = dict(PRESETS["a1"], park_idle=True, cash_target=0.10)
 
 
 def hypothesis():
@@ -408,15 +421,19 @@ class DataIntegrityError(RuntimeError):
     plausible number, and a plausible wrong number is the expensive kind."""
 
 
-def _assert_books_balance(cash, start_nav, trades):
+def _assert_books_balance(cash, start_nav, trades, park_realised=0.0):
     """Cash must be the starting capital plus every realised trade, once the book is empty.
 
     `pnl_usd` is `proceeds - invested` and `invested` is exactly what left the account, so this is
     an identity, not an estimate — the tolerance is float noise across a few hundred round trips.
     A module-level function rather than an inline block so the guard can be fired on demand: a
     check nobody has ever seen fail is a check nobody knows works.
+
+    `park_realised` carries the P&L of the parked index (K1/K2). Those trades are held out of
+    `trades` so they cannot pollute the per-trade statistics, but the cash they moved is real and
+    the identity has to see it — otherwise parking would silently disable this check.
     """
-    realised = sum(tr["pnl_usd"] for tr in trades)
+    realised = sum(tr["pnl_usd"] for tr in trades) + park_realised
     expected = start_nav + realised
     if abs(cash - expected) > max(0.01, abs(expected) * 1e-9):
         raise AccountingError(
@@ -894,6 +911,44 @@ def simulate(frame, cfg):
     gate_weeks, gate_states = _gate_series(frame["spx"])
 
     nav = cash = cfg["start_nav"]
+
+    # ------------------------------------------------------------------ the parked index (K1/K2)
+    # Idle capital rests in the benchmark instead of earning nothing. `book` holds what was paid so
+    # a partial sale can realise its share of the cost; `realised` accumulates the park's P&L and
+    # is carried into the closing reconciliation, because cash raised here is cash the identity has
+    # to account for. Park trades are deliberately kept OUT of `trades` — a rebalance is not a
+    # momentum decision, and folding it in would corrupt every per-trade statistic in the report.
+    park = dict(qty=0.0, book=0.0, realised=0.0, buys=0, sells=0, cost=0.0)
+    park_on = bool(hyp.get("park_idle")) and hyp.get("cash_target") is not None
+    park_bps = cfg["spread_bps"][0] / 10_000.0     # the benchmark is the deep bucket by definition
+
+    def park_price(d):
+        v = frame["bench_by_day"].get(d)
+        return float(v) if v else None
+
+    def park_sell(px, want):
+        """Liquidate enough of the park to raise `want` in cash. Returns the proceeds."""
+        if px is None or want <= 0 or park["qty"] <= 0:
+            return 0.0
+        net = px * (1 - park_bps)
+        qty = min(park["qty"], want / net)
+        proceeds, share = qty * net, qty / park["qty"]
+        park["realised"] += proceeds - park["book"] * share
+        park["cost"] += qty * px * park_bps
+        park["book"] -= park["book"] * share
+        park["qty"] -= qty
+        park["sells"] += 1
+        return proceeds
+
+    def park_buy(px, spend):
+        """Put `spend` of idle cash into the park. Returns the cash consumed."""
+        if px is None or spend <= 0:
+            return 0.0
+        park["qty"] += spend / (px * (1 + park_bps))
+        park["book"] += spend
+        park["cost"] += spend * park_bps / (1 + park_bps)
+        park["buys"] += 1
+        return spend
     book, trades, equity, pending = {}, [], [], {}
     exited = {}                 # ticker -> the session we last let it go (X1's cool-off clock)
     fired, queue, conf = {}, None, dict(m4_evaluated=0, m4_known=0, blackout_decisions=0,
@@ -1207,6 +1262,8 @@ def simulate(frame, cfg):
                       if nb_rows is not None else None)
                 if nb and nb["valid"] and not np.isnan(hi) and hi >= nb["pivot"]:
                     dollars = p["target"] * (3 - p["step"]) * 0.25
+                    if park_on:                     # momentum has first call — sell the park
+                        cash += park_sell(park_price(day), dollars * 1.02 - cash)
                     if cash >= dollars:
                         fillp = max(nb["pivot"], op if not np.isnan(op) else nb["pivot"])
                         paid = dollars * (1 + spread(j, t))
@@ -1253,6 +1310,8 @@ def simulate(frame, cfg):
                     if fill > order["limit"]:
                         continue                          # a gap beyond +5% fills nothing
                     dollars = p["target"] * order["fraction"]
+                    if park_on:                     # momentum has first call — sell the park
+                        cash += park_sell(park_price(day), dollars * 1.02 - cash)
                     if cash < dollars:
                         continue
                     paid = dollars * (1 + spread(j, t))
@@ -1394,6 +1453,8 @@ def simulate(frame, cfg):
                 # whole position at entry, and marks it full so the pyramid does not add again.
                 frac = float(hyp["entry_fraction"])
                 dollars = target * frac
+                if park_on:                         # momentum has first call — sell the park
+                    cash += park_sell(park_price(day), dollars * 1.03 - cash)
                 if cash < dollars * (1 + 0.01):
                     continue
                 paid = dollars * (1 + spread(j, t))
@@ -1426,7 +1487,22 @@ def simulate(frame, cfg):
             else:
                 p["last_mark"] = px
             held += p["qty"] * px
-        nav = cash + held
+        # ---- park whatever momentum is not using (K1/K2)
+        # Rebalanced daily toward the cash target. NAV here already includes the park at today's
+        # mark, so the target moves with the account rather than with the starting capital. Only
+        # the delta is traded, and only the delta is charged — the park is not churned.
+        ppx = park_price(day) if park_on else None
+        if ppx is not None:
+            nav = cash + held + park["qty"] * ppx
+            target_cash = nav * float(hyp["cash_target"])
+            if cash > target_cash:
+                cash -= park_buy(ppx, cash - target_cash)
+            elif cash < target_cash:
+                cash += park_sell(ppx, target_cash - cash)
+            held_total = held + park["qty"] * ppx
+        else:
+            held_total = held
+        nav = cash + held_total
         # NO IMPLICIT LEVERAGE. The momentum sleeve is unlevered — §2.5's facilities are a separate
         # layer this engine does not model — so cash below zero means the backtest bought with money
         # it never had, and every later return compounds on the loan. Sizing is a fraction of NAV
@@ -1456,7 +1532,16 @@ def simulate(frame, cfg):
     # counted twice, or a fill debited at one price and booked at another. None of those change a
     # single summary statistic in a way a reader could notice: the return, the drawdown and the win
     # rate all stay plausible while the money quietly stops adding up.
-    _assert_books_balance(cash, cfg["start_nav"], trades)
+    # The park is liquidated with the book, so the closing account is pure cash and the identity
+    # below stays exact rather than becoming "cash plus something we still hold".
+    if park["qty"] > 0:
+        ppx = park_price(dates[n - 1])
+        if ppx is not None:
+            cash += park_sell(ppx, park["qty"] * ppx * 2)      # oversized ask: sell the lot
+    conf["park"] = dict(realised=park["realised"], cost=park["cost"],
+                        buys=park["buys"], sells=park["sells"])
+
+    _assert_books_balance(cash, cfg["start_nav"], trades, park_realised=park["realised"])
     return trades, equity, conf
 
 

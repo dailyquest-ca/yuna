@@ -1129,3 +1129,33 @@ def test_the_reconciliation_tolerates_float_noise_but_not_a_cent():
     bt._assert_books_balance(201_234.56 + 1e-7, 200_000.0, trades)  # noise: fine
     with pytest.raises(bt.AccountingError):
         bt._assert_books_balance(201_234.56 + 0.02, 200_000.0, trades)   # two cents: not fine
+
+
+# ------------------------------------------------------------------- the parked index (K1 / K2)
+
+def test_parking_idle_capital_keeps_the_books_balanced():
+    """Park trades are held out of `trades` so they cannot pollute per-trade statistics, which
+    means the closing identity would stop seeing a large part of the cash unless it is told about
+    them explicitly. If that wiring is ever dropped, parking silently disables the one check that
+    proves the money adds up — so this asserts the guard survives the feature.
+    """
+    f, _ = frame(hero_volume_multiple=3.0)
+    trades, equity, conf = bt.simulate(f, cfg(hyp={**bt.PRESETS["a1"],
+                                                  "park_idle": True, "cash_target": 0.10}))
+    assert conf["park"]["buys"] > 0, "the park never bought — the fixture proves nothing"
+    assert conf["park"]["cost"] > 0, "the park traded free, so the spread is not being charged"
+
+
+def test_parking_actually_puts_the_idle_money_to_work():
+    """The whole point of K1: a sleeve that deploys ~15% should not leave ~85% earning nothing.
+    Momentum exposure is reported against total NAV, so parking must not inflate it — the park is
+    capital at rest, not a momentum position, and it must never consume a name slot."""
+    f, _ = frame(hero_volume_multiple=3.0)
+    hyp = {**bt.PRESETS["a1"], "park_idle": True, "cash_target": 0.10}
+    parked, _, conf_p = bt.simulate(f, cfg(hyp=hyp))
+    plain, _, conf_c = bt.simulate(f, cfg(hyp={**bt.PRESETS["a1"],
+                                               "park_idle": False, "cash_target": None}))
+    assert conf_c.get("park", {}).get("buys", 0) == 0, "parking leaked into the unparked arm"
+    # the momentum decisions themselves must be unchanged by where the idle cash sits
+    assert conf_p["entries"] == conf_c["entries"], (
+        "parking changed which names were bought — momentum must keep first call on the money")
