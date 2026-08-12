@@ -402,18 +402,98 @@ DELISTED_AFTER = 5      # sessions without a bar before a holding is treated as 
 CALENDAR_HORIZON = 100  # a scheduled report we can believe in — one quarter (check.py allows 110)
 
 
+class DataIntegrityError(RuntimeError):
+    """The tape is wrong. Per .claude/rules/trading-code.md, a guard that detects a bad state
+    halts — it does not warn and continue. A backtest that completes on a corrupt series writes a
+    plausible number, and a plausible wrong number is the expensive kind."""
+
+
+# Calibrated against the tape, not against intuition. RXN genuinely fell 49% in a session on a
+# real corporate event and must pass; equities do occasionally fall 70% on a fraud or a failed
+# trial. The corruption this catches is a different order of magnitude — the worst value in the
+# raw series was a 6,474,999x single-month "return". A guard that fires on real volatility gets
+# switched off within a week, so the threshold sits above anything a market can do.
+MAX_SANE_DAILY_MOVE = 0.85
+
+
+def _assert_price_integrity(arrays, cols, dates):
+    """Fail the run on the two defects that produced four phantom trades across runs 18-44.
+
+    Neither was catchable by the test suite: every fixture in `tests/` is hand-built, and a
+    hand-built fixture never contains a split, a ticker change, or a duplicated series. These
+    assertions run against the real tape, on every run, before a single bar is simulated.
+    """
+    C = arrays["close"]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        step = C[1:] / C[:-1] - 1.0
+    bad = np.argwhere(np.isfinite(step) & (np.abs(step) > MAX_SANE_DAILY_MOVE))
+    if len(bad):
+        worst = sorted(((abs(step[i, j]), cols[j], dates[i + 1], step[i, j]) for i, j in bad),
+                       reverse=True)[:5]
+        raise DataIntegrityError(
+            f"{len(bad)} adjusted daily moves beyond {MAX_SANE_DAILY_MOVE:.0%}. The adjusted "
+            f"series is continuous across corporate actions by construction, so a move this "
+            f"large is a broken adjustment, not a market. Worst: "
+            + "; ".join(f"{tk} {d} {r:+.1%}" for _, tk, d, r in worst))
+
+    # Two tickers with an identical price series are one security counted twice — the book can
+    # hold both, doubling the intended position while max_names, the sleeve cap and the heat cap
+    # each see two names. TPX/SGI (a rename) did exactly this in runs 29/32/34/35/36.
+    tail = C[-260:]
+    seen, dupes = {}, []
+    for j, tk in enumerate(cols):
+        v = tail[:, j]
+        v = v[np.isfinite(v)]
+        if len(v) < 60:
+            continue
+        key = (len(v), round(float(v.sum()), 2))
+        if key in seen:
+            dupes.append((seen[key], tk))
+        else:
+            seen[key] = tk
+    if dupes:
+        raise DataIntegrityError(
+            f"{len(dupes)} ticker pairs share an identical price series — one security, two "
+            f"entries in the universe: " + "; ".join(f"{a}={b}" for a, b in dupes[:8]))
+
+
 # =============================================================================== data
 def load(cur):
     """Every US bar we hold, living and dead. The census is rebuilt from bars, not from `status`."""
     cur.execute("""select p.ticker, p.d, p.open, p.high, p.low, p.close, p.adj_close, p.volume
                      from prices p join universe u on u.ticker = p.ticker
                     where u.kind = 'stock' and u.ticker like '%%.US'
+                      and u.ticker not in (select ticker from universe_excluded)
                     order by p.d""")
     df = pd.DataFrame(cur.fetchall(),
                       columns=["ticker", "d", "open", "high", "low", "close", "adj", "vol"])
     for c in ("open", "high", "low", "close", "adj", "vol"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["adj"] = df["adj"].fillna(df["close"])
+
+    # ---- EVERY RULE READS THE ADJUSTED SERIES. This is the 2026-08-11 correction.
+    #
+    # `prices.close` is the raw print. `prices.volume` is already split-adjusted. Running decisions
+    # on raw closes meant every split arrived as a crash: CMG's 50:1 booked -98%, TSLA's 3:1 -67%,
+    # a 4:1 -76%. In a system whose widest stop is 30% those are impossible numbers, and four of
+    # them sat in the recorded runs. §3.2's own §2.6 already flags splits as a market-mechanics
+    # concern that changes share counts without a trade; the engine simply never honoured it.
+    #
+    # The whole OHLC bar is rescaled by the day's own adj/close factor, so the bar keeps its
+    # internal geometry (the high is still above the close) while the series across a split is
+    # continuous. Two consequences, both deliberate:
+    #
+    #   * P&L is now TOTAL return, not price-only, because `adj_close` carries dividends too. That
+    #     makes the VOO comparison honest — VOO was always benchmarked on total return, so the
+    #     sleeve was previously handicapped by its own dividend yield. `stats.dividend_bps` is
+    #     retired; the number is in the P&L.
+    #   * `raw_close` is kept for the ONE place the actual print is the right number: §3.2's $5
+    #     price floor. A stock printing $3 today is a penny stock whatever its adjusted history.
+    factor = (df["adj"] / df["close"]).replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    df["raw_close"] = df["close"]
+    for c in ("open", "high", "low"):
+        df[c] = df[c] * factor
+    df["close"] = df["adj"]
 
     # Scatter into the date x ticker grid directly rather than pivoting six times. Retaining the
     # delisted census roughly doubles the ticker count, and six pivots of a ten-million-row frame
@@ -422,11 +502,13 @@ def load(cur):
     dcode, dates = pd.factorize(df["d"], sort=True)
     shape = (len(dates), len(cols))
     arrays = {}
-    for c in ("open", "high", "low", "close", "adj", "vol"):
+    for c in ("open", "high", "low", "close", "adj", "vol", "raw_close"):
         a = np.full(shape, np.nan)
         a[dcode, tcode] = df[c].to_numpy(dtype=float)
         arrays[c] = a
     del df
+
+    _assert_price_integrity(arrays, cols, dates)
 
     cur.execute("select ticker, industry from universe where kind='stock'")
     industry = {t: i for t, i in cur.fetchall()}
@@ -532,8 +614,16 @@ def rank(frame, t, cols, arrays, valid, hyp):
     close_t = C[t]
     live = ~np.isnan(close_t)
     nbars = (~np.isnan(C[max(0, t - 251):t + 1])).sum(axis=0)
+    # ADDV on the ADJUSTED close. `volume` is already split-adjusted, so adj_close x volume is the
+    # true historical dollar turnover — the split factors cancel. raw_close x volume does NOT
+    # cancel: it inflates a name's past liquidity by its own FUTURE split factor, which is
+    # look-ahead. CMG's pre-split ADDV read $79bn. 660 names were affected and 170,220 name-days
+    # entered L0 on the strength of it alone.
     addv = np.nanmedian((C[max(0, t - 49):t + 1] * V[max(0, t - 49):t + 1]), axis=0)
-    eff = live & (nbars >= 210) & (close_t >= 5) & (addv >= 10_000_000)
+    # The $5 floor is the one clause that wants the actual print: a stock trading at $3 today is a
+    # penny stock whatever its adjusted history says.
+    raw_t = arrays["raw_close"][t]
+    eff = live & (nbars >= 210) & (raw_t >= 5) & (addv >= 10_000_000)
     idx = np.where(eff)[0]
     if len(idx) < 30:
         return None
@@ -697,12 +787,10 @@ def simulate(frame, cfg):
         # series implies is measured and reported (`stats.dividend_bps`) rather than either banked
         # silently or forgotten — VOO's benchmark is total return, so this is the size of the
         # handicap we are giving it.
-        adj_t, px_t = A[t, j], C[t, j]
-        if np.isfinite(adj_t) and np.isfinite(px_t):
-            total = sum(d * (adj_t / a) for d, _, a in p["lots"])
-            dividend = share * (total - sum(d * (px_t / e) for d, e, _ in p["lots"]))
-        else:
-            dividend = 0.0
+        # Dividends are inside the adjusted series now, so P&L is total return and there is no
+        # separate line to add. Kept at zero rather than deleted so the column and the trade
+        # schema stay stable across the correction.
+        dividend = 0.0
         invested, gross_invested = p["invested"] * share, p["gross_invested"] * share
         proceeds = qty * price
         gross = qty * (gross_price if gross_price is not None else price)

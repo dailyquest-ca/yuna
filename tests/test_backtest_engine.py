@@ -115,9 +115,13 @@ def frame(hero_volume_multiple=3.0, hero_after=None, names=NAMES, days=DAYS, bre
             l[breakout] = pivot * 0.99
         O[tk], H[tk], L[tk], C[tk], A[tk], V[tk] = o, h, l, c, c, vol
 
+    # `close` is the ADJUSTED series the rules read; `raw_close` is the actual print, which only
+    # §3.2's $5 price floor uses. No fixture here contains a split, so the two are identical —
+    # and that identity is exactly why the synthetic suite could never have caught the 2026-08-11
+    # split bug. `tests/test_price_integrity.py` covers that class against the real tape.
     arrays = {k: np.column_stack([d[tk] for tk in cols])
               for k, d in (("open", O), ("high", H), ("low", L),
-                           ("close", C), ("adj", A), ("vol", V))}
+                           ("close", C), ("adj", A), ("vol", V), ("raw_close", C))}
     spx = pd.Series(rising(days, start=4000.0, daily=0.0006), index=dates)
 
     # every name reports quarterly, always accelerating, always long before the window
