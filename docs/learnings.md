@@ -162,3 +162,24 @@ is `roadmap-2026-07-31.md`.
     good ending for a momentum position. Masking those bars to NaN — which is already what "no
     bar" means to the engine — cut the traded-name casualty list from 16 to 5. Before excluding
     a thing, check whether the corruption is the whole thing or one row of it.
+34. **The run that "improved suspiciously" was the clean one; the old run was contaminated.**
+    Run 46 came back +5.65% where run 18 said -4.55%, with drawdown halved, immediately after a
+    change to data handling — which `.claude/rules/trading-code.md` says to treat as a look-ahead
+    bug until proven otherwise. The obvious innocent story was wrong: splits were NOT arriving as
+    crashes in the trade list, and the proof is that both runs have **zero** trades losing more
+    than 12% and an identical worst trade of -9.87%. An 8% stop cannot produce a -50% trade, so
+    if the defect had been reaching the book that way it would have been visible there. It wasn't.
+    The real mechanism ran the other way. ADDV was computed as `raw_close x volume` while volume
+    was already split-adjusted, so a name's *past* liquidity was inflated by its own *future*
+    split factor — CMG's pre-split ADDV read $79bn, 660 names were affected, and 170,220 name-days
+    entered L0 on the strength of it alone. **Run 18 had the look-ahead. Run 46 removed it**, and
+    the names it stopped admitting were junk that lost money: the 147 trades that vanished lost
+    $7,857 between them, and they are ~1.8x more likely than the retained trades to sit on a name
+    that later split 2:1 or more (8.8% against 4.9%).
+    Two lessons. **A result improving after a data fix is not by itself evidence of a new bug — it
+    is equally consistent with removing an old one**, and the way to tell them apart is to name the
+    mechanism and find it in the data, not to argue from the direction of the number. And the
+    reason this could only be *partly* settled is that the law surface changed between the two runs
+    while `law_stamp` stayed at 2026-08-09; with the stamp broken, no two runs can be cleanly
+    differenced, so a residual will always remain unattributable. Fix the stamp before trusting
+    any delta.
