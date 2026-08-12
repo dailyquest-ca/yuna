@@ -432,11 +432,18 @@ def entry_order(pivot, contraction_low, *, limit_over=0.02, max_stop=0.08):
 
 
 def initial_stop(entry, contraction_low, *, max_stop=0.08):
-    """Higher of the base's final-contraction low or entry - 8%. Never wider than 8% (§3.2)."""
-    floor = entry * (1 - max_stop)
+    """Higher of the base's final-contraction low or entry - 8%. Never wider than 8% (§3.2).
+
+    `max_stop=None` means no flat cap, matching `volatility_stop`. With no cap the contraction low
+    is the only stop there is, and without one there is no stop at all — None, so the caller
+    declines rather than being handed a level. Previously this raised a TypeError, which is how
+    A2's first live run died: an arm carrying no percentage cap reached this through a door its
+    preset was supposed to have closed.
+    """
+    floor = None if max_stop is None else entry * (1 - max_stop)
     if contraction_low is None or not np.isfinite(contraction_low):
         return floor
-    return max(float(contraction_low), floor)
+    return float(contraction_low) if floor is None else max(float(contraction_low), floor)
 
 
 def volatility_stop(entry, atr_now, *, mult=5.0, max_stop=0.20):

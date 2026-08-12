@@ -1475,7 +1475,13 @@ def simulate(frame, cfg):
                 # not trigger today must not shut the second, which is what an if/elif on the base
                 # would do — the recovering name has an intact old pivot overhead for months.
                 got = None
-                if base["valid"] and fired.get(tk) != round(float(base["pivot"]), 4):
+                # A2 enters on new highs ONLY (E3: "breakout to a new 252-day high close, plus the
+                # M2 trend template"). The base door is not merely unused by it — leaving it open
+                # meant A2's first live run entered on pivots and died in `initial_stop`, which has
+                # no contraction low to work with when the arm carries no flat stop cap. The
+                # preset's comment claimed the doors were shut; nothing was actually shutting them.
+                if not hyp["entry_new_high"] \
+                        and base["valid"] and fired.get(tk) != round(float(base["pivot"]), 4):
                     if not _blacked_out(frame, conf, tk, day):
                         got = base_trigger(j, t, base, rows)
                 if got is None and hyp["screen"] == "deep_recovery":

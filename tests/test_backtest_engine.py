@@ -21,7 +21,8 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-import backtest as bt                                                    # noqa: E402
+import backtest as bt
+import signals as sg_mod                                                    # noqa: E402
 import signals as sg                                                     # noqa: E402
 
 DAYS = 460
@@ -1305,3 +1306,25 @@ def test_an_absent_knob_and_a_disabled_knob_hash_differently():
 def test_the_a1_and_a2_surfaces_do_not_collide():
     assert bt.param_digest(bt.PRESETS["a1"], {}) != bt.param_digest(bt.PRESETS["a2"], {})
     assert bt.param_digest(bt.PRESETS["a1"], {}) != bt.param_digest(bt.PRESETS["a1v"], {})
+
+
+def test_a2_never_enters_through_the_base_door():
+    """A2's first live run died here. The preset's comment said the base and recovery doors were
+    shut; nothing was actually shutting them, so A2 entered on a pivot and then crashed in
+    initial_stop, which has no flat cap to fall back on when the arm carries none.
+
+    Asserted on entry_kind rather than on "it did not crash", because not crashing is what it did
+    for every fixture right up until it met real data."""
+    f, _ = frame(hero_volume_multiple=3.0)
+    a2 = {**bt.PRESETS["a2"], "park_idle": False, "cash_target": None}
+    trades, _, _ = bt.simulate(f, cfg(hyp=a2, max_names=30))
+    kinds = {t["entry_kind"] for t in trades}
+    assert kinds <= {"new_high"}, f"A2 entered through a door it should not have: {kinds}"
+
+
+def test_initial_stop_without_a_cap_returns_the_contraction_low_or_nothing():
+    """max_stop=None means no flat cap, matching volatility_stop. With no cap and no contraction
+    low there is no stop at all, and None lets the caller decline rather than invent one."""
+    assert sg_mod.initial_stop(100.0, 92.0, max_stop=None) == 92.0
+    assert sg_mod.initial_stop(100.0, None, max_stop=None) is None
+    assert sg_mod.initial_stop(100.0, None, max_stop=0.08) == pytest.approx(92.0)
