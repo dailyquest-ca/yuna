@@ -84,6 +84,27 @@ def test_two_tickers_sharing_a_series_halt_the_run():
     assert "identical price series" in str(e.value)
 
 
+def test_a_coincidence_of_count_and_sum_does_not_halt_the_run():
+    """The other half of the duplicate test, and the one that cost a run.
+
+    The cheap key is (bar count, sum-to-the-cent), and on the real tape it collides: across 3,343
+    names it flagged 8 groups where an exact fingerprint found 5. B.US/FRME.US and BHF.US/CHMG.US
+    were each condemned as "one security, two entries" while differing on every one of their 176
+    shared bars. This guard HALTS, so a coincidence takes down the whole instrument — the pair
+    must be confirmed element-wise. Same count, same sum, different series: not a duplicate.
+    """
+    arrays, cols, dates = _tape(names=("B.US", "FRME.US"))
+    twin = arrays["close"][:, 0].copy()
+    twin[-6], twin[-5] = twin[-5], twin[-6]      # inside the 260-bar window the guard inspects
+    arrays["close"][:, 1] = twin
+    arrays["raw_close"][:, 1] = arrays["raw_close"][:, 0]
+
+    a, b = arrays["close"][:, 0], arrays["close"][:, 1]
+    assert round(float(a[-260:].sum()), 2) == round(float(b[-260:].sum()), 2)   # key collides
+    assert not np.array_equal(a, b)                                            # series do not
+    assert bt.screen_tape(arrays, cols, dates) == {}
+
+
 # ------------------------------------------------------------ quarantine, not halt
 def test_an_unadjusted_split_in_one_name_is_quarantined_not_halted():
     """The CMG shape — a discrete 50:1 collapse in an otherwise continuous series. One name's

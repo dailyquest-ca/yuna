@@ -544,18 +544,31 @@ def _assert_price_integrity(arrays, cols, dates):
     # Two tickers with an identical price series are one security counted twice — the book can
     # hold both, doubling the intended position while max_names, the sleeve cap and the heat cap
     # each see two names. TPX/SGI (a rename) did exactly this in runs 29/32/34/35/36.
+    #
+    # (bar count, sum-to-the-cent) is a CHEAP FILTER, never the test. Used as the test it is a
+    # birthday problem: across 3,343 names sharing a bar count it collided on 8 groups where only
+    # 5 were real. B/FRME and BHF/CHMG were each condemned as "one security" while differing on
+    # every one of their 176 shared bars. Because this guard HALTS, a coincidence takes the whole
+    # instrument down — so every candidate is confirmed element-wise before anything is raised.
+    # Tightening the test does not soften the guard: the five genuine duplicates still halt it.
     tail = C[-260:]
-    seen, dupes = {}, []
+    buckets, dupes = {}, []
     for j, tk in enumerate(cols):
         v = tail[:, j]
-        v = v[np.isfinite(v)]
-        if len(v) < 60:
+        finite = np.isfinite(v)
+        if int(finite.sum()) < 60:
             continue
-        key = (len(v), round(float(v.sum()), 2))
-        if key in seen:
-            dupes.append((seen[key], tk))
+        key = (int(finite.sum()), round(float(v[finite].sum()), 2))
+        twin = None
+        for tk_seen, j_seen in buckets.get(key, ()):
+            w = tail[:, j_seen]
+            if np.array_equal(np.isfinite(w), finite) and np.array_equal(w[finite], v[finite]):
+                twin = tk_seen
+                break
+        if twin is not None:
+            dupes.append((twin, tk))
         else:
-            seen[key] = tk
+            buckets.setdefault(key, []).append((tk, j))
     if dupes:
         raise DataIntegrityError(
             f"{len(dupes)} ticker pairs share an identical price series — one security, two "
