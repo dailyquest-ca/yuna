@@ -187,6 +187,7 @@ def cfg(**over):
                 min_mcn=70.0, mcn_exit=55.0, cushion=1.08, max_stop=hyp["max_stop"],
                 limit_over=0.02, pyramid_ceiling=1.05, confirm_limit=1.05,
                 spread_bps=(5.0, 15.0), addv_break=50_000_000.0,
+                spread_curve=bt.SPREAD_CURVE,
                 hair_trigger_while_pending=False,      # ruled 2026-08-10: wait out the window
                 hyp=hyp)
     base.update(over)

@@ -407,6 +407,21 @@ def hypothesis():
                 None if low == "none" else float(raw) if "." in raw else int(raw))
     return h
 
+# Transaction-cost curve v1 (E-series §2.2). Half-spread in bps PER SIDE, selected by point-in-time
+# ADDV; descending, first match wins, and an unknown ADDV falls through to the worst bucket. The
+# ANCHORS ARE FIXED BY THE WORK ORDER — bucket edges may be refined with sources, the anchors may
+# not. Replaces a flat 5/15bps split that traced to nothing.
+SPREAD_CURVE = ((50_000_000.0,  5.0),      # large cap — Nasdaq S&P 500 spread data
+                (10_000_000.0, 10.0),
+                ( 2_000_000.0, 18.0),      # small cap — Frazzini-Israel-Moskowitz realised
+                (   500_000.0, 35.0),
+                (         0.0, 60.0))      # micro cap — 50+bps
+
+# Park true-up cadence and band (E-series §2.1). Weekly check; trade only when cash has drifted
+# more than 5 percentage points off the target. Both are the work order's numbers, not defaults.
+PARK_CHECK_EVERY = 5     # sessions — "check weekly"
+PARK_BAND = 0.05         # "trade the park only when cash deviates > 5 pts from the 10% target"
+
 WARMUP = 280            # >= 266, the deepest window any rule reads (see tests/test_tail_equivalence)
 TAIL = 280
 T10 = 10                # §3.2: every MCN ranking window ends 10 trading days ago
@@ -958,10 +973,25 @@ def simulate(frame, cfg):
                                         reentries=0, trims=0, heat_refused=0, recoveries=0)
 
     def spread(j, t):
-        """§ WO-12: half-spread by ADDV bucket, per side. Wide names cost more to touch."""
+        """Half-spread per side, by point-in-time ADDV bucket (E-series §2.2).
+
+        Replaces the flat 5/15bps two-bucket split, which traced to no source. The curve's anchors
+        are fixed by the work order: ~1-5bps large-cap (Nasdaq S&P 500 spread data), ~18bps
+        small-cap (Frazzini-Israel-Moskowitz realised), 50+bps micro-cap. Retail price improvement
+        — roughly 47% of the quoted spread in S&P names — is deliberately NOT modelled, so the
+        curve is conservative by construction rather than optimistic.
+
+        ADDV is computed on the ADJUSTED close, so the split factors cancel; raw x volume would
+        inflate a name's past liquidity by its own future split factor and quietly move names into
+        a cheaper bucket than they traded in. That is the defect that cost runs 18-44.
+        """
         advv = np.nanmedian(C[max(0, t - 49):t + 1, j] * V[max(0, t - 49):t + 1, j])
-        bps = cfg["spread_bps"][0] if advv >= cfg["addv_break"] else cfg["spread_bps"][1]
-        return bps / 10_000.0
+        if not np.isfinite(advv):
+            advv = 0.0                      # unknown liquidity is charged as the worst bucket
+        for floor, bps in cfg["spread_curve"]:
+            if advv >= floor:
+                return bps / 10_000.0
+        return cfg["spread_curve"][-1][1] / 10_000.0
 
     def _blacked_out(frame, conf, tk, day):
         """§3.3: the earnings wall cancels a resting order. Counted per door tried, because the
@@ -1262,8 +1292,6 @@ def simulate(frame, cfg):
                       if nb_rows is not None else None)
                 if nb and nb["valid"] and not np.isnan(hi) and hi >= nb["pivot"]:
                     dollars = p["target"] * (3 - p["step"]) * 0.25
-                    if park_on:                     # momentum has first call — sell the park
-                        cash += park_sell(park_price(day), dollars * 1.02 - cash)
                     if cash >= dollars:
                         fillp = max(nb["pivot"], op if not np.isnan(op) else nb["pivot"])
                         paid = dollars * (1 + spread(j, t))
@@ -1310,8 +1338,6 @@ def simulate(frame, cfg):
                     if fill > order["limit"]:
                         continue                          # a gap beyond +5% fills nothing
                     dollars = p["target"] * order["fraction"]
-                    if park_on:                     # momentum has first call — sell the park
-                        cash += park_sell(park_price(day), dollars * 1.02 - cash)
                     if cash < dollars:
                         continue
                     paid = dollars * (1 + spread(j, t))
@@ -1453,8 +1479,6 @@ def simulate(frame, cfg):
                 # whole position at entry, and marks it full so the pyramid does not add again.
                 frac = float(hyp["entry_fraction"])
                 dollars = target * frac
-                if park_on:                         # momentum has first call — sell the park
-                    cash += park_sell(park_price(day), dollars * 1.03 - cash)
                 if cash < dollars * (1 + 0.01):
                     continue
                 paid = dollars * (1 + spread(j, t))
@@ -1502,10 +1526,18 @@ def simulate(frame, cfg):
                 park["mark"] = ppx
                 nav = cash + held + park["qty"] * ppx
                 target_cash = nav * float(hyp["cash_target"])
-                if cash > target_cash:
-                    cash -= park_buy(ppx, cash - target_cash)
-                elif cash < target_cash:
-                    cash += park_sell(ppx, target_cash - cash)
+                # BANDED TRUE-UP (§2.1). Checked weekly, and traded only when cash has drifted more
+                # than the band off target. The first cut rebalanced daily to the exact target,
+                # which is arithmetically tidy and operationally impossible: Zak places every order
+                # by hand, and daily would have been ~2,300 of them. Bands also beat calendar and
+                # daily rebalancing in the literature the work order cites, so this is cheaper AND
+                # better. Only the drift beyond the band is traded, never the whole position.
+                drift = (cash - target_cash) / nav if nav else 0.0
+                if t % PARK_CHECK_EVERY == 0 and abs(drift) > PARK_BAND:
+                    if cash > target_cash:
+                        cash -= park_buy(ppx, cash - target_cash)
+                    else:
+                        cash += park_sell(ppx, target_cash - cash)
             held_total = held + park["qty"] * park["mark"]
         else:
             held_total = held
@@ -1785,6 +1817,7 @@ def main():
                            max_stop=hyp["max_stop"], limit_over=0.02,
                            pyramid_ceiling=1.05, confirm_limit=1.05, hyp=hyp,
                            spread_bps=(5.0, 15.0), addv_break=50_000_000.0,
+                           spread_curve=SPREAD_CURVE,
                            # Ruled 2026-08-10: wait out the window. The rejected reading stays
                            # runnable so the ruling can be priced against its alternative.
                            hair_trigger_while_pending=HAIR_TRIGGER_PENDING)
