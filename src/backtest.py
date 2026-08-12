@@ -29,7 +29,7 @@ of a past statement, so a restatement is seen earlier than the market saw it; in
 today's; and the L0 census is reconstructed from bars rather than from a stored point-in-time
 listing, so a name whose bars we never pulled is still absent.
 """
-import os, sys, json, bisect, datetime as dt
+import os, sys, json, bisect, hashlib, datetime as dt
 import numpy as np
 import pandas as pd
 from db import connect, config, config_digest, dry, Heartbeat
@@ -448,6 +448,24 @@ SPREAD_CURVE = ((50_000_000.0,  5.0),      # large cap — Nasdaq S&P 500 spread
                 ( 2_000_000.0, 18.0),      # small cap — Frazzini-Israel-Moskowitz realised
                 (   500_000.0, 35.0),
                 (         0.0, 60.0))      # micro cap — 50+bps
+
+def param_digest(hyp, extras):
+    """A stable hash of everything that decides behaviour (P1, E-series §3).
+
+    `law_stamp` is hand-set and does not move when the law does: runs 18 and 46 both carry
+    2026-08-09 while their hyp surfaces differ by 34 keys, so no two runs in the ledger can be
+    mechanically differenced and every cross-run delta carries an unattributable residual. This
+    digest is derived from the RESOLVED surface instead, so it cannot fail to move.
+
+    Sorted keys and a fixed separator, so the hash depends on the values and not on dict ordering
+    or on Python's repr. Missing keys and None-valued keys are deliberately distinct: an absent
+    knob and a knob explicitly switched off are different rule surfaces.
+    """
+    payload = {"hyp": {k: hyp[k] for k in sorted(hyp)},
+               "extras": {k: extras[k] for k in sorted(extras)}}
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
 
 # Park true-up cadence and band (E-series §2.1). Weekly check; trade only when cash has drifted
 # more than 5 percentage points off the target. Both are the work order's numbers, not defaults.
@@ -1941,14 +1959,24 @@ def main():
                 params = dict(variant=VARIANT, law_stamp=LAW_STAMP, currency="USD",
                               config_stamp=config_stamp,
                               benchmark=BENCH, start_nav=START_NAV, warmup=WARMUP,
+                              # The curve that ACTUALLY priced this run (§2.2). Recording the
+                              # retired flat deep/thin pair here would have made the stored params
+                              # describe a costing the engine no longer uses — the exact class of
+                              # drift P1 exists to end.
                               costs=dict(commission_per_trade=0.0, fx_fee_per_side=0.0,
-                                         half_spread_bps=dict(deep=cfg["spread_bps"][0],
-                                                              thin=cfg["spread_bps"][1]),
-                                         addv_break=cfg["addv_break"]),
+                                         half_spread_bps_by_addv=[
+                                             dict(addv_floor=f, bps=b)
+                                             for f, b in cfg["spread_curve"]]),
                               max_names=cfg["max_names"], sleeve_cap=cfg["sleeve_cap"],
                               min_mcn=cfg["min_mcn"],
                               hair_trigger_while_pending=HAIR_TRIGGER_PENDING,
-                              hypothesis=HYPOTHESIS or "law", hyp=cfg["hyp"])
+                              hypothesis=HYPOTHESIS or "law", hyp=cfg["hyp"],
+                              park=dict(check_every=PARK_CHECK_EVERY, band=PARK_BAND))
+                # P1: two runs are the same experiment iff this matches. Derived last, from the
+                # assembled params, so nothing decision-bearing can be added above without moving
+                # it — which is precisely what law_stamp failed to do.
+                params["param_hash"] = param_digest(
+                    cfg["hyp"], {k: v for k, v in params.items() if k != "hyp"})
                 with conn.cursor() as cur:
                     cur.execute("""insert into backtest_runs(label,params,start_date,end_date,
                           trading_days,start_nav,end_nav,total_return,cagr,max_drawdown,max_dd_date,

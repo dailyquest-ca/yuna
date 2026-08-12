@@ -1276,3 +1276,32 @@ def test_the_chandelier_only_engages_after_one_r():
             assert t["exit_price"] <= t["initial_stop"] * 1.02, (
                 f"{t['ticker']} trailed before reaching 1R: exit {t['exit_price']:.2f} vs "
                 f"initial stop {t['initial_stop']:.2f}")
+
+
+# ------------------------------------------------------------------------ P1: param diffability
+
+def test_the_param_hash_moves_when_any_rule_moves():
+    """P1. law_stamp is hand-set and did not move when the law did — runs 18 and 46 both carry
+    2026-08-09 while their hyp surfaces differ by 34 keys, so no two runs in the ledger can be
+    mechanically differenced. This digest is derived from the resolved surface, so it cannot fail
+    to move."""
+    base = dict(bt.LAW)
+    extras = dict(benchmark="VOO.US", start_nav=200_000.0)
+    h0 = bt.param_digest(base, extras)
+    assert h0 == bt.param_digest(dict(base), dict(extras)), "same surface must hash the same"
+    for k, v in (("max_stop", 0.09), ("risk_per_trade", 0.005), ("entry_new_high", 252)):
+        assert bt.param_digest({**base, k: v}, extras) != h0, f"changing {k} did not move the hash"
+    assert bt.param_digest(base, {**extras, "start_nav": 100_000.0}) != h0
+
+
+def test_an_absent_knob_and_a_disabled_knob_hash_differently():
+    """Not pedantry: 'this arm never had a trim ladder' and 'this arm has one, switched off' are
+    different rule surfaces, and conflating them is how a diff reports no change."""
+    a = bt.param_digest({"trail": 0.1}, {})
+    b = bt.param_digest({"trail": 0.1, "trim_at": None}, {})
+    assert a != b
+
+
+def test_the_a1_and_a2_surfaces_do_not_collide():
+    assert bt.param_digest(bt.PRESETS["a1"], {}) != bt.param_digest(bt.PRESETS["a2"], {})
+    assert bt.param_digest(bt.PRESETS["a1"], {}) != bt.param_digest(bt.PRESETS["a1v"], {})
