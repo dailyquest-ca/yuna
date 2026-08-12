@@ -1262,7 +1262,13 @@ def simulate(frame, cfg):
             if not on:
                 pending[tk] = "gate_off"                 # §3.3 crash protocol, acted next open
                 continue
-            if state["exit_next_open"]:
+            if state["exit_next_open"] and not hyp["entry_new_high"]:
+                # The hair-trigger exits on a close below the PIVOT. A2 has no pivot — its entry is
+                # a new high and its "pivot" is recorded as the fill, so this fires on any close
+                # below the entry price. That is a breakeven stop on day one, sitting underneath a
+                # 3xATR stop and an 8xATR trail and firing long before either. It closed 412 of run
+                # 54's 1,352 positions and is why the average hold was 18.9 days for an arm whose
+                # whole thesis is holding. A2 has no volume-confirmation step to enforce.
                 pending[tk] = "unconfirmed"              # the hair-trigger — the only volume exit
                 continue
 

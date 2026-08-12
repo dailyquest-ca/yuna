@@ -1328,3 +1328,14 @@ def test_initial_stop_without_a_cap_returns_the_contraction_low_or_nothing():
     assert sg_mod.initial_stop(100.0, 92.0, max_stop=None) == 92.0
     assert sg_mod.initial_stop(100.0, None, max_stop=None) is None
     assert sg_mod.initial_stop(100.0, None, max_stop=0.08) == pytest.approx(92.0)
+
+
+def test_a2_never_exits_on_the_volume_hair_trigger():
+    """A2 has no volume-confirmation step — its entry IS a new high. The §3.2 hair-trigger exits on
+    a close below the pivot, and A2 records its fill as the pivot, so leaving it live gave A2a
+    breakeven stop on day one underneath a 3xATR stop and an 8xATR trail. It closed 412 of run 54's
+    1,352 positions."""
+    f, _ = frame(hero_volume_multiple=3.0)
+    a2 = {**bt.PRESETS["a2"], "park_idle": False, "cash_target": None}
+    trades, _, _ = bt.simulate(f, cfg(hyp=a2, max_names=30))
+    assert "unconfirmed" not in {t["exit_reason"] for t in trades}
