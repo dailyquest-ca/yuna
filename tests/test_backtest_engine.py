@@ -1159,3 +1159,25 @@ def test_parking_actually_puts_the_idle_money_to_work():
     # the momentum decisions themselves must be unchanged by where the idle cash sits
     assert conf_p["entries"] == conf_c["entries"], (
         "parking changed which names were bought — momentum must keep first call on the money")
+
+
+def test_a_dark_benchmark_day_does_not_crater_the_account():
+    """The regression for run 52's fake -91.5% drawdown.
+
+    Market holidays sit in the date axis because other names print on them, and the benchmark does
+    not. The park cannot be TRADED on such a day, but it is still OWNED — carrying it at zero read
+    as the account collapsing to its cash balance and recovering the next session. The equity curve
+    said -91.5% on a run that nearly quadrupled. Nothing about the P&L was wrong; the mark was.
+    """
+    f, _ = frame(hero_volume_multiple=3.0)
+    dark = list(f["bench_by_day"])[bt.WARMUP + 20]      # inside the simulated window, not warmup
+    f = dict(f, bench_by_day={d: v for d, v in f["bench_by_day"].items() if d != dark})
+
+    hyp = {**bt.PRESETS["a1"], "park_idle": True, "cash_target": 0.10}
+    _, equity, _ = bt.simulate(f, cfg(hyp=hyp))
+
+    navs = {row[0]: row[1] for row in equity}
+    assert dark in navs, "the fixture never reached the dark day"
+    ordered = [row[1] for row in equity]
+    worst = min(b / a for a, b in zip(ordered, ordered[1:]) if a > 0)
+    assert worst > 0.5, f"NAV more than halved in one session — the park is being dropped: {worst}"

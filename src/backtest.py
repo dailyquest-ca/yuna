@@ -918,7 +918,7 @@ def simulate(frame, cfg):
     # is carried into the closing reconciliation, because cash raised here is cash the identity has
     # to account for. Park trades are deliberately kept OUT of `trades` — a rebalance is not a
     # momentum decision, and folding it in would corrupt every per-trade statistic in the report.
-    park = dict(qty=0.0, book=0.0, realised=0.0, buys=0, sells=0, cost=0.0)
+    park = dict(qty=0.0, book=0.0, realised=0.0, buys=0, sells=0, cost=0.0, mark=0.0)
     park_on = bool(hyp.get("park_idle")) and hyp.get("cash_target") is not None
     park_bps = cfg["spread_bps"][0] / 10_000.0     # the benchmark is the deep bucket by definition
 
@@ -1491,15 +1491,22 @@ def simulate(frame, cfg):
         # Rebalanced daily toward the cash target. NAV here already includes the park at today's
         # mark, so the target moves with the account rather than with the starting capital. Only
         # the delta is traded, and only the delta is charged — the park is not churned.
-        ppx = park_price(day) if park_on else None
-        if ppx is not None:
-            nav = cash + held + park["qty"] * ppx
-            target_cash = nav * float(hyp["cash_target"])
-            if cash > target_cash:
-                cash -= park_buy(ppx, cash - target_cash)
-            elif cash < target_cash:
-                cash += park_sell(ppx, target_cash - cash)
-            held_total = held + park["qty"] * ppx
+        # The benchmark does not print on every date the tape carries — market holidays are in the
+        # date axis because other names have bars there. On those days the park cannot be TRADED,
+        # but it is still OWNED, so it is carried at its last mark exactly as a momentum position
+        # is. The first cut dropped it from NAV entirely on those dates, which read as the account
+        # falling to its cash balance and back: a fake -91.5% drawdown on a run that made money.
+        if park_on:
+            ppx = park_price(day)
+            if ppx is not None:
+                park["mark"] = ppx
+                nav = cash + held + park["qty"] * ppx
+                target_cash = nav * float(hyp["cash_target"])
+                if cash > target_cash:
+                    cash -= park_buy(ppx, cash - target_cash)
+                elif cash < target_cash:
+                    cash += park_sell(ppx, target_cash - cash)
+            held_total = held + park["qty"] * park["mark"]
         else:
             held_total = held
         nav = cash + held_total
@@ -1535,8 +1542,8 @@ def simulate(frame, cfg):
     # The park is liquidated with the book, so the closing account is pure cash and the identity
     # below stays exact rather than becoming "cash plus something we still hold".
     if park["qty"] > 0:
-        ppx = park_price(dates[n - 1])
-        if ppx is not None:
+        ppx = park_price(dates[n - 1]) or park["mark"]         # last mark if the final day is dark
+        if ppx:
             cash += park_sell(ppx, park["qty"] * ppx * 2)      # oversized ask: sell the lot
     conf["park"] = dict(realised=park["realised"], cost=park["cost"],
                         buys=park["buys"], sells=park["sells"])
