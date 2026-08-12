@@ -16,7 +16,7 @@ Nothing joins the pipeline schedule without a plan edit. If a change would alter
 
 Declared in [`.claude/settings.json`](.claude/settings.json), and they are split by what they are *about*:
 
-- **Craft** — `dq-core` and `dq-fintech` from [`dailyquest-ca/claude-standards`](https://github.com/dailyquest-ca/claude-standards): safety hooks, operating doctrine, the no-assumed-values discipline.
+- **Craft** — `dq-core` and `dq-money-code` from [`dailyquest-ca/claude-standards`](https://github.com/dailyquest-ca/claude-standards): safety hooks, operating doctrine, the no-assumed-values discipline.
 - **Markets** — `market-domain` and `momentum-strategy` from [`dailyquest-ca/dq-investing`](https://github.com/dailyquest-ca/dq-investing).
 
 `market-domain` is the one to know about for correctness: `account-types` (why RRSP and TFSA treat US dividends differently), `investment-tax-canada` (capital gain versus business income, superficial loss, ACB in CAD), `investment-tax-us` (the cross-border traps), and **`market-mechanics`** (settlement, corporate actions, look-ahead bias). How those bind to this repo's plan is in [`.claude/rules/investment-tax.md`](.claude/rules/investment-tax.md).

@@ -15,7 +15,7 @@
   },
   "enabledPlugins": {
     "dq-core@daily-quest": true,
-    "dq-fintech@daily-quest": true,
+    "dq-money-code@daily-quest": true,
     "market-domain@dq-investing": true,
     "momentum-strategy@dq-investing": true,
     "pyright-lsp@claude-plugins-official": true,
