@@ -10,6 +10,7 @@
   "enabledPlugins": {
     "dq-core@daily-quest": true,
     "dq-fintech@daily-quest": true,
+    "dq-invest@daily-quest": true,
     "pyright-lsp@claude-plugins-official": true,
     "supabase@claude-plugins-official": true
   }

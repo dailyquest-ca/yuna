@@ -14,11 +14,15 @@ Nothing joins the pipeline schedule without a plan edit. If a change would alter
 
 ## Shared doctrine comes from a plugin
 
-`dq-core` and `dq-fintech` from [`dailyquest-ca/claude-standards`](https://github.com/dailyquest-ca/claude-standards), declared in [`.claude/settings.json`](.claude/settings.json), carry the safety hooks, operating doctrine, and the no-assumed-values discipline.
+`dq-core`, `dq-fintech`, and `dq-invest` from [`dailyquest-ca/claude-standards`](https://github.com/dailyquest-ca/claude-standards), declared in [`.claude/settings.json`](.claude/settings.json), carry the safety hooks, operating doctrine, the no-assumed-values discipline, and the equities and investment-tax domain.
+
+`dq-invest` is the one to know about here: `account-types` (why RRSP and TFSA treat US dividends differently), `investment-tax-canada` (capital gain versus business income, superficial loss, ACB in CAD), `investment-tax-us` (the cross-border traps), and `market-mechanics` (settlement, corporate actions, look-ahead bias). How those bind to this repo's plan is in [`.claude/rules/investment-tax.md`](.claude/rules/investment-tax.md).
 
 `dq-stack` and `dq-web` are deliberately **not** enabled — they are TypeScript and frontend. `dq-core` carries nothing language-specific, so it applies here unchanged.
 
 **The no-assumed-values doctrine matters more here than anywhere else in the estate.** An invented constant in a scoring threshold or a position-sizing rule does not throw. It produces a plausible number, places a real order, and costs real money. Every constant needs a source in the plan.
+
+`dq-finance` is the constants library and has a Python reader (`from dq_finance import resolve`). It is **not yet a dependency of this repo** — every entry in it is unverified, so it cannot return a value, and a private-repo git dependency would need a token in CI where all thirteen workflows currently run a plain `pip install -r requirements.txt`. Add it once entries are verified.
 
 Destructive database and git operations are blocked by a hook; `git push`, migrations, and direct SQL prompt with an impact summary. That is intended.
 
