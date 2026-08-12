@@ -1064,3 +1064,59 @@ def split_ratio(payload):
         return value or None
     except (TypeError, ValueError, ZeroDivisionError):
         return None
+
+
+# ===================================================================== A2 primitives (E-series E3)
+# The trend-holding-at-breadth arm. These live here rather than in `backtest.py` because
+# `signals.py` is the law expressed as code and production will need them too if A2 ever clears
+# its bars. Every constant below is the work order's; none is a default.
+
+def new_high_breakout(close, *, lookback=252):
+    """True when the latest close is the highest close of the trailing `lookback` sessions.
+
+    A2's entry (E3 center spec), replacing §3.2's pivot-and-base machinery. The trade-off is
+    deliberate: a base breakout tries to buy the moment a trend starts, a new-high breakout simply
+    buys names already making highs. The second is cruder and much broader, and breadth is the
+    whole point of A2 — the sensitivity ladder swaps 252 for the all-time high.
+
+    Compares against the PRIOR window, so the current bar clearing its own high is not circular.
+    """
+    c = np.asarray(close, dtype=float)
+    if len(c) < lookback + 1:
+        return False
+    window = c[-(lookback + 1):-1]
+    if not np.isfinite(c[-1]) or not np.isfinite(window).any():
+        return False
+    return bool(c[-1] > np.nanmax(window))
+
+
+def chandelier_stop(highest_close, atr_value, *, multiple=8.0):
+    """Highest close since entry, less `multiple` ATRs. Ratchets up only — the caller enforces it.
+
+    A2's runner exit. 8x is very wide on purpose: the arm's thesis is that the tail pays for
+    everything, and the way a trend-follower kills its own tail is by exiting on noise. §7f and M1
+    both said the same thing from the other direction — the mechanics were never the problem, the
+    holding was.
+    """
+    if not np.isfinite(highest_close) or not np.isfinite(atr_value) or atr_value <= 0:
+        return None
+    return float(highest_close - multiple * atr_value)
+
+
+def risk_size(*, nav, entry, stop, risk_frac=0.005):
+    """Shares such that a stop-out costs `risk_frac` of NAV. Never conviction-weighted.
+
+    This is the M1 lesson made structural. M1 had a positive per-trade expectancy of +2.21% and
+    still lost 8.07% with a -39.89% drawdown, because size was set by conviction rather than by
+    what the stop would cost. Here the stop distance sets the size, so a wide stop buys less and a
+    tight stop buys more, and every position risks the same fraction of the account.
+
+    Returns 0.0 when the stop is not below the entry — a non-positive risk distance has no size,
+    and inventing one is how a divide-by-zero becomes a position.
+    """
+    if not all(np.isfinite(x) for x in (nav, entry, stop)):
+        return 0.0
+    risk_per_share = entry - stop
+    if risk_per_share <= 0 or nav <= 0 or entry <= 0:
+        return 0.0
+    return float(nav * risk_frac / risk_per_share)

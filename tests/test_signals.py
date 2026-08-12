@@ -909,3 +909,45 @@ def test_an_exit_with_no_last_print_falls_back_to_market_and_says_so():
 
     blind = arming.exit_order({}, "AAA.US", inside=0.003, urgent=False)
     assert blind["order_type"] == "market" and "no last print" in blind["note"]
+
+
+# ==================================================================== A2 primitives (E-series E3)
+
+def test_a_new_high_breakout_needs_to_clear_the_prior_window_not_itself():
+    """The bar being tested must not be inside the window it is compared against, or every bar is
+    trivially its own high and the signal fires constantly."""
+    rising = list(range(100, 100 + 260))
+    assert s.new_high_breakout(rising, lookback=252) is True
+    flat = [100.0] * 260
+    assert s.new_high_breakout(flat, lookback=252) is False       # equal is not higher
+    assert s.new_high_breakout(list(range(100)), lookback=252) is False   # too short to judge
+
+
+def test_a_pullback_from_the_high_is_not_a_breakout():
+    series = list(range(100, 100 + 260)) + [200.0]
+    assert s.new_high_breakout(series, lookback=252) is False
+
+
+def test_the_chandelier_hangs_the_stop_below_the_highest_close():
+    assert s.chandelier_stop(100.0, 2.0, multiple=8.0) == 84.0
+    assert s.chandelier_stop(100.0, 2.0, multiple=5.0) == 90.0
+    assert s.chandelier_stop(100.0, 0.0) is None                  # no ATR, no stop
+    assert s.chandelier_stop(float("nan"), 2.0) is None
+
+
+def test_risk_size_makes_every_position_cost_the_same_on_a_stop_out():
+    """The M1 lesson, structural: size follows the stop distance, so a wide stop buys less. M1 had
+    positive expectancy and still lost, because conviction set the size and the stop set the loss."""
+    tight = s.risk_size(nav=200_000.0, entry=50.0, stop=48.0)     # $2 at risk
+    wide = s.risk_size(nav=200_000.0, entry=50.0, stop=40.0)      # $10 at risk
+    assert tight * 2.0 == pytest.approx(1_000.0)                   # 0.5% of NAV
+    assert wide * 10.0 == pytest.approx(1_000.0)                   # same dollars at risk
+    assert tight > wide
+
+
+def test_risk_size_refuses_a_stop_that_is_not_below_the_entry():
+    """A non-positive risk distance has no size. Inventing one is how a divide-by-zero becomes a
+    position."""
+    assert s.risk_size(nav=200_000.0, entry=50.0, stop=50.0) == 0.0
+    assert s.risk_size(nav=200_000.0, entry=50.0, stop=55.0) == 0.0
+    assert s.risk_size(nav=0.0, entry=50.0, stop=45.0) == 0.0
