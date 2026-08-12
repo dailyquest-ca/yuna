@@ -18,6 +18,13 @@ Nothing joins the pipeline schedule without a plan edit. If a change would alter
 
 `dq-invest` is the one to know about here: `account-types` (why RRSP and TFSA treat US dividends differently), `investment-tax-canada` (capital gain versus business income, superficial loss, ACB in CAD), `investment-tax-us` (the cross-border traps), and `market-mechanics` (settlement, corporate actions, look-ahead bias). How those bind to this repo's plan is in [`.claude/rules/investment-tax.md`](.claude/rules/investment-tax.md).
 
+`dq-strategy` is the newest and the one to reach for during research: `momentum-doctrine` holds
+the sleeve's own strategy — sprint versus marathon, the measured lift of every selection gate, and
+the risk-layer scoping — and `backtest-protocol` holds the rules that decide when a number may be
+called a finding. **The strategy lives there, not in `src/signals.py`.** This repo implements it;
+it does not own it. A rule change that is not Yuna-specific belongs upstream first, with the app
+keeping only its own flavour — §3.2's exact thresholds, the engine, and the run history.
+
 `dq-stack` and `dq-web` are deliberately **not** enabled — they are TypeScript and frontend. `dq-core` carries nothing language-specific, so it applies here unchanged.
 
 **The no-assumed-values doctrine matters more here than anywhere else in the estate.** An invented constant in a scoring threshold or a position-sizing rule does not throw. It produces a plausible number, places a real order, and costs real money. Every constant needs a source in the plan.
