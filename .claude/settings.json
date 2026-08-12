@@ -5,13 +5,19 @@
         "source": "github",
         "repo": "dailyquest-ca/claude-standards"
       }
+    },
+    "dq-investing": {
+      "source": {
+        "source": "github",
+        "repo": "dailyquest-ca/dq-investing"
+      }
     }
   },
   "enabledPlugins": {
     "dq-core@daily-quest": true,
     "dq-fintech@daily-quest": true,
-    "dq-invest@daily-quest": true,
-    "dq-strategy@daily-quest": true,
+    "market-domain@dq-investing": true,
+    "momentum-strategy@dq-investing": true,
     "pyright-lsp@claude-plugins-official": true,
     "supabase@claude-plugins-official": true
   }
