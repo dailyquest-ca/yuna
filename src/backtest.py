@@ -399,6 +399,31 @@ PRESETS = {
 # already skips a name it cannot afford — and the run would measure the starvation, not the rule.
 PRESETS["a1v"] = dict(PRESETS["a1"], park_idle=True, cash_target=0.10)
 
+# A2 — trend-holding at breadth (E-series E3 centre spec). NOT derived from a1: the two share only
+# the chassis, and inheriting a1's base-entry, conviction-sizing and trim ladder then switching each
+# one off would leave the differences implicit. Every line here is the work order's.
+#
+# The shape of the bet is different from everything run so far. A1 held five names chosen by
+# conviction; A2 wants thirty chosen by price alone, each risking the same half-percent, held on a
+# very wide trail until the trend actually breaks. The external evidence is the argument: <7% of
+# trades produce the cumulative profits in a 66,000-trade sample, so the binding constraint is
+# breadth and holding, not selectivity. 96 trades was never going to converge on anything.
+PRESETS["a2"] = dict(
+    park_idle=True, cash_target=0.10,           # §2.1 chassis, standard on every E-run
+    entry_new_high=252, atr_window=20,          # A2a/A2b — 252-day high, ATR(20) stop
+    atr_stop_mult=3.0, max_stop=None,           # 3xATR, and NO flat cap — the ATR is the stop
+    risk_per_trade=0.005,                       # A2c — 0.5% of equity per trade, never conviction
+    chandelier_mult=8.0, chandelier_atr_window=22,   # A2d/A2e — the runner's only exit
+    max_names=30, sleeve_cap_pct=1.0,           # breadth is the thesis; the park holds the rest
+    heat_cap=None,                              # derived heat = N x r; the DD bar governs, per M1
+    # everything §3.2 does that A2 does not: no pyramiding, no trims, no press, no euphoria rung,
+    # no MCN floor (risk_per_trade ignores the score), no M4 earnings gate.
+    entry_fraction=1.0, pyramid_tranches=1, pyramid_spacing=None,
+    trim_at=None, trim_frac=None, forever=True,
+    breakeven=False, breakeven_r=None, breakeven_on_full_size=False, euphoria=False,
+    require_m4=False, m4_swing=False, press_on_next_base=False,
+    mq_vol_divisor=False, mcn_drop_atr=False, confirm_before_entry=False)
+
 
 def hypothesis():
     """The law, with a preset laid over it, with individual env overrides laid over that."""
@@ -1422,6 +1447,27 @@ def simulate(frame, cfg):
                         if np.isnan(px):
                             px = C[rows1[-1], j]
                         got = dict(kind="recovery", fill=px, pivot=px, confirmed=True)
+                if got is None and hyp["entry_new_high"]:
+                    # A2a (E3). A fourth door, and the only one A2 opens — its preset switches the
+                    # base and recovery doors off. A close at a new N-session high, gated by M2 for
+                    # quality, and nothing else: no base, no pivot, no volume multiple, and M4
+                    # deliberately dropped because the earnings gate starves breadth and breadth is
+                    # the entire thesis. Every extra condition here is a name not bought.
+                    #
+                    # Same timing discipline as the other doors: judged on bars through LAST
+                    # NIGHT'S close, filled at this open. Reading today's bar to decide today's
+                    # entry is the look-ahead this engine has already paid for once.
+                    nh_rows = own_bars(valid, j, t, back=1)
+                    if nh_rows is not None \
+                            and sg.new_high_breakout(C[nh_rows, j],
+                                                     lookback=int(hyp["entry_new_high"])) \
+                            and sg.trend_template(C[nh_rows, j]) \
+                            and not _blacked_out(frame, conf, tk, day):
+                        px = O[t, j]
+                        if np.isnan(px):
+                            px = C[nh_rows[-1], j]
+                        # the fill is the pivot: there is no base, so any ladder measures off entry
+                        got = dict(kind="new_high", fill=px, pivot=px, confirmed=True)
                 if got is None and _reentry_ready(tk, j, t, valid, C, exited, hyp):
                     # X1. No base, or one that will not trigger for months: a name that corrected
                     # 42% needs that long to build another, and by then the move it was going to
@@ -1455,6 +1501,8 @@ def simulate(frame, cfg):
                                  window=int(hyp["atr_window"] or 14))
                     stop = sg.volatility_stop(fill, float(a14[-1]) if len(a14) else None,
                                               mult=hyp["atr_stop_mult"], max_stop=hyp["max_stop"])
+                    if stop is None:
+                        continue      # no ATR and no flat cap (A2): no stop, so no position
                 else:
                     stop = sg.initial_stop(fill, None if kind == "reentry"
                                            else base["contraction_low"], max_stop=hyp["max_stop"])

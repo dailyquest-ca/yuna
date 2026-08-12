@@ -455,9 +455,14 @@ def volatility_stop(entry, atr_now, *, mult=5.0, max_stop=0.20):
     stop tight, and tightness is the thing under test. `max_stop` is the widest permitted, not a
     target — a quiet name still gets a close stop because its ATR is small.
     """
+    # `max_stop=None` means there is NO flat cap and the ATR alone sets the stop — A2's spec
+    # (E-series E3) is "3xATR(20) from entry", with no percentage floor anywhere in it. Without an
+    # ATR there is then no stop that can be formed at all, and None is the honest answer: the
+    # caller must decline the entry rather than be handed an invented level.
     if atr_now is None or not np.isfinite(atr_now) or atr_now <= 0:
-        return entry * (1 - max_stop)
-    return max(float(entry) - mult * float(atr_now), float(entry) * (1 - max_stop))
+        return None if max_stop is None else entry * (1 - max_stop)
+    floor = float(entry) - mult * float(atr_now)
+    return floor if max_stop is None else max(floor, float(entry) * (1 - max_stop))
 
 
 def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_step=0,

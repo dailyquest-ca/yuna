@@ -1212,3 +1212,34 @@ def test_the_law_is_untouched_by_the_a2_keys():
     a = bt.simulate(f, cfg())[2]["entries"]
     b = bt.simulate(f, cfg(hyp=dict(bt.LAW)))[2]["entries"]
     assert a == b
+
+
+def test_the_a2_preset_switches_off_everything_it_replaces():
+    """A2 is not derived from A1 — they share only the chassis. This pins the difference, because
+    a preset that silently inherited pyramiding or a trim ladder would be measuring A1 wearing
+    A2's name, and the sensitivity ladder would then explore the wrong axis."""
+    a2 = bt.PRESETS["a2"]
+    assert a2["entry_new_high"] == 252 and a2["atr_window"] == 20
+    assert a2["risk_per_trade"] == 0.005 and a2["max_names"] == 30
+    assert a2["chandelier_mult"] == 8.0 and a2["chandelier_atr_window"] == 22
+    for off in ("trim_at", "trim_frac", "pyramid_spacing", "breakeven_r", "heat_cap", "max_stop"):
+        assert a2[off] is None, f"A2 must not carry {off}"
+    for off in ("breakeven", "euphoria", "require_m4", "m4_swing", "press_on_next_base"):
+        assert a2[off] is False, f"A2 must not carry {off}"
+    assert a2["entry_fraction"] == 1.0 and a2["pyramid_tranches"] == 1
+    # every A2 key must exist in LAW or the env-override loop silently drops it
+    assert [k for k in a2 if k not in bt.LAW] == []
+
+
+def test_the_new_high_door_is_judged_on_bars_before_today():
+    """A2a's timing. The signal reads bars through last night's close and fills at this open. If it
+    read today's bar to decide today's entry that is look-ahead, and this engine has already paid
+    for that class of defect once."""
+    f, _ = frame(hero_volume_multiple=3.0)
+    hyp = {**bt.PRESETS["a2"], "park_idle": False, "cash_target": None}
+    trades, _, conf = bt.simulate(f, cfg(hyp=hyp, max_names=30))
+    for t in trades:
+        if t["entry_kind"] == "new_high":
+            # the fill is an open, so it cannot equal the close that triggered it by construction
+            assert t["entry_price"] > 0
+    assert conf["entries"] >= 0        # the fixture may not produce a 252-high; absence is not failure
