@@ -1243,3 +1243,36 @@ def test_the_new_high_door_is_judged_on_bars_before_today():
             # the fill is an open, so it cannot equal the close that triggered it by construction
             assert t["entry_price"] > 0
     assert conf["entries"] >= 0        # the fixture may not produce a 252-high; absence is not failure
+
+
+def test_the_chandelier_replaces_the_ladder_rather_than_stacking_on_it():
+    """A2d. The Chandelier is the runner's ONLY exit. If the breakeven rung, the 10% trail or the
+    euphoria tightening also fired, A2 would be run 33 by another route — all three runners there
+    stopped out 2-4 sessions after a tightening, at +91.7%, +102.7% and +9.9%.
+
+    Proven by construction rather than by outcome: with a chandelier multiple set, an arm carrying
+    an aggressive trail and a breakeven rung must behave identically to one carrying neither,
+    because the ladder is never consulted.
+    """
+    f, _ = frame(hero_volume_multiple=3.0)
+    a2 = {**bt.PRESETS["a2"], "park_idle": False, "cash_target": None}
+    quiet = bt.simulate(f, cfg(hyp=a2, max_names=30))[0]
+    noisy = bt.simulate(f, cfg(hyp={**a2, "trail": 0.02, "trail_from": 0.01,
+                                    "breakeven": True, "euphoria": True}, max_names=30))[0]
+    assert [(t["ticker"], t["exit_date"], t["exit_price"]) for t in quiet] == \
+           [(t["ticker"], t["exit_date"], t["exit_price"]) for t in noisy], \
+        "ladder settings changed an A2 run — the Chandelier is not replacing the ladder"
+
+
+def test_the_chandelier_only_engages_after_one_r():
+    """Below +1R the initial 3xATR stop must stand untouched. A trail that engages immediately is
+    a tight stop wearing a trend-follower's name, and tightness is what §7f and M1 both blamed."""
+    f, _ = frame(hero_volume_multiple=3.0)
+    a2 = {**bt.PRESETS["a2"], "park_idle": False, "cash_target": None}
+    trades, _, _ = bt.simulate(f, cfg(hyp=a2, max_names=30))
+    for t in trades:
+        if t["exit_reason"] == "stop" and t["max_favorable"] < 1.0:
+            # never reached +1R, so it must have exited on its ORIGINAL stop, not a trailed one
+            assert t["exit_price"] <= t["initial_stop"] * 1.02, (
+                f"{t['ticker']} trailed before reaching 1R: exit {t['exit_price']:.2f} vs "
+                f"initial stop {t['initial_stop']:.2f}")

@@ -1382,8 +1382,12 @@ def simulate(frame, cfg):
                     p["qty_peak"] = max(p["qty_peak"], p["qty"])
                     p["step"] = order["step"]
 
-            # ---- the stop ladder
-            out = sg.ratchet_stop(closes=C[max(0, p["entry_idx"]):t + 1, j][
+            # ---- the stop ladder. A2 REPLACES it wholesale (A2d): the Chandelier is the only exit
+            # the runner has, so the breakeven rung, the 10% trail and the euphoria tightening must
+            # not also fire. Stacking them would be the run-33 failure by another route — all three
+            # runners stopped out within 2-4 sessions of a tightening, at +91.7%, +102.7% and +9.9%.
+            out = {"stop": None} if hyp["chandelier_mult"] else sg.ratchet_stop(
+                                  closes=C[max(0, p["entry_idx"]):t + 1, j][
                                       ~np.isnan(C[max(0, p["entry_idx"]):t + 1, j])],
                                   avg_cost=p["avg_cost"], current_stop=p["stop"],
                                   highest_close=p["hi_close"], pyramid_step=p["step"],
@@ -1402,6 +1406,23 @@ def simulate(frame, cfg):
                                       riding and hyp["runner_no_euphoria"]),
                                   breakeven_on_full_size=hyp["breakeven_on_full_size"],
                                   breakeven_giveback=hyp["breakeven_giveback"])
+            if hyp["chandelier_mult"]:
+                # A2d/A2e — two states and one switch. Below +1R the initial 3xATR stop stands
+                # untouched; at or above it the Chandelier takes over and thereafter only ratchets
+                # up. No profit target on the runner: the tail is the entire thesis, and <7% of
+                # trades produce the cumulative profits in the 66,000-trade sample this arm is
+                # built on. Cutting a winner at a target is how that family stops working.
+                r_dist = p["avg_cost"] - p["init_stop"]
+                ch_rows = own_bars(valid, j, t)
+                if r_dist > 0 and np.isfinite(cl) and cl >= p["avg_cost"] + r_dist \
+                        and ch_rows is not None:
+                    a_ch = sg.atr(H[ch_rows, j], L[ch_rows, j], C[ch_rows, j],
+                                  window=int(hyp["chandelier_atr_window"] or 22))
+                    if len(a_ch):
+                        cs = sg.chandelier_stop(p["hi_close"], float(a_ch[-1]),
+                                                multiple=float(hyp["chandelier_mult"]))
+                        if cs is not None and cs > p["stop"]:
+                            out = {"stop": cs}          # ratchets up only, never down
             if out["stop"] is not None:
                 p["stop"] = out["stop"]
             p["last_mark"] = cl
