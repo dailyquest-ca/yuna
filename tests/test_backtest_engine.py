@@ -1182,3 +1182,33 @@ def test_a_dark_benchmark_day_does_not_crater_the_account():
     ordered = [row[1] for row in equity]
     worst = min(b / a for a, b in zip(ordered, ordered[1:]) if a > 0)
     assert worst > 0.5, f"NAV more than halved in one session — the park is being dropped: {worst}"
+
+
+# ------------------------------------------------------------------ A2 sizing (E-series E3, A2c)
+
+def test_risk_sizing_ignores_conviction_and_follows_the_stop():
+    """A2c. Under the law, size scales with MCN — conviction picks the size while the stop picks
+    the loss, which is exactly how M1 posted +2.21% expectancy and a -39.89% drawdown. Under A2
+    every position risks the same fraction of NAV, so two names with different stop distances take
+    different share counts and identical dollar risk.
+    """
+    f, _ = frame(hero_volume_multiple=3.0)
+    hyp = {**bt.PRESETS["a1"], "risk_per_trade": 0.005, "atr_window": 20, "atr_stop_mult": 3.0}
+    trades, _, conf = bt.simulate(f, cfg(hyp=hyp))
+    assert conf["entries"] >= 1, "the fixture took no A2-sized entry — it proves nothing"
+    for t in trades:
+        risked = (t["entry_price"] - t["initial_stop"]) * t["qty"]
+        assert risked > 0
+        # 0.5% of a $200k book, with room for the tranche fractions the A1 chassis still applies
+        assert risked <= 0.005 * 200_000.0 * 1.05, f"{t['ticker']} risked {risked:,.0f}"
+
+
+def test_the_law_is_untouched_by_the_a2_keys():
+    """Every A2 key is absent under law-v0, and adding them to LAW must not have moved anything."""
+    for k in ("entry_new_high", "atr_window", "risk_per_trade",
+              "chandelier_mult", "chandelier_atr_window"):
+        assert bt.LAW[k] is None, f"{k} must default to absent"
+    f, _ = frame(hero_volume_multiple=3.0)
+    a = bt.simulate(f, cfg())[2]["entries"]
+    b = bt.simulate(f, cfg(hyp=dict(bt.LAW)))[2]["entries"]
+    assert a == b

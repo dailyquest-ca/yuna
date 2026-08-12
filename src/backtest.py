@@ -51,6 +51,13 @@ HYPOTHESIS = os.environ.get("HYPOTHESIS", "").strip()
 # expectancy turns.
 LAW = dict(park_idle=False,            # K1  — idle capital sits in cash, earning nothing
            cash_target=None,           # K2  — the cash fraction the park rebalances toward
+           # A2 (E-series E3). All None/absent under the law — §3.2 sizes on conviction, stops on
+           # the contraction low, and enters on a pivot. A2 replaces all three and says so.
+           entry_new_high=None,        # A2a — enter on an N-session high instead of a base pivot
+           atr_window=None,            # A2b — ATR window for the initial stop (A2: 20, law: 14)
+           risk_per_trade=None,        # A2c — fixed fraction of NAV risked to the stop
+           chandelier_mult=None,       # A2d — trail at highest-close less N ATRs
+           chandelier_atr_window=None, # A2e — ATR window for that trail (A2: 22)
            mq_vol_divisor=True,        # S1  — momentum quality divided by volatility
            mcn_drop_atr=False,         # S2  — ATR-tightness inside the ranking
            m4_swing=False,             # S3  — loss-to-profit swing scores no growth rate
@@ -1444,18 +1451,29 @@ def simulate(frame, cfg):
                 # before any multi-month move can happen. A re-entry has no base and therefore no
                 # contraction low, so it takes the volatility stop or a flat cap.
                 if hyp["atr_stop_mult"]:
-                    a14 = sg.atr(H[rows, j], L[rows, j], C[rows, j])
+                    a14 = sg.atr(H[rows, j], L[rows, j], C[rows, j],
+                                 window=int(hyp["atr_window"] or 14))
                     stop = sg.volatility_stop(fill, float(a14[-1]) if len(a14) else None,
                                               mult=hyp["atr_stop_mult"], max_stop=hyp["max_stop"])
                 else:
                     stop = sg.initial_stop(fill, None if kind == "reentry"
                                            else base["contraction_low"], max_stop=hyp["max_stop"])
                 dist = max((fill - stop) / fill, 1e-4)
-                budgets = ((hyp["budget_lo"], hyp["budget_hi"])
-                           if hyp["budget_lo"] and hyp["budget_hi"] else (0.007, 0.009))
-                size = sg.momentum_size(nav=nav, mcn_score=row["mcn"], stop_distance=dist,
-                                        budgets=budgets,
-                                        band=(0.08, hyp["band_hi"] or 0.12))
+                if hyp["risk_per_trade"]:
+                    # A2c: the stop sets the size, never conviction. M1 is the reason this is
+                    # structural rather than advisory — positive expectancy of +2.21% and still a
+                    # -39.89% drawdown, because conviction chose the size while the stop chose the
+                    # loss. A wide stop now buys fewer shares and every position risks the same
+                    # dollars. Note this deliberately ignores `mcn` — A2 does not rank on MCN.
+                    shares = sg.risk_size(nav=nav, entry=fill, stop=stop,
+                                          risk_frac=float(hyp["risk_per_trade"]))
+                    size = {"size_pct": shares * fill / nav} if shares > 0 else None
+                else:
+                    budgets = ((hyp["budget_lo"], hyp["budget_hi"])
+                               if hyp["budget_lo"] and hyp["budget_hi"] else (0.007, 0.009))
+                    size = sg.momentum_size(nav=nav, mcn_score=row["mcn"], stop_distance=dist,
+                                            budgets=budgets,
+                                            band=(0.08, hyp["band_hi"] or 0.12))
                 if not size:
                     continue
                 target = size["size_pct"] * nav
