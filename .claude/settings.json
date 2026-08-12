@@ -3,7 +3,7 @@
     "daily-quest": {
       "source": {
         "source": "github",
-        "repo": "dailyquest-ca/claude-standards"
+        "repo": "dailyquest-ca/dq-ai-coding-standards"
       }
     },
     "dq-investing": {
