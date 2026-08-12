@@ -953,7 +953,18 @@ def rank(frame, t, cols, arrays, valid, hyp):
     eligible = [tk for tk in out if out[tk]["m2"]
                 and (out[tk]["m4"] is True or not hyp["require_m4"])
                 and out[tk]["mcn"] == out[tk]["mcn"]]
-    l1m = sorted(eligible, key=lambda tk: -out[tk]["mcn"])[:150]
+    # §3.2's L1-M is the top 150 by MCN. A2 must NOT inherit that truncation: MCN rewards explosive
+    # short-horizon momentum, mega-cap trend leaders compound steadily and score badly on it, and
+    # run 55 proved the consequence — NVDA held 3 days at a loss, and AVGO, LLY, GOOGL, MSFT, AMZN
+    # and NFLX never entered once in nine years while each made repeated 252-day highs. The arm was
+    # A2 at the door and A1 in the queue.
+    #
+    # A2's door is its own filter — a new 252-session high AND M2 — so the eligible set does not
+    # need narrowing to stay small. MCN still orders the list, which only matters when more names
+    # qualify on one day than there are free slots; what the ORDER should be for a trend-follower
+    # is not specified in E3 and is a live gap, flagged rather than invented.
+    ranked_eligible = sorted(eligible, key=lambda tk: -out[tk]["mcn"])
+    l1m = ranked_eligible if hyp.get("entry_new_high") else ranked_eligible[:150]
     return dict(scored=out, l1m=l1m, evaluated=len(ranked), m4_known=m4_known)
 
 
