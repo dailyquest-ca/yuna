@@ -126,3 +126,39 @@ is `roadmap-2026-07-31.md`.
     because nothing maintained it — so the queue seated a position we had sold and dropped two we
     owned. §3.0 says membership lists never drop a name the book owns; the way to keep that true is
     to ask the book at run time and re-derive the flag from it, never to remember separately.
+31. **A guard calibrated on the defect it caught will fire on everything that resembles it.** The
+    price-basis fix came with an integrity guard that halted the run on any adjusted daily move
+    beyond 85%. Measured against the real tape it condemned **819 of 5,264 names** — the
+    re-derivation of runs 18-44 could never have started. Worse, the second draft counted moves
+    in *both* directions and quarantined GME, DJT, LUNR, INSM and CHK: the January 2021 squeeze
+    (+93% then +135%), the Trump Media announcement (+357%), a lunar-lander contract, a phase-3
+    readout. **A data guard that deletes the decade's biggest momentum events from a momentum
+    backtest is worse than no guard**, because it removes precisely the trades under study, and
+    it does it silently — the run still completes and still prints a number.
+    **The asymmetry is the fix:** falling is evidence, rising is momentum. After a real -85% the
+    price sits at 15% of its old level, so a second one from above $5 needs a ~6.7x recovery in
+    between, which equities do not do. Repetition *down* is a discontinuous series; repetition
+    *up* is the thing we are hunting.
+    **Corollary, and the more general lesson:** every threshold in that guard was picked by
+    querying the tape and counting what it would condemn, then checking the survivors by name.
+    Three candidate rules were measured and discarded before one held — magnitude alone (cannot
+    separate Yellow Corp's bankruptcy from a broken series), share-of-names (19.5% on a raw
+    basis against 15.6% on an adjusted one, so no threshold sits between them), and the
+    corporate-action record (`corporate_actions` holds four split rows, all from August 2026 —
+    a live feed for the book, not a historical archive). A threshold that was never counted
+    against the data is a guess wearing a constant's clothing.
+32. **Distinguish a broken security from a broken tape, or you get neither.** The first guard
+    conflated them and so had exactly one response — halt — to two problems with opposite
+    remedies. One bad ticker among 5,264 should be *removed*; the same symptom across the whole
+    universe means the price basis is wrong and nothing can be trusted. The gate now halts on a
+    tape invariant asserted directly (the decision series must differ from the raw print on at
+    least 20% of bars; the real tape differs on 58.9% across 2,999 names), quarantines individual
+    securities with a named reason recorded in `stats.excluded_discontinuous`, and halts anyway
+    if the quarantine exceeds 10% of the universe — because at that point "bad tickers" is the
+    wrong diagnosis. Current reality is 2.70%.
+33. **The invalid unit is often the bar, not the security.** Vendors pad the delisting tail with
+    `0.0000` after an acquisition — CONN 5 bars, HIBB 7, AEL 2, PACW 1. Condemning the ticker
+    throws away years of valid history *and* biases the sleeve against takeouts, which are the
+    good ending for a momentum position. Masking those bars to NaN — which is already what "no
+    bar" means to the engine — cut the traded-name casualty list from 16 to 5. Before excluding
+    a thing, check whether the corruption is the whole thing or one row of it.

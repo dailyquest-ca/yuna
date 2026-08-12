@@ -408,33 +408,138 @@ class DataIntegrityError(RuntimeError):
     plausible number, and a plausible wrong number is the expensive kind."""
 
 
-# Calibrated against the tape, not against intuition. RXN genuinely fell 49% in a session on a
-# real corporate event and must pass; equities do occasionally fall 70% on a fraud or a failed
-# trial. The corruption this catches is a different order of magnitude — the worst value in the
-# raw series was a 6,474,999x single-month "return". A guard that fires on real volatility gets
-# switched off within a week, so the threshold sits above anything a market can do.
-MAX_SANE_DAILY_MOVE = 0.85
+# ------------------------------------------------------------------ integrity thresholds
+#
+# 2026-08-12. The first version of this guard halted the run on ANY adjusted daily move beyond
+# 85%, and measured against the real tape it would have halted on 819 of 5,264 names — so the
+# re-derivation of runs 18-44 could never have started. Three things came out of measuring it:
+#
+#   1. MAGNITUDE CANNOT SEPARATE a real collapse from a broken series. YELLQ (Yellow Corp) and
+#      EXPRQ (Express) were liquid $50 stocks that went bankrupt; a -90% session is what that
+#      looks like, and 814 of the 819 names pass L0 at some point, so they are not junk we can
+#      wave away. Excluding real bankruptcies would reintroduce the survivorship bias runs 15+
+#      deliberately removed.
+#   2. THE SHARE OF BAD NAMES CANNOT SEPARATE a raw basis from an adjusted one: 19.5% of names
+#      show an 85% move on the raw series against 15.6% on the adjusted. Any systemic threshold
+#      between those two numbers is luck, not a test.
+#   3. THE CORPORATE-ACTION RECORD CANNOT ARBITRATE IT EITHER. `corporate_actions` holds four
+#      split rows, all from August 2026 — it is a live feed for the book, not a historical
+#      archive, so it cannot validate a 2016-2026 tape. Backfilling the split calendar from
+#      EODHD would make this guard exact and is the right eventual fix; it is a separate job.
+#
+# What separates them is REPETITION and IMPOSSIBILITY. A real equity collapses once. Of the 793
+# violating bars in the "down 95%+" bucket, 94 names carry all of them — 8.4 collapses each,
+# which is a discontinuous series, not a company. And no market takes a $5+ stock up 20x between
+# two closes; SPDL prints 6,900,000x, which is two unrelated companies sharing a ticker.
+#
+# So the guard now does two different jobs instead of conflating them:
+#
+#   * a broken SECURITY is quarantined — dropped from the simulation, counted, and named in
+#     `stats.excluded_discontinuous`. That is removing the bad state, not tolerating it, and it
+#     is the same judgment migration 041 made by hand for twelve tickers.
+#   * a broken TAPE halts, and is now tested by its own invariant rather than inferred from price
+#     behaviour: the decision series must BE the adjusted series. That is the defect that
+#     invalidated runs 18-44, and it is checkable exactly.
+MAX_SANE_DAILY_MOVE = 0.85     # a session move past this is a candidate, not yet a verdict
+MIN_DISCONTINUITIES = 2        # one is an event; two in the tradeable region is a broken series
+#
+# The repetition test counts DOWN moves only, and that asymmetry is the whole point. Counting
+# both directions quarantined GME, DJT, LUNR, INSM and CHK — the January 2021 squeeze (+93%
+# then +135%), the Trump Media announcement (+357%), a SPAC on a lunar-lander contract, a phase-3
+# readout. Those are the largest momentum events in the tape, and this is a momentum sleeve: a
+# guard that throws them out is worse than no guard.
+#
+# Falling is different. After a genuine -85% the price sits at 15% of its old level, so to fall
+# -85% AGAIN from above $5 it must first recover roughly 6.7x. Real equities do not make that
+# round trip; a series that does is discontinuous. So repetition down is evidence, repetition up
+# is momentum, and only the absolute IMPOSSIBLE_UP ceiling constrains the upside.
+IMPOSSIBLE_UP = 20.0           # x between two closes — beyond any single-session equity move
+IMPOSSIBLE_DOWN = 0.05         # -95% in one session, on a basis that was a real price
+PRICE_BASIS_FLOOR = 1.0        # under $1 the vendor's 4dp precision makes a ratio noise, not a
+                               # return: $0.0001 -> $0.0002 reads as +100%
+# ...but the floor must not become a hiding place, because the worst series in the tape spend
+# their first life sub-penny: SPDL goes 0.0001 -> 647.50, two unrelated companies under one
+# symbol. Quantization noise is bounded by the gap between adjacent representable prices — 2x at
+# the very bottom, less everywhere above it — so a move of this size is a discontinuity at ANY
+# basis, and this threshold carries no floor.
+ABSURD_RATIO = 1000.0
+TRADEABLE_FLOOR = 5.0          # §3.2's price floor — below it the sleeve is out by law, so a
+                               # discontinuity there cannot become a trade
+MIN_ADJUSTED_SHARE = 0.20      # 58.9% of the real tape differs from raw across 2,999 names; if
+                               # almost nothing differs, the adjustment is not being applied
+MAX_QUARANTINE_SHARE = 0.10    # past this it is not N bad tickers, it is a bad tape
+
+
+def _discontinuous(arrays, cols):
+    """Names whose adjusted series is not a continuous price series. Returns {ticker: reason}.
+
+    Two independent signatures, either of which condemns a name:
+
+      * IMPOSSIBLE — a single session beyond 20x up or -95% down, measured from a basis of at
+        least $1 so that sub-penny quantization cannot manufacture one; or beyond 1000x either
+        way at any basis at all, which quantization cannot reach.
+      * REPEATED — two or more COLLAPSES beyond -85% on bars where the prior close cleared
+        §3.2's $5 floor. See the note on the constants: down is evidence, up is momentum.
+
+    A zero adjusted close is treated as impossible on its own. A traded equity does not print
+    0.0000; PACW does, on the day it merged into Banc of California, and a zero denominator
+    turns every downstream return into an infinity.
+    """
+    C, R = arrays["close"], arrays["raw_close"]
+    prev, curr = C[:-1], C[1:]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ratio = np.where(prev > 0, curr / prev, np.nan)
+    finite = np.isfinite(ratio)
+
+    on_a_real_price = (prev >= PRICE_BASIS_FLOOR) & ((ratio >= IMPOSSIBLE_UP)
+                                                     | (ratio <= IMPOSSIBLE_DOWN))
+    at_any_price = (ratio >= ABSURD_RATIO) | (ratio <= 1.0 / ABSURD_RATIO)
+    impossible = finite & (on_a_real_price | at_any_price)
+    zeroed = np.isfinite(C) & (C <= 0.0)
+    # The $5 floor is a fact about the actual print, so it reads the raw series, exactly as the
+    # L0 admission test does. An adjusted price of $6 on a stock that printed $0.30 is not a
+    # tradeable bar and a discontinuity in it cannot reach the book.
+    tradeable = np.isfinite(R[:-1]) & (R[:-1] >= TRADEABLE_FLOOR)
+    collapsed = finite & tradeable & (ratio < 1.0 - MAX_SANE_DAILY_MOVE)
+
+    out = {}
+    imp_n, col_n, zero_n = impossible.sum(axis=0), collapsed.sum(axis=0), zeroed.sum(axis=0)
+    for j, tk in enumerate(cols):
+        if zero_n[j]:
+            out[tk] = f"{int(zero_n[j])} bars priced at or below zero"
+        elif imp_n[j]:
+            worst = np.nanmax(np.where(impossible[:, j], ratio[:, j], np.nan))
+            quietest = np.nanmin(np.where(impossible[:, j], ratio[:, j], np.nan))
+            out[tk] = (f"impossible session move ({quietest:.4g}x to {worst:.4g}x, "
+                       f"{int(imp_n[j])} bars)")
+        elif col_n[j] >= MIN_DISCONTINUITIES:
+            out[tk] = f"{int(col_n[j])} collapses below -{MAX_SANE_DAILY_MOVE:.0%} above ${TRADEABLE_FLOOR:.0f}"
+    return out
 
 
 def _assert_price_integrity(arrays, cols, dates):
-    """Fail the run on the two defects that produced four phantom trades across runs 18-44.
+    """Halt on a broken TAPE. Broken securities are quarantined by `_discontinuous`, not here.
 
-    Neither was catchable by the test suite: every fixture in `tests/` is hand-built, and a
+    None of this was catchable by the unit suite: every fixture in `tests/` is hand-built, and a
     hand-built fixture never contains a split, a ticker change, or a duplicated series. These
     assertions run against the real tape, on every run, before a single bar is simulated.
     """
-    C = arrays["close"]
-    with np.errstate(invalid="ignore", divide="ignore"):
-        step = C[1:] / C[:-1] - 1.0
-    bad = np.argwhere(np.isfinite(step) & (np.abs(step) > MAX_SANE_DAILY_MOVE))
-    if len(bad):
-        worst = sorted(((abs(step[i, j]), cols[j], dates[i + 1], step[i, j]) for i, j in bad),
-                       reverse=True)[:5]
-        raise DataIntegrityError(
-            f"{len(bad)} adjusted daily moves beyond {MAX_SANE_DAILY_MOVE:.0%}. The adjusted "
-            f"series is continuous across corporate actions by construction, so a move this "
-            f"large is a broken adjustment, not a market. Worst: "
-            + "; ".join(f"{tk} {d} {r:+.1%}" for _, tk, d, r in worst))
+    C, R = arrays["close"], arrays["raw_close"]
+
+    # THE defect behind runs 18-44, asserted directly rather than inferred. `close` must be the
+    # adjusted series; on the real tape 58.9% of bars differ from the raw print across 2,999
+    # names, because a decade of 5,000 US equities is full of splits and dividends. If almost
+    # nothing differs, either the transform in `load` was removed or `adj_close` came back empty
+    # and was filled from `close` — and every split is about to arrive as a crash again.
+    both = np.isfinite(C) & np.isfinite(R)
+    if both.any():
+        share = float((both & (np.abs(C - R) > 1e-9)).sum()) / float(both.sum())
+        if share < MIN_ADJUSTED_SHARE:
+            raise DataIntegrityError(
+                f"only {share:.1%} of bars differ between the decision series and the raw print, "
+                f"below the {MIN_ADJUSTED_SHARE:.0%} floor. The decision series is supposed to be "
+                f"`adj_close`; this reads as the raw print, which is the defect that invalidated "
+                f"runs 18-44 — CMG's 50:1 booked -98%, a 4:1 booked -76%.")
 
     # Two tickers with an identical price series are one security counted twice — the book can
     # hold both, doubling the intended position while max_names, the sleeve cap and the heat cap
@@ -455,6 +560,25 @@ def _assert_price_integrity(arrays, cols, dates):
         raise DataIntegrityError(
             f"{len(dupes)} ticker pairs share an identical price series — one security, two "
             f"entries in the universe: " + "; ".join(f"{a}={b}" for a, b in dupes[:8]))
+
+
+def screen_tape(arrays, cols, dates):
+    """The whole gate, in the order it has to run: halt on a broken tape, then quarantine broken
+    securities, then halt anyway if so many are broken that "broken securities" is the wrong
+    diagnosis. Returns {ticker: reason} for the names the caller must drop.
+    """
+    _assert_price_integrity(arrays, cols, dates)
+    excluded = _discontinuous(arrays, cols)
+    # A security whose series is discontinuous cannot be simulated, but it also must not stop the
+    # run — 218 of 5,264 names are in this state and halting on each in turn is not a workflow.
+    # Past a ceiling, though, the diagnosis flips: that many broken names is a broken tape.
+    if len(excluded) > MAX_QUARANTINE_SHARE * len(cols):
+        raise DataIntegrityError(
+            f"{len(excluded)} of {len(cols)} names ({len(excluded)/len(cols):.1%}) have a "
+            f"discontinuous series, above the {MAX_QUARANTINE_SHARE:.0%} ceiling. That is not a "
+            f"set of bad tickers, it is a bad tape — check the price basis before trusting any "
+            f"of it. Worst: " + "; ".join(f"{t} ({r})" for t, r in list(excluded.items())[:5]))
+    return excluded
 
 
 # =============================================================================== data
@@ -508,7 +632,22 @@ def load(cur):
         arrays[c] = a
     del df
 
-    _assert_price_integrity(arrays, cols, dates)
+    # A non-positive price is not a price. The vendor pads the delisting tail with 0.0000 after an
+    # acquisition — CONN 5 bars, HIBB 7, AEL 2 — and condemning the whole ticker for it would
+    # throw away years of valid history AND bias the sleeve against takeouts, which is the good
+    # ending for a momentum position. NaN is what "no bar" already means to the engine, and the
+    # DELISTED_AFTER path handles a name that stops printing.
+    dead = arrays["close"] <= 0.0
+    if dead.any():
+        for c in ("open", "high", "low", "close", "adj", "raw_close"):
+            arrays[c] = np.where(dead, np.nan, arrays[c])
+
+    excluded = screen_tape(arrays, cols, dates)
+    if excluded:
+        keep = np.array([tk not in excluded for tk in cols], dtype=bool)
+        for c in arrays:
+            arrays[c] = arrays[c][:, keep]
+        cols = [tk for tk, k in zip(cols, keep) if k]
 
     cur.execute("select ticker, industry from universe where kind='stock'")
     industry = {t: i for t, i in cur.fetchall()}
@@ -548,7 +687,8 @@ def load(cur):
             eps[tk] = (np.array([r.toordinal() for r, _ in pairs]), [v for _, v in pairs])
 
     return dict(dates=list(dates), cols=list(cols), arrays=arrays, industry=industry,
-                bench=bench, spx=spx, gate_source=gate_source, reports=reports, eps=eps)
+                bench=bench, spx=spx, gate_source=gate_source, reports=reports, eps=eps,
+                excluded_discontinuous=excluded)
 
 
 def eps_as_of(eps_entry, day):
@@ -1458,9 +1598,15 @@ def summarise(trades, equity, frame, conf, hyp=None):
             trim_slices=len(trades) - len(full),
             trim_usd=float(sum(t["pnl_usd"] for t in trades if t not in full)) if trades else 0.0,
             diagnostics=conf,
+            # Named, not just counted: an exclusion nobody can review is indistinguishable from a
+            # silent filter, and some of these are real bankruptcies whose absence biases the run.
+            excluded_discontinuous=frame.get("excluded_discontinuous") or {},
             biases=["vendor serves the current version of a past statement (restatements)",
                     "industry mappings are today's",
-                    "L0 census rebuilt from stored bars — names never ingested are still absent"]),
+                    "L0 census rebuilt from stored bars — names never ingested are still absent",
+                    f"{len(frame.get('excluded_discontinuous') or {})} names dropped for a "
+                    f"discontinuous series — some are real bankruptcies, so the survivorship "
+                    f"correction is imperfect in that direction"]),
     )
 
 
