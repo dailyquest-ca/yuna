@@ -130,13 +130,35 @@ def test_a_half_sleeve_leaves_half_the_account_in_the_park():
         "a half sleeve must put materially less into single names — the rest belongs to the park")
 
 
-def test_every_announced_cell_moves_one_axis_off_the_centre():
-    centre = cc.CELLS["n12_semi"]
-    for name, spec in cc.CELLS.items():
-        if name == "n12_semi":
-            continue
-        moved = {k for k in spec if spec[k] != centre[k]}
-        assert len(moved) == 1, f"{name} moves {moved} — the grid is one axis at a time"
+def test_every_announced_cell_moves_one_axis_off_its_own_centre():
+    """Two families, each one axis at a time off its own centre: the full-universe cells off
+    n12_semi, and the large-cap cells off lg12_semi."""
+    for centre_name in ("n12_semi", "lg12_semi"):
+        centre = dict(cc.CELLS[centre_name])
+        prefix = centre_name.split("12")[0]
+        for name, spec in cc.CELLS.items():
+            if not name.startswith(prefix) or name == centre_name:
+                continue
+            merged = {**centre, **spec}
+            moved = {k for k in merged if merged[k] != centre.get(k)}
+            assert len(moved) == 1, f"{name} moves {moved} — one axis at a time"
+
+
+def test_the_large_cap_pool_ranks_only_the_most_traded_names():
+    """SPMO ranks inside the S&P 500. `top_by_addv` is that restriction, applied BEFORE the
+    momentum rank so a thin rocket cannot outrank a liquid leader."""
+    n = N_DAYS
+    paths = {f"N{i:02d}.US": 100.0 * np.exp(np.linspace(0, 0.1 + i * 0.10, n)) for i in range(6)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    # the strongest climber is the THINNEST name — deep enough to clear the floor, but nowhere
+    # near the most-traded three
+    rocket = tickers.index("N05.US")
+    dv[:, rocket] = 2e7
+    unrestricted = cc.rank_at(n - 1, adj, raw, dv, risk_adjusted=False)
+    restricted = cc.rank_at(n - 1, adj, raw, dv, risk_adjusted=False, top_by_addv=3)
+    assert tickers[unrestricted[0]] == "N05.US", "the fixture's rocket must top an open rank"
+    assert rocket not in restricted, "the large-cap pool must exclude it before ranking"
+    assert len(restricted) == 3
 
 
 def test_a_name_that_goes_dark_does_not_zero_the_account():

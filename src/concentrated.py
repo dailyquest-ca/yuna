@@ -77,6 +77,14 @@ CELLS = {
     # the sleeve fraction: the rest parked in SPMO, which is the shape Zak described
     "n12_semi_half":  dict(n=12, months=6, risk_adjusted=True,  sleeve=0.50),
     "n12_semi_third": dict(n=12, months=6, risk_adjusted=True,  sleeve=0.30),
+    # ---- the large-cap pool. SPMO ranks inside the S&P 500; these rank inside the 500
+    # most-traded names, which is the closest point-in-time proxy the store supports. Zak's own
+    # examples — MRVL, GOOGL, SQ, MU — are all large caps, and the full-universe cells above
+    # measured what happens without the restriction: -56.5% drawdowns on a 16.66% return.
+    "lg12_semi":       dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500),
+    "lg12_semi_third": dict(n=12, months=6, risk_adjusted=True, sleeve=0.30, top_by_addv=500),
+    "lg20_semi":       dict(n=20, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500),
+    "lg12_annual":     dict(n=12, months=12, risk_adjusted=True, sleeve=1.00, top_by_addv=500),
 }
 
 
@@ -120,8 +128,17 @@ def rebalance_dates(dates, months, warmup):
     return out
 
 
-def rank_at(i, adj, raw, dv, *, risk_adjusted):
-    """12-1 momentum over the liquid universe at session i. Uses bars <= i only."""
+def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None):
+    """12-1 momentum over the liquid universe at session i. Uses bars <= i only.
+
+    `top_by_addv` narrows the pool to the K most-traded names BEFORE ranking. This is the
+    difference between our universe and SPMO's: SPMO ranks inside the S&P 500 — large caps only —
+    while a rank over all ~3,000 liquid US names reaches deep into small and mid caps, where
+    12-1 momentum is mostly volatility that mean-reverts. The first concentrated grid measured
+    the consequence: the full-universe book returned 16.66% with a -56.5% drawdown against the
+    ETF's 21.12% / -31.0%. Dollar volume is the point-in-time proxy — a real S&P membership
+    series is not in the store, and reconstructing one from today's index would be look-ahead.
+    """
     if i < FORMATION + 1:
         return []
     past, recent = adj[i - FORMATION], adj[i - SKIP]
@@ -134,6 +151,8 @@ def rank_at(i, adj, raw, dv, *, risk_adjusted):
     idx = np.where(eligible)[0]
     if not len(idx):
         return []
+    if top_by_addv and len(idx) > top_by_addv:
+        idx = idx[np.argsort(-addv[idx])[:top_by_addv]]
     score = recent[idx] / past[idx] - 1.0
     if risk_adjusted:
         window = adj[max(0, i - VOL_WINDOW):i + 1, idx]
@@ -147,7 +166,7 @@ def rank_at(i, adj, raw, dv, *, risk_adjusted):
 
 
 def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted, sleeve,
-             start_nav):
+             start_nav, top_by_addv=None):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park."""
     warmup = FORMATION + 1
     rebals = set(rebalance_dates(dates, months, warmup))
@@ -181,7 +200,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     for i in range(warmup, len(dates)):
         nav = mark(i)
         if i in rebals and np.isfinite(park_px[i]):
-            want = rank_at(i, adj, raw, dv, risk_adjusted=risk_adjusted)[:n]
+            want = rank_at(i, adj, raw, dv, risk_adjusted=risk_adjusted,
+                           top_by_addv=top_by_addv)[:n]
             wanted = set(want)
             # sell what fell out of the book, and the park, then buy the new book
             for j in list(held):
