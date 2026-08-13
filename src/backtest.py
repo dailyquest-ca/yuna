@@ -1460,7 +1460,7 @@ def simulate(frame, cfg):
                 # whole thesis is holding. A2 has no volume-confirmation step to enforce.
                 pending[tk] = "unconfirmed"              # the hair-trigger — the only volume exit
                 continue
-            if hyp["level_stop"] and np.isfinite(cl) and cl < p["pivot"]:
+            if hyp["level_stop"] and np.isfinite(cl) and cl < p["level"]:
                 # A3 (push study, 2026-08-13): the breakout level IS the stop, judged on the
                 # close, acted next open. What run 54 had by ACCIDENT and was rightly called a
                 # defect for an arm specced with a 3xATR stop is, measured across 56,380 resolved
@@ -1728,8 +1728,17 @@ def simulate(frame, cfg):
                         px = O[t, j]
                         if np.isnan(px):
                             px = C[nh_rows[-1], j]
-                        # the fill is the pivot: there is no base, so any ladder measures off entry
-                        got = dict(kind="new_high", fill=px, pivot=px, confirmed=True)
+                        # The fill is the pivot: there is no base, so any ladder measures off
+                        # entry. The LEVEL is carried separately and is a different number —
+                        # last night's close, the price that cleared the 252-session high. The
+                        # study's episodes are defined against the level ("a close back below
+                        # it"), and pushes open 1.28% ABOVE it on average, so a stop anchored on
+                        # the fill is 1.28% tighter than the one the evidence measured — a
+                        # breakeven stop on day one, which is precisely the defect run 54 died
+                        # of. Run 65 carried it: 8.7-session holds and 39% of the move kept,
+                        # against A2's 68 sessions and 80%.
+                        got = dict(kind="new_high", fill=px, pivot=px, confirmed=True,
+                                   level=float(C[nh_rows[-1], j]))
                 if got is None and _reentry_ready(tk, j, t, valid, C, exited, hyp):
                     # X1. No base, or one that will not trigger for months: a name that corrected
                     # 42% needs that long to build another, and by then the move it was going to
@@ -1846,6 +1855,9 @@ def simulate(frame, cfg):
                                 lots=[(dollars, fill, A[t, j] if np.isfinite(A[t, j]) else fill)],
                                 qty=dollars / fill, invested=paid, gross_invested=dollars,
                                 avg_cost=paid / (dollars / fill), stop=stop, pivot=pivot,
+                                # the price the signal cleared, which for every door but the
+                                # new-high one IS the pivot; only A3 reads it
+                                level=float(got.get("level", pivot)),
                                 hi_close=fill, hi_at=t, step=3 if frac >= 1.0 else 1,
                                 target=target, mcn=row["mcn"], trimmed=set(),
                                 qty_peak=dollars / fill,

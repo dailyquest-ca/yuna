@@ -1413,6 +1413,56 @@ def test_the_level_stop_rides_what_never_breaks_and_cuts_what_does():
         "the level stop's whole point is that failures are scratches, not 3xATR losses")
 
 
+def test_the_level_stop_is_anchored_on_the_level_not_on_the_fill():
+    """Run 65's defect, measured before it was fixed: pushes open 1.28% above the level they
+    cleared (median +0.39%), so a stop parked at the FILL is a breakeven stop on day one — the
+    run-54 defect wearing A3's name. It held 8.7 sessions and kept 39% of each move against
+    A2's 68 and 80%.
+
+    The fixture makes the gap explicit: the leader breaks out, gaps up 4% at the open, then
+    drifts back 2%. That closes below the entry but stays above the level, so the position must
+    survive — and it must still die when price closes under the level itself.
+    """
+    a3 = {**bt.PRESETS["a3"], "park_idle": False, "cash_target": None, "vol_target": None}
+
+    def drifting(after):
+        f, br = frame(hero_volume_multiple=3.0, breakout_at=bt.WARMUP + 10)
+        a = {k: v.copy() for k, v in f["arrays"].items()}
+        level = float(a["close"][br, 0])                  # the close that cleared the 252-high
+        a["open"][br + 1, 0] = level * 1.04               # the gap A3 pays
+        path = np.full(a["close"].shape[0] - br - 1, level * after)
+        for key, mult in (("close", 1.0), ("adj", 1.0), ("high", 1.002), ("low", 0.998)):
+            a[key][br + 1:, 0] = path * mult
+        a["open"][br + 2:, 0] = path[1:] * 0.999
+        return dict(f, arrays=a), level
+
+    f_hold, level = drifting(1.02)                        # closes under the FILL, over the LEVEL
+    held, _, _ = bt.simulate(f_hold, cfg(hyp=a3, max_names=30))
+    hero = [t for t in held if t["ticker"] == "N00.US"]
+    assert hero, "the leader never entered — the fixture proves nothing"
+    assert all(t["exit_reason"] != "level_stop" for t in hero), (
+        "a position 2% above the level it cleared was stopped out — the anchor is on the fill")
+
+    f_cut, _ = drifting(0.98)                             # closes under the LEVEL
+    cut, _, _ = bt.simulate(f_cut, cfg(hyp=a3, max_names=30))
+    dead = [t for t in cut if t["ticker"] == "N00.US"]
+    assert dead and all(t["exit_reason"] == "level_stop" for t in dead), (
+        "a close below the level must still end the position — that IS the exit")
+
+
+def test_every_other_door_defaults_its_level_to_its_pivot():
+    """Only the new-high door has a level distinct from its fill. Every other door must fall
+    back to the pivot, or a run combining level_stop with the base door would compare price
+    against a key that was never set — a KeyError in production, or worse, a silent default."""
+    f, _ = frame(hero_volume_multiple=3.0, hero_after=0.97)      # breaks out, then fails
+    base_level = cfg(hyp={**dict(bt.LAW), "level_stop": True})
+    trades, _, conf = bt.simulate(f, base_level)
+    assert conf["entries"] >= 1, "the base door never fired — the default is untested"
+    hero = [t for t in trades if t["ticker"] == "N00.US"]
+    assert hero and any(t["exit_reason"] == "level_stop" for t in hero), (
+        "a base entry closing below its pivot must stop on the pivot the door recorded")
+
+
 def test_the_level_stop_is_declared_and_the_law_does_not_know_it():
     conf = dict(m4_evaluated=1, m4_known=1, blackout_decisions=1, blackout_known=1,
                 entries=1, entries_refused_below_70=0, reentries=0, recoveries=0,
