@@ -485,3 +485,18 @@ def test_a_healthy_run_reports_no_empty_rebalances():
     health = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), n=3, months=6,
                          risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)[3]
     assert health["empty_rebalances"] == [] and health["stale_skips"] == 0
+
+
+def test_every_cell_carries_a_param_hash_that_moves_with_its_own_spec():
+    """A grid of twenty-odd cells is exactly the search the deflated Sharpe prices. Without a
+    param_hash these runs are invisible to `finding.trial_sharpes`, the trial count stays at the
+    E-series total, and every cell in the grid is scored as though the grid had not happened."""
+    import backtest as bt
+    base = dict(variant="x", hypothesis="a4", currency="USD", benchmark="VOO.US",
+                start_nav=200_000.0, park="SPMO.US", formation=cc.FORMATION, skip=cc.SKIP)
+    hashes = {name: bt.param_digest(dict(spec), base) for name, spec in cc.CELLS.items()}
+    assert len(set(hashes.values())) == len(cc.CELLS), (
+        "two cells sharing a hash are one trial in the ledger and two experiments in fact")
+    # and it moves on the axis that matters: a trail cell must not hash as its untrailed parent
+    assert hashes["lg12_semi"] != hashes["lg12_semi_trail"]
+    assert hashes["lg12_semi_trail"] != hashes["lg12_semi_trail_vt"]

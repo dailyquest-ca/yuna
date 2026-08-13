@@ -165,6 +165,17 @@ jobs:
           for rid in $(cat /tmp/run_ids.txt); do RUN_ID=$rid python src/capture_audit.py; done
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # The concentrated cells score themselves inline against the bootstrap and the cuts, but
+      # NOT against the deflated Sharpe — and a twenty-cell grid is precisely the search the
+      # deflation prices. This step runs the same §2.5 driver the engine job runs, which reads
+      # the trial ledger these runs now enter via `param_hash`.
+      - name: §2.5 bars
+        if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true'
+        run: |
+          for rid in $(cat /tmp/run_ids.txt); do RUN_ID=$rid python src/finding.py; done
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DD_BAR: ${{ inputs.dd_bar }}
       - name: autopsy on failure
         if: failure() && steps.engine.outcome == 'failure'
         run: python src/report_fail.py concentrated /tmp/job.out

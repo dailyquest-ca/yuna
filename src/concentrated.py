@@ -66,7 +66,7 @@ import datetime as dt
 import numpy as np
 
 from db import connect, dry, Heartbeat
-from backtest import SPREAD_CURVE, BENCH, PARK_BAND
+from backtest import SPREAD_CURVE, BENCH, PARK_BAND, param_digest
 from capture_audit import load_tape
 import finding
 
@@ -642,6 +642,14 @@ def main():
                 params = dict(variant=name, hypothesis="a4", code_stamp=code, currency="USD",
                               benchmark=BENCH, start_nav=start_nav, park=PARK_TICKER,
                               spec=dict(CELLS[name]), formation=FORMATION, skip=SKIP)
+                # P1's digest, on this arm's own surface. Without it these cells carry no
+                # param_hash, `finding.trial_sharpes` cannot see them, and a grid of twenty-odd
+                # configurations contributes NOTHING to the deflation that exists to price
+                # exactly that kind of search. A grid this wide is the case the deflated Sharpe
+                # was invented for; leaving it out of the trial count inflates every cell in it.
+                params["param_hash"] = param_digest(
+                    dict(CELLS[name]),
+                    {k: v for k, v in params.items() if k not in ("spec", "code_stamp")})
                 stats = dict(a4=dict(spec=spec, entries=len(entries),
                                      entries_per_year=round(per_year, 2),
                                      cost_usd=round(costs, 2), **health),
