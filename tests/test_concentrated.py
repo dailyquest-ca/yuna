@@ -158,6 +158,9 @@ PARENT = {
     "clk_monthly": "lg8_trail_nextopen", "clk_bimonthly": "lg8_trail_nextopen",
     "clk_quarter": "lg8_trail_nextopen", "clk_annual": "lg8_trail_nextopen",
     "sec70_semi": "lg8_trail_nextopen", "sec70_monthly": "sec70_semi",
+    "ph_semi_0": "lg8_trail_nextopen", "ph_semi_1": "ph_semi_0", "ph_semi_2": "ph_semi_0",
+    "ph_semi_3": "ph_semi_0", "ph_semi_4": "ph_semi_0", "ph_semi_5": "ph_semi_0",
+    "ph_qtr_1": "clk_quarter", "ph_qtr_2": "clk_quarter",
 }
 
 
@@ -729,3 +732,41 @@ def test_an_unlabelled_name_is_its_own_bucket_not_a_free_pass():
     sectors = [None] * 20
     book = cc.pick_book(ranked, 8, sectors, 0.70)
     assert len(book) == 5, "unlabelled names share one bucket and hit the same ceiling"
+
+
+# --------------------------------------------------------- the phase test's own arithmetic
+
+def test_the_offset_shifts_the_calendar_by_whole_months():
+    """The first session always opens a period — the walk has to start somewhere — so the offset
+    is read off the STEADY-STATE cadence after it."""
+    dates = sessions(1300, start=dt.date(2020, 1, 1))
+    a = [dates[i].month for i in cc.rebalance_dates(dates, 6, 0, offset=0)]
+    b = [dates[i].month for i in cc.rebalance_dates(dates, 6, 0, offset=1)]
+    c = [dates[i].month for i in cc.rebalance_dates(dates, 6, 0, offset=2)]
+    assert a[:4] == [1, 7, 1, 7], f"offset 0 is Jan/Jul, got {a[:4]}"
+    assert b[1:5] == [2, 8, 2, 8], f"offset 1 must settle on Feb/Aug, got {b[1:5]}"
+    assert c[1:5] == [3, 9, 3, 9], f"offset 2 must settle on Mar/Sep, got {c[1:5]}"
+
+
+def test_the_periods_stay_contiguous_across_a_year_boundary():
+    """The old (year, month // n) bucket restarts every January, so any non-zero offset would
+    produce a SHORT period every December — an extra rebalance the phase test would then read as
+    a difference between phases rather than a bug in the phase test."""
+    dates = sessions(1300, start=dt.date(2020, 1, 1))
+    for off in range(6):
+        idx = cc.rebalance_dates(dates, 6, 0, offset=off)[1:]     # skip the partial first period
+        months = [dates[i].month for i in idx]
+        gaps = {(b - a) % 12 for a, b in zip(months, months[1:])}
+        assert gaps == {6}, f"offset {off} gave period lengths {gaps}, expected every gap to be 6"
+
+
+def test_offset_zero_reproduces_the_original_calendar():
+    dates = sessions(1300, start=dt.date(2020, 1, 1))
+    for months in (1, 2, 3, 6, 12):
+        old, seen = [], set()
+        for i, d in enumerate(dates):
+            key = (d.year, (d.month - 1) // months)
+            if key not in seen:
+                seen.add(key)
+                old.append(i)
+        assert cc.rebalance_dates(dates, months, 0, offset=0) == old, months

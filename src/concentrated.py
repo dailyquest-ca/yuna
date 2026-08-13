@@ -232,6 +232,26 @@ CELLS = {
                           trail=True, next_open=True, sector_cap=0.70),
     "sec70_monthly": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                           trail=True, next_open=True, sector_cap=0.70),
+    # ---- the phase test. Nine years of a semi-annual clock is EIGHTEEN decisions; the same rule
+    # started one month later is the same rule. If Jan/Jul beats monthly because slower re-entry
+    # avoids buying declines, every phase must beat monthly. If the phases disagree with each
+    # other by more than they disagree with monthly, the clock finding was date luck.
+    "ph_semi_0": dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, offset=0),
+    "ph_semi_1": dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, offset=1),
+    "ph_semi_2": dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, offset=2),
+    "ph_semi_3": dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, offset=3),
+    "ph_semi_4": dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, offset=4),
+    "ph_semi_5": dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, offset=5),
+    "ph_qtr_1":  dict(n=8, months=3, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, offset=1),
+    "ph_qtr_2":  dict(n=8, months=3, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, offset=2),
 }
 
 
@@ -291,13 +311,26 @@ def build_grid(tape, calendar):
     return dates, tickers, adj, raw, dv, op, lo
 
 
-def rebalance_dates(dates, months, warmup):
-    """The last session of each period, after the formation window is available."""
+def rebalance_dates(dates, months, warmup, offset=0):
+    """The first session of each period, after the formation window is available.
+
+    `offset` shifts the calendar by whole months, and it exists to answer Zak's objection to the
+    clock result: *"we are relying on TIME to tell us when to go back in? And not an observation
+    of the market?"* Semi-annual over nine years is EIGHTEEN decision points. If a Jan/Jul book
+    beats a monthly one because slower re-entry avoids buying into declines, then Feb/Aug and
+    Mar/Sep must beat it too. If they do not, the finding was never about frequency — it was about
+    where 2018, 2020 and 2022 happened to fall relative to two arbitrary dates, and the honest
+    reading is date luck.
+
+    The bucket is computed on an absolute month index rather than (year, month // n), so the
+    periods stay contiguous across a year boundary at any offset — `offset=1` on a six-month clock
+    must give Feb-Jul and Aug-Jan, not a short bucket every December.
+    """
     out, seen = [], set()
     for i, d in enumerate(dates):
         if i < warmup:
             continue
-        key = (d.year, (d.month - 1) // months)
+        key = (d.year * 12 + d.month - 1 - offset) // months
         if key not in seen:
             seen.add(key)
             out.append(i)
@@ -464,7 +497,7 @@ def trail_stop(px, st, closes, cfg=None):
 def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted, sleeve,
              start_nav, top_by_addv=None, index_px=None, gate_every=21, trail=False,
              vol_target=None, trail_cfg=None, intraday=None, next_open=None,
-             sectors=None, sector_cap=None):
+             sectors=None, sector_cap=None, offset=0):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -482,7 +515,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     `gate_every` clock, trading only when the drift exceeds §2.1's PARK_BAND.
     """
     warmup = FORMATION + 1
-    rebals = set(rebalance_dates(dates, months, warmup))
+    rebals = set(rebalance_dates(dates, months, warmup, offset))
     held = {}                       # ticker index -> shares
     state = {}                      # ticker index -> {entry, hi, stop, armed} for the §3.2 trail
     last_px = {}                    # ticker index -> the most recent price it actually printed
