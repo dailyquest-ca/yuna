@@ -126,9 +126,12 @@ def test_the_dsr_reports_the_trial_count_it_actually_used():
 
 # ------------------------------------------------------------------------------------- verdict
 def test_a_broken_drawdown_bar_kills_outright():
+    """The guard is unchanged in intent — a broken drawdown bar kills, whatever the returns say.
+    Only the statistic it reads moved, from the bootstrap tail to the bootstrap median, because
+    the benchmark itself fails a -34% bar at the p5 (VOO: median -33.99%, p5 -45.7%)."""
     out = bars.verdict(ex_top_3_beats_benchmark=True, bootstrap_median_cagr=0.20,
                        benchmark_cagr=0.15, dsr=0.99, dd_bar=-0.34,
-                       bootstrap_p5_drawdown=-0.55)
+                       bootstrap_median_drawdown=-0.55, bootstrap_p5_drawdown=-0.70)
     assert out["verdict"] == "dead"
 
 
@@ -146,3 +149,38 @@ def test_everything_clearing_is_proven():
                        bootstrap_p5_drawdown=-0.30)
     assert out["verdict"] == "proven"
     assert out["reasons"] == []
+
+
+# ---------------------------------------------- the drawdown bar reads a median-scale statistic
+#
+# Measured on the real tape, VOO's own bootstrap 5th-percentile drawdown is -45.7% and the 80/20
+# blend's is -45.0%, while both realize -34%/-33%. A -34% bar tested against the p5 is therefore
+# unpassable by the benchmark itself, and it killed every arm in the programme for a while. E3's
+# -34% is VOO's realized -33.99% rounded — a median-scale number.
+
+def test_the_drawdown_bar_is_tested_against_the_median_not_the_tail():
+    """The benchmark's own numbers: median -33.99%, tail -45.7%. A bar of -34% must pass an arm
+    whose median is shallower than the index, whatever its tail says."""
+    v = bars.verdict(ex_top_3_beats_benchmark=True, bootstrap_median_cagr=0.18,
+                     benchmark_cagr=0.1545, dsr=0.99, dd_bar=-0.34,
+                     bootstrap_median_drawdown=-0.2955,      # shallower than VOO's -33.99%
+                     bootstrap_p5_drawdown=-0.4295)          # deeper than the bar, by design
+    assert v["verdict"] == "proven", v
+
+
+def test_a_genuinely_deep_arm_still_dies():
+    """A3d realized -52% and bootstrapped a -55% median: the bar must still kill that."""
+    v = bars.verdict(ex_top_3_beats_benchmark=True, bootstrap_median_cagr=0.18,
+                     benchmark_cagr=0.1545, dsr=0.99, dd_bar=-0.34,
+                     bootstrap_median_drawdown=-0.55, bootstrap_p5_drawdown=-0.776)
+    assert v["verdict"] == "dead"
+    assert "median" in v["reasons"][0] and "5th percentile" in v["reasons"][0], (
+        "the tail belongs on the record even when the median is what killed the arm")
+
+
+def test_the_benchmark_itself_would_pass_its_own_bar():
+    """The sanity check the first cut failed: run 62's VOO — median -33.99%, tail -46.3%."""
+    v = bars.verdict(ex_top_3_beats_benchmark=True, bootstrap_median_cagr=0.1592,
+                     benchmark_cagr=0.1545, dsr=0.99, dd_bar=-0.34,
+                     bootstrap_median_drawdown=-0.3399, bootstrap_p5_drawdown=-0.4632)
+    assert v["verdict"] != "dead", "a bar the benchmark fails is a broken bar, not a strict one"

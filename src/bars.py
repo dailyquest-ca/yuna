@@ -212,18 +212,32 @@ def moments(returns):
 
 # ------------------------------------------------------------------------------------ the verdict
 def verdict(*, ex_top_3_beats_benchmark, bootstrap_median_cagr, benchmark_cagr, dsr,
-            dd_bar=None, bootstrap_p5_drawdown=None):
+            dd_bar=None, bootstrap_median_drawdown=None, bootstrap_p5_drawdown=None):
     """proven / unproven / dead, per §2.5 and E0's interpretation note.
 
     An arm whose bootstrap-median falls below the benchmark, or whose edge vanishes ex-top-3, is
     UNPROVEN — barred from scaling, explicitly *not* necessarily dead. Only a broken drawdown bar
     kills outright, because that is a risk statement rather than an evidence one.
+
+    **The drawdown bar reads the bootstrap MEDIAN, not the 5th percentile.** The first cut used
+    the p5 and it killed everything, including things that are demonstrably safer than the index:
+    measured on this tape, VOO's own bootstrap p5 drawdown is **-45.7%** and the 80/20 blend's is
+    -45.0%, so a -34% bar applied there is unpassable by any long-equity strategy — it fails the
+    benchmark by twelve points. E3's -34% is plainly VOO's realized -33.99% rounded, which is a
+    median-scale number: VOO's bootstrap p50 drawdown is -33.99% to the basis point. The p5 is
+    still computed and reported, because the tail is a real question — it is simply not a
+    question this bar was written to ask, and comparing it to a median-scale threshold was an
+    error of statistic rather than of judgment.
     """
     reasons = []
-    if dd_bar is not None and bootstrap_p5_drawdown is not None and bootstrap_p5_drawdown < dd_bar:
+    if dd_bar is not None and bootstrap_median_drawdown is not None \
+            and bootstrap_median_drawdown < dd_bar:
         return {"verdict": "dead",
-                "reasons": [f"bootstrap 5th-percentile drawdown {bootstrap_p5_drawdown:.1%} "
-                            f"breaches the {dd_bar:.0%} bar"]}
+                "reasons": [f"bootstrap median drawdown {bootstrap_median_drawdown:.1%} "
+                            f"breaches the {dd_bar:.0%} bar"
+                            + (f" (5th percentile {bootstrap_p5_drawdown:.1%}, reported for the "
+                               f"tail, not tested against a median-scale bar)"
+                               if bootstrap_p5_drawdown is not None else "")]}
     if not ex_top_3_beats_benchmark:
         reasons.append("edge does not survive removing the top 3 winners")
     if bootstrap_median_cagr <= benchmark_cagr:

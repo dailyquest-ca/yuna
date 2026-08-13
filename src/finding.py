@@ -183,6 +183,7 @@ def main():
                     bootstrap_median_cagr=full["bootstrap"]["cagr"]["p50"],
                     benchmark_cagr=full["benchmark"]["cagr"],
                     dsr=dsr["dsr"], dd_bar=dd_bar,
+                    bootstrap_median_drawdown=full["bootstrap"]["max_drawdown"]["p50"],
                     bootstrap_p5_drawdown=full["bootstrap"]["max_drawdown"]["p5"])
                 # §2.5(a) makes the OOS cut part of the definition, not decoration: a full-window
                 # pass with an OOS miss is unproven, with the reason on the record.
