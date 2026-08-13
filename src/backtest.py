@@ -81,6 +81,14 @@ LAW = dict(park_idle=False,            # K1  — idle capital sits in cash, earn
            trim_at=None,               # M1  — unrealised gains at which to sell a slice
            trim_frac=0.25,             #     — how much of the full position each slice is
            runner_immunity=False,      #     — what is left after a trim rides on the stop alone
+           stop_ladder=True,           # §3.2 — the breakeven rung, the 10% trail from +15% and
+                                       #        the euphoria tightening. An arm carrying its own
+                                       #        stop regime declares this OFF; the bypass used to
+                                       #        key on `chandelier_mult` alone, so A3 — which has
+                                       #        a level stop and no trail — silently ran the
+                                       #        law's 10% trail behind every position and clipped
+                                       #        each winner 10% off its high (runs 65 and 67:
+                                       #        ride 39% and 40% against A2's 80%).
            score_exit=True,            # §3.2 — sell when MCN falls below the hold floor. A2/A3
            earnings_exit=True,         #      — the earnings wall; and the §3.3 crash-protocol
            gate_off_exit=True,         #        exit. All three are the law; an arm that replaces
@@ -124,6 +132,14 @@ LAW = dict(park_idle=False,            # K1  — idle capital sits in cash, earn
                                        #       the push study's completion lift is 1.74x in the
                                        #       top volatility quartile against 0.59x in the
                                        #       bottom, and per-episode EV runs +0.91% vs +0.16%.
+           level_stop_sessions=None,   # A3c — how long the level stop governs before the trail
+                                       #       takes over. The handover is TIME and it is
+                                       #       measured: of breakouts still above their level at
+                                       #       session 10, 19.3% complete against a 3.86% base —
+                                       #       because 84% of failures are gone by then (54,202
+                                       #       -> 8,546) while 94% of pushes are still alive
+                                       #       (2,178 -> 2,038). None = the level governs for the
+                                       #       whole life of the position (A3b).
            level_stop=False,           # A3  — the breakout level IS the stop: exit on a CLOSE
                                        #       below the entry level, acted next open. The push
                                        #       ledger's own structure — 93% of breakouts die
@@ -509,7 +525,7 @@ PRESETS["a2o"] = dict(PRESETS["a2"], slot_order="trend_vol")
 PRESETS["a3"] = dict(
     park_idle=True, cash_target=0.10,
     entry_new_high=252, slot_order="vol_desc", entry_mcn_floor=False,
-    level_stop=True, size_nav_frac=1.0 / 30.0,
+    level_stop=True, size_nav_frac=1.0 / 30.0, stop_ladder=False,
     atr_window=20, atr_stop_mult=10.0, max_stop=None,
     chandelier_mult=None, chandelier_atr_window=None, risk_per_trade=None,
     vol_target=0.12, vol_window=126,
@@ -520,6 +536,20 @@ PRESETS["a3"] = dict(
     breakeven=False, breakeven_r=None, breakeven_on_full_size=False, euphoria=False,
     require_m4=False, m4_swing=False, press_on_next_base=False,
     mq_vol_divisor=False, mcn_drop_atr=False, confirm_before_entry=False)
+
+# A3c — the handover. The pre-registered ladder cell that crosses the two measured halves: A3's
+# net (39% of every push entered) with A2's ride (80% of each move kept). The level stop does the
+# cheap filtering for ten sessions, then an 8xATR(22) Chandelier takes the survivors.
+#
+# Both constants are the study's, not taste. TEN SESSIONS is where the survival curve turns: 84%
+# of failures have resolved by then (54,202 -> 8,546) while 94% of pushes are still alive
+# (2,178 -> 2,038), so a position still above its level at session 10 completes 19.3% of the time
+# against the 3.86% base — a 5x conditional lift, bought with a stop that costs the winners
+# almost nothing to keep that long. EIGHT ATRs is the needed-trail distribution: the median push
+# demands 4.8 and the 75th percentile 7.9, so 8x holds roughly three quarters of them — and A2
+# measured exactly that (80.5% of each move kept) on this tape with this multiple.
+PRESETS["a3c"] = dict(PRESETS["a3"], level_stop_sessions=10,
+                      chandelier_mult=8.0, chandelier_atr_window=22)
 
 # E1 — the Micron question (E-series, wo-e-series-2026-08-12 §3). A1V with every MU trade
 # excluded, derived from `a1v` the way `a1v` is derived from `a1`, so the exclusion is the only
@@ -1460,7 +1490,9 @@ def simulate(frame, cfg):
                 # whole thesis is holding. A2 has no volume-confirmation step to enforce.
                 pending[tk] = "unconfirmed"              # the hair-trigger — the only volume exit
                 continue
-            if hyp["level_stop"] and np.isfinite(cl) and cl < p["level"]:
+            level_governs = (hyp["level_stop_sessions"] is None
+                             or (t - p["entry_idx"]) < int(hyp["level_stop_sessions"]))
+            if hyp["level_stop"] and level_governs and np.isfinite(cl) and cl < p["level"]:
                 # A3 (push study, 2026-08-13): the breakout level IS the stop, judged on the
                 # close, acted next open. What run 54 had by ACCIDENT and was rightly called a
                 # defect for an arm specced with a 3xATR stop is, measured across 56,380 resolved
@@ -1610,7 +1642,8 @@ def simulate(frame, cfg):
             # the runner has, so the breakeven rung, the 10% trail and the euphoria tightening must
             # not also fire. Stacking them would be the run-33 failure by another route — all three
             # runners stopped out within 2-4 sessions of a tightening, at +91.7%, +102.7% and +9.9%.
-            out = {"stop": None} if hyp["chandelier_mult"] else sg.ratchet_stop(
+            out = {"stop": None} if (hyp["chandelier_mult"]
+                                     or not hyp["stop_ladder"]) else sg.ratchet_stop(
                                   closes=C[max(0, p["entry_idx"]):t + 1, j][
                                       ~np.isnan(C[max(0, p["entry_idx"]):t + 1, j])],
                                   avg_cost=p["avg_cost"], current_stop=p["stop"],
@@ -1636,10 +1669,21 @@ def simulate(frame, cfg):
                 # up. No profit target on the runner: the tail is the entire thesis, and <7% of
                 # trades produce the cumulative profits in the 66,000-trade sample this arm is
                 # built on. Cutting a winner at a target is how that family stops working.
-                r_dist = p["avg_cost"] - p["init_stop"]
+                #
+                # A3c switches on TIME instead of on R. Under a level stop the initial stop is
+                # the 10xATR catastrophe rung, so "+1R" is a move no breakout makes and the
+                # trail would never engage at all. The handover is the survival curve's own
+                # date: the level stop does the cheap filtering while failures resolve, and the
+                # wide trail takes the survivors — which is A2's measured 80% ride grafted onto
+                # A3's measured 39% net.
                 ch_rows = own_bars(valid, j, t)
-                if r_dist > 0 and np.isfinite(cl) and cl >= p["avg_cost"] + r_dist \
-                        and ch_rows is not None:
+                if hyp["level_stop_sessions"] is not None:
+                    engaged = (t - p["entry_idx"]) >= int(hyp["level_stop_sessions"])
+                else:
+                    r_dist = p["avg_cost"] - p["init_stop"]
+                    engaged = (r_dist > 0 and np.isfinite(cl)
+                               and cl >= p["avg_cost"] + r_dist)
+                if engaged and ch_rows is not None:
                     a_ch = sg.atr(H[ch_rows, j], L[ch_rows, j], C[ch_rows, j],
                                   window=int(hyp["chandelier_atr_window"] or 22))
                     if len(a_ch):
@@ -1725,9 +1769,33 @@ def simulate(frame, cfg):
                                                      lookback=int(hyp["entry_new_high"])) \
                             and sg.trend_template(C[nh_rows, j]) \
                             and not _blacked_out(frame, conf, tk, day):
-                        px = O[t, j]
-                        if np.isnan(px):
-                            px = C[nh_rows[-1], j]
+                        # The order that actually rests at the broker is a BUY STOP-LIMIT at the
+                        # level, exactly as §3.2 specifies for the base door — and this door had
+                        # none, which is not a variant but an unimplementable fill. Run 67's
+                        # hero gapped down 25% from its signal close and the engine BOUGHT it at
+                        # the collapsed open, because the signal read the prior close and
+                        # nothing checked how far the open had travelled from it. Three cases,
+                        # all of them what the resting order does:
+                        #   * open above the ceiling — gapped past the limit, no fill (§3.2's
+                        #     own `gap_no_fill`, and the measured 1.28% premium pushes pay);
+                        #   * open at or above the level — the stop is already through, fill at
+                        #     the open;
+                        #   * open below the level — the stop has NOT triggered; it fills at the
+                        #     level only if the session trades up through it, and otherwise the
+                        #     order simply rests another day.
+                        lvl = float(C[nh_rows[-1], j])
+                        op_t, hi_t = O[t, j], H[t, j]
+                        if np.isnan(op_t):
+                            continue
+                        if op_t > lvl * cfg["confirm_limit"]:
+                            conf["gap_no_fill"] += 1
+                            continue
+                        if op_t >= lvl:
+                            px = op_t
+                        elif np.isfinite(hi_t) and hi_t >= lvl:
+                            px = lvl
+                        else:
+                            continue
                         # The fill is the pivot: there is no base, so any ladder measures off
                         # entry. The LEVEL is carried separately and is a different number —
                         # last night's close, the price that cleared the 252-session high. The
@@ -1737,8 +1805,7 @@ def simulate(frame, cfg):
                         # breakeven stop on day one, which is precisely the defect run 54 died
                         # of. Run 65 carried it: 8.7-session holds and 39% of the move kept,
                         # against A2's 68 sessions and 80%.
-                        got = dict(kind="new_high", fill=px, pivot=px, confirmed=True,
-                                   level=float(C[nh_rows[-1], j]))
+                        got = dict(kind="new_high", fill=px, pivot=px, confirmed=True, level=lvl)
                 if got is None and _reentry_ready(tk, j, t, valid, C, exited, hyp):
                     # X1. No base, or one that will not trigger for months: a name that corrected
                     # 42% needs that long to build another, and by then the move it was going to
@@ -2069,7 +2136,13 @@ def conformance(conf, trades, equity, hyp=None):
         dict(clause="Pyramid +2%/+4%, both limits pivot x 1.05", fn="signals.pyramid_orders",
              coverage=1.0),
         dict(clause="Stops — initial, breakeven, 10% trail, euphoria", fn="signals.ratchet_stop",
-             coverage=1.0),
+             coverage=1.0,
+             # An arm that replaces the ladder has to say so here, or a run whose winners were
+             # being clipped 10% off their highs reads as one that simply did not have winners.
+             ladder_enforced=bool((hyp or {}).get("stop_ladder", True)),
+             replaced_by=("chandelier" if (hyp or {}).get("chandelier_mult")
+                          else "level_stop" if (hyp or {}).get("level_stop")
+                          else None)),
         # `unknown_reasons` catches an exit the law does not name. `suppressed` catches the other
         # direction — a §3.2 exit the run stopped enforcing, which no count of reasons can show,
         # because a rule that never fires looks exactly like a rule with nothing to fire on.

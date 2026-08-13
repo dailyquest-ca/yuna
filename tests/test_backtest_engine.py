@@ -1398,17 +1398,22 @@ def test_the_level_stop_rides_what_never_breaks_and_cuts_what_does():
     # The breakout sits just past warmup so it is the hero's FIRST eligible signal: on the
     # default fixture the rise itself makes fresh highs and A3 rightly enters far earlier,
     # which is the ride case again, not the cut case.
+    #
+    # The slide STARTS above the level, because the door rests a stop-limit there: a session
+    # opening below the level never triggers it, so a path that begins under water would test
+    # the door rather than the stop.
     f2, br = frame(hero_volume_multiple=3.0, breakout_at=bt.WARMUP + 10)
     a = {k: v.copy() for k, v in f2["arrays"].items()}
-    pivot = float(a["close"][br, 0]) / 1.03
-    path = pivot * np.linspace(1.02, 0.80, a["close"].shape[0] - br - 1)
+    level = float(a["close"][br, 0])
+    path = level * np.linspace(1.01, 0.80, a["close"].shape[0] - br - 1)
     for key, mult in (("close", 1.0), ("adj", 1.0), ("high", 1.002),
                       ("low", 0.998), ("open", 0.999)):
         a[key][br + 1:, 0] = path * mult
     cut, _, _ = bt.simulate(dict(f2, arrays=a), cfg(hyp=a3, max_names=30))
     dead = [t for t in cut if t["ticker"] == "N00.US"]
     assert dead and all(t["exit_reason"] == "level_stop" for t in dead)
-    assert all(t["bars_held"] <= 5 for t in dead), "a failed breakout dies in days, not weeks"
+    assert all(t["bars_held"] <= 15 for t in dead), (
+        "a breakout sliding back through its level dies in sessions, not months")
     assert all(t["pnl_pct"] > -0.15 for t in dead), (
         "the level stop's whole point is that failures are scratches, not 3xATR losses")
 
@@ -1461,6 +1466,155 @@ def test_every_other_door_defaults_its_level_to_its_pivot():
     hero = [t for t in trades if t["ticker"] == "N00.US"]
     assert hero and any(t["exit_reason"] == "level_stop" for t in hero), (
         "a base entry closing below its pivot must stop on the pivot the door recorded")
+
+
+def test_the_new_high_door_rests_a_stop_limit_rather_than_chasing_any_open():
+    """Run 67's hero gapped down 25% from its signal close and the engine BOUGHT it at the
+    collapsed open — the signal read the prior close and nothing checked how far the open had
+    travelled. §3.2's base door has always refused a fill past its ceiling; this door had no
+    limit at all, which models an order no broker would execute.
+
+    All three branches, on hand-built opens against a fixed level.
+    """
+    a3 = {**bt.PRESETS["a3"], "park_idle": False, "cash_target": None, "vol_target": None}
+
+    def opening(gap):
+        """The leader breaks out, then opens `gap` away from the level and holds there."""
+        f, br = frame(hero_volume_multiple=3.0, breakout_at=bt.WARMUP + 10)
+        a = {k: v.copy() for k, v in f["arrays"].items()}
+        level = float(a["close"][br, 0])
+        n = a["close"].shape[0] - br - 1
+        path = np.full(n, level * gap)
+        for key, mult in (("close", 1.0), ("adj", 1.0), ("high", 1.002), ("low", 0.998)):
+            a[key][br + 1:, 0] = path * mult
+        a["open"][br + 1:, 0] = path
+        return dict(f, arrays=a), level
+
+    # gapped far past the ceiling: the refusal is counted, and nothing is bought AT the gap.
+    # (The next session the stock is quiet at its new high, so the resting order moves up with
+    # the level and fills there — which is the trend-follower doing its job, not a leak.)
+    f, level = opening(1.30)
+    trades, _, conf = bt.simulate(f, cfg(hyp=a3, max_names=30))
+    assert conf["gap_no_fill"] >= 1, "the refusal has to be visible, not silent"
+    hero = [t for t in trades if t["ticker"] == "N00.US"]
+    assert all(t["entry_price"] <= level * 1.30 * 1.001 for t in hero), (
+        "nothing may be bought above the level that triggered it plus the ceiling")
+    assert all(t["entry_date"] > f["dates"][bt.WARMUP + 11] for t in hero), (
+        "the gap session itself must fill nothing")
+
+    # opens just above the level and inside the ceiling: fills at the open
+    f, level = opening(1.01)
+    trades, _, _ = bt.simulate(f, cfg(hyp=a3, max_names=30))
+    hero = [t for t in trades if t["ticker"] == "N00.US"]
+    assert hero and hero[0]["entry_price"] == pytest.approx(level * 1.01, rel=2e-3), (
+        "the fill is the open, plus the half-spread the engine charges at it")
+
+    # opens BELOW the level: the stop never triggered, so the fill is at the level or nowhere.
+    # This fixture's high (level x 0.97 x 1.002) never reaches the level, so nothing fills.
+    f, level = opening(0.97)
+    trades, _, _ = bt.simulate(f, cfg(hyp=a3, max_names=30))
+    assert not [t for t in trades if t["ticker"] == "N00.US"], (
+        "a session that never trades up through the level leaves the order resting")
+
+
+def test_the_handover_hands_over_on_time_and_only_then():
+    """A3c. The level stop governs for `level_stop_sessions`, then the Chandelier does — and the
+    switch is TIME, not R, because under a level stop the initial stop is the 10xATR catastrophe
+    rung and "+1R" is a move no breakout makes (the trail would never engage at all).
+
+    The fixture: a leader that breaks out, runs, and then gives back through its entry level long
+    after the handover. Under A3b that close ends it; under A3c the wide trail is already in
+    charge and the position survives, because 8xATR is far below a level the stock has left.
+    """
+    def runner_then_dip(dip_at, dip_to, ramp=12):
+        """Rise, then SLIDE back — a ramp rather than a cliff, so the exit under test is the
+        level stop rather than the gap rule (an instant 25% drop opens under any stop and the
+        `gap` branch takes it first, which is correct and tests something else)."""
+        f, br = frame(hero_volume_multiple=3.0, breakout_at=bt.WARMUP + 10)
+        a = {k: v.copy() for k, v in f["arrays"].items()}
+        level = float(a["close"][br, 0])
+        n = a["close"].shape[0] - br - 1
+        path = np.concatenate([np.linspace(level * 1.01, level * 1.30, dip_at),
+                               np.linspace(level * 1.30, level * dip_to, ramp),
+                               np.full(max(n - dip_at - ramp, 0), level * dip_to)])[:n]
+        for key, mult in (("close", 1.0), ("adj", 1.0), ("high", 1.002), ("low", 0.998)):
+            a[key][br + 1:, 0] = path * mult
+        a["open"][br + 1:, 0] = path * 0.999
+        return dict(f, arrays=a)
+
+    base = dict(park_idle=False, cash_target=None, vol_target=None)
+    a3b = {**bt.PRESETS["a3"], **base}
+    a3c = {**bt.PRESETS["a3c"], **base}
+
+    # dips back under the level at session 40 — long past the handover
+    f = runner_then_dip(40, 0.98)
+    late_b = [t for t in bt.simulate(f, cfg(hyp=a3b, max_names=30))[0]
+              if t["ticker"] == "N00.US"]
+    late_c = [t for t in bt.simulate(f, cfg(hyp=a3c, max_names=30))[0]
+              if t["ticker"] == "N00.US"]
+    assert any(t["exit_reason"] == "level_stop" for t in late_b), (
+        "A3b's level stop must fire on a close below the level, whenever it comes")
+    assert not any(t["exit_reason"] == "level_stop" for t in late_c), (
+        "past the handover the level must no longer govern — the trail does")
+
+    # and the level stop is still live BEFORE the handover — the break has to land inside the
+    # ten sessions, or the Chandelier takes over first and the branch under test never runs
+    early = runner_then_dip(1, 0.98, ramp=5)
+    early_c = [t for t in bt.simulate(early, cfg(hyp=a3c, max_names=30))[0]
+               if t["ticker"] == "N00.US"]
+    assert any(t["exit_reason"] == "level_stop" for t in early_c), (
+        "before the handover A3c must cut exactly as A3b does — that is the cheap filter")
+
+
+def test_an_arm_with_its_own_stop_regime_does_not_also_run_the_law_ladder():
+    """The defect runs 65 and 67 carried. The ladder bypass keyed on `chandelier_mult` alone, so
+    A3 — a level stop and a catastrophe rung, no trail anywhere in its spec — silently ran
+    §3.2's 10% trail from +15% behind every position and clipped each winner 10% off its high.
+    Measured consequence: a 40% ride against A2's 80% on the same tape.
+
+    Proven by construction rather than by outcome: with the ladder declared off, moving the
+    ladder's own settings must change nothing at all.
+    """
+    f, _ = runner_frame(top=2.6)
+    a3 = {**bt.PRESETS["a3"], "park_idle": False, "cash_target": None, "vol_target": None}
+    quiet = bt.simulate(f, cfg(hyp=a3, max_names=30))[0]
+    noisy = bt.simulate(f, cfg(hyp={**a3, "trail_from": 0.02, "trail": 0.01,
+                                    "breakeven": True, "euphoria": True}, max_names=30))[0]
+    assert [(t["ticker"], t["exit_date"], t["exit_price"]) for t in quiet] == \
+           [(t["ticker"], t["exit_date"], t["exit_price"]) for t in noisy], \
+        "ladder settings moved an A3 run — the law's stops are still running behind it"
+
+    # and with the ladder ON (the law), those same settings must bite — or the test above is
+    # passing because the fixture has no winners rather than because the bypass works
+    # The control, at the ladder itself: those same settings MUST move the law's stop, or
+    # the equality above would prove only that the fixture has nothing for a trail to bite.
+    closes = list(np.linspace(100.0, 140.0, 49)) + [140.0]
+    kw = dict(closes=closes, avg_cost=100.0, current_stop=90.0, pyramid_step=1)
+    assert sg.ratchet_stop(**kw)["stop"] != sg.ratchet_stop(
+        **kw, trail10_from=0.02, trail10=0.01)["stop"]
+
+
+def test_the_conformance_table_says_which_stop_regime_ran():
+    conf = dict(m4_evaluated=1, m4_known=1, blackout_decisions=1, blackout_known=1,
+                entries=1, entries_refused_below_70=0, reentries=0, recoveries=0,
+                new_high_entries=1, trims=0, heat_refused=0)
+    stops = lambda hyp: next(c for c in bt.conformance(conf, [], [], hyp=hyp)
+                             if c["fn"] == "signals.ratchet_stop")
+    a3 = dict(bt.LAW); a3.update(bt.PRESETS["a3"])
+    a2 = dict(bt.LAW); a2.update(bt.PRESETS["a2"])
+    assert stops(a3)["ladder_enforced"] is False and stops(a3)["replaced_by"] == "level_stop"
+    assert stops(a2)["replaced_by"] == "chandelier"
+    assert stops(dict(bt.LAW))["ladder_enforced"] is True
+    assert stops(dict(bt.LAW))["replaced_by"] is None
+
+
+def test_a3c_moves_only_the_handover_clauses():
+    a3, a3c = bt.PRESETS["a3"], bt.PRESETS["a3c"]
+    assert {k for k in a3c if a3c[k] != a3.get(k)} == {
+        "level_stop_sessions", "chandelier_mult", "chandelier_atr_window"}
+    assert a3c["level_stop_sessions"] == 10, "the survival curve's own date"
+    assert a3c["chandelier_mult"] == 8.0, "the needed-trail p75 is 7.9 ATRs"
+    assert bt.LAW["level_stop_sessions"] is None, "the law hands nothing over"
 
 
 def test_the_level_stop_is_declared_and_the_law_does_not_know_it():
