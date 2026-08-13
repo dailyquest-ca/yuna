@@ -1,0 +1,295 @@
+"""concentrated — the winner-catcher, tested on its own terms (WO-A4).
+
+Zak, 2026-08-13: *"There IS a combination of buying stocks over the year that went very high value
+very quickly... I'm talking about picking out the winners... and only what is going to our momentum
+sleeve is cycled into potential big winners like MRVL, GOOGL, SQ, MU... catching all of the +100%
+within a year... and we don't want A LOT of trades, like 10-15 names a year, because we want to
+work our day job."*
+
+That is a different shape from everything the E-series ran, and the difference is the point:
+
+  * A2 and A3 were BREADTH arms — thirty slots, thousands of trades, catching a large share of a
+    large population. They measured well and returned badly.
+  * This is a PRECISION arm. The census says 50-282 liquid names double in a given year (median
+    ~140 of roughly 3,000 eligible, so a ~5% base rate). Holding 10-15 of them at a time, changed
+    a few times a year, is a dozen-odd decisions a year — a book a person with a job can actually
+    run.
+
+**No §3.2 machinery.** No base detection, no pivot, no MCN, no confirmation state machine, no
+trim ladder. Today's session spent five runs discovering that every new strategy shape inherits
+the law's defaults until each one is explicitly switched off. This module holds one idea and
+implements only that idea: rank the liquid universe by trend, hold the top N, change the book on
+a slow clock, park the rest in the momentum ETF.
+
+Deliberate design choices, each with its source:
+
+  * **12-1 momentum** — the twelve-month return skipping the most recent month, the academic
+    standard and SPMO's own published methodology (which measures 12 months excluding the last,
+    then adjusts for volatility). `risk_adjusted` divides by the realized volatility of daily
+    returns, which is SPMO's adjustment and the Clenow R-squared idea in a cheaper form.
+  * **A slow clock.** Rebalancing quarterly or semi-annually is what keeps the trade count near a
+    dozen a year; it is also what the momentum literature finds survives costs at small AUM.
+  * **The park.** Idle capital sits in SPMO, per the measured ladder: on this window the vehicle
+    returned 21.12% CAGR alone, and every point of the account not in a single name earns it.
+  * **Costs** are §2.2's curve, charged per side on every traded dollar.
+
+    python src/concentrated.py          # the announced grid
+    CELLS='n10_semi,n15_quarterly'      # or a named subset
+
+Writes one `backtest_runs` row per cell and scores each with `finding`, exactly like every other
+arm, so these numbers sit in the same ledger under the same bars.
+"""
+import os
+import sys
+import json
+import hashlib
+import pathlib
+import datetime as dt
+
+import numpy as np
+
+from db import connect, dry, Heartbeat
+from backtest import SPREAD_CURVE, BENCH
+from capture_audit import load_tape
+import finding
+
+PARK_TICKER = "SPMO.US"
+FORMATION = 252          # the twelve months the rank is measured over
+SKIP = 21                # ... minus the most recent month (12-1, the standard)
+VOL_WINDOW = 252
+L0_MIN_BARS = 210
+L0_MIN_RAW = 5.0
+L0_MIN_ADDV = 10_000_000.0
+ADDV_WINDOW = 50
+
+# The announced grid (WO-A4). One axis moves per cell against the centre `n12_semi`.
+CELLS = {
+    # centre: twelve names, changed twice a year, risk-adjusted rank, whole account in the sleeve
+    "n12_semi":       dict(n=12, months=6, risk_adjusted=True,  sleeve=1.00),
+    # how many names — the concentration axis Zak's ask is really about
+    "n8_semi":        dict(n=8,  months=6, risk_adjusted=True,  sleeve=1.00),
+    "n20_semi":       dict(n=20, months=6, risk_adjusted=True,  sleeve=1.00),
+    # how often the book changes — the trade-count axis, and the day-job constraint
+    "n12_quarterly":  dict(n=12, months=3, risk_adjusted=True,  sleeve=1.00),
+    "n12_annual":     dict(n=12, months=12, risk_adjusted=True, sleeve=1.00),
+    # raw 12-1 against the volatility-adjusted rank — SPMO's own adjustment, priced
+    "n12_semi_raw":   dict(n=12, months=6, risk_adjusted=False, sleeve=1.00),
+    # the sleeve fraction: the rest parked in SPMO, which is the shape Zak described
+    "n12_semi_half":  dict(n=12, months=6, risk_adjusted=True,  sleeve=0.50),
+    "n12_semi_third": dict(n=12, months=6, risk_adjusted=True,  sleeve=0.30),
+}
+
+
+def spread_frac(addv):
+    for floor, bps in SPREAD_CURVE:
+        if addv >= floor:
+            return bps / 10_000.0
+    return SPREAD_CURVE[-1][1] / 10_000.0
+
+
+def build_grid(tape):
+    """The tape as (dates, tickers, adjusted closes, raw closes, dollar volume) arrays."""
+    tickers = sorted({r[0] for r in tape})
+    dates = sorted({r[1] for r in tape})
+    ti = {t: i for i, t in enumerate(tickers)}
+    di = {d: i for i, d in enumerate(dates)}
+    shape = (len(dates), len(tickers))
+    adj = np.full(shape, np.nan)
+    raw = np.full(shape, np.nan)
+    dv = np.full(shape, np.nan)
+    for tk, d, close, a, vol in tape:
+        i, j = di[d], ti[tk]
+        if a is None or a <= 0:
+            continue
+        adj[i, j] = float(a)
+        raw[i, j] = float(close) if close is not None else np.nan
+        dv[i, j] = float(a) * float(vol) if vol is not None else np.nan
+    return dates, tickers, adj, raw, dv
+
+
+def rebalance_dates(dates, months, warmup):
+    """The last session of each period, after the formation window is available."""
+    out, seen = [], set()
+    for i, d in enumerate(dates):
+        if i < warmup:
+            continue
+        key = (d.year, (d.month - 1) // months)
+        if key not in seen:
+            seen.add(key)
+            out.append(i)
+    return out
+
+
+def rank_at(i, adj, raw, dv, *, risk_adjusted):
+    """12-1 momentum over the liquid universe at session i. Uses bars <= i only."""
+    if i < FORMATION + 1:
+        return []
+    past, recent = adj[i - FORMATION], adj[i - SKIP]
+    live = np.isfinite(past) & np.isfinite(recent) & (past > 0)
+    bars = np.isfinite(adj[max(0, i - FORMATION + 1):i + 1]).sum(axis=0)
+    addv = np.nanmedian(dv[max(0, i - ADDV_WINDOW + 1):i + 1], axis=0)
+    with np.errstate(invalid="ignore"):
+        eligible = (live & (bars >= L0_MIN_BARS) & (raw[i] >= L0_MIN_RAW)
+                    & (addv >= L0_MIN_ADDV))
+    idx = np.where(eligible)[0]
+    if not len(idx):
+        return []
+    score = recent[idx] / past[idx] - 1.0
+    if risk_adjusted:
+        window = adj[max(0, i - VOL_WINDOW):i + 1, idx]
+        rets = np.diff(window, axis=0) / window[:-1]
+        vol = np.nanstd(rets, axis=0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            score = np.where(vol > 0, score / vol, np.nan)
+    ok = np.isfinite(score)
+    idx, score = idx[ok], score[ok]
+    return [int(j) for j in idx[np.argsort(-score)]]
+
+
+def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted, sleeve,
+             start_nav):
+    """Hold the top `n` names, changed every `months`, with the rest of the account in the park."""
+    warmup = FORMATION + 1
+    rebals = set(rebalance_dates(dates, months, warmup))
+    held = {}                       # ticker index -> shares
+    park_qty, cash = 0.0, start_nav
+    equity, trades, costs = [], [], 0.0
+
+    def mark(i):
+        v = sum(q * adj[i, j] for j, q in held.items() if np.isfinite(adj[i, j]))
+        p = park_qty * park_px[i] if np.isfinite(park_px[i]) else 0.0
+        return cash + v + p
+
+    for i in range(warmup, len(dates)):
+        nav = mark(i)
+        if i in rebals and np.isfinite(park_px[i]):
+            want = rank_at(i, adj, raw, dv, risk_adjusted=risk_adjusted)[:n]
+            wanted = set(want)
+            # sell what fell out of the book, and the park, then buy the new book
+            for j in list(held):
+                if j not in wanted and np.isfinite(adj[i, j]):
+                    px = adj[i, j]
+                    gross = held[j] * px
+                    fee = gross * spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
+                    cash += gross - fee
+                    costs += fee
+                    trades.append(dict(ticker=tickers[j], exit_date=dates[i], proceeds=gross))
+                    del held[j]
+            if park_qty > 0:
+                gross = park_qty * park_px[i]
+                cash += gross * (1 - spread_frac(1e9))
+                costs += gross * spread_frac(1e9)
+                park_qty = 0.0
+            nav = cash
+            per_name = nav * sleeve / max(len(want), 1) if want else 0.0
+            for j in want:
+                if not np.isfinite(adj[i, j]):
+                    continue
+                px = adj[i, j]
+                fee_frac = spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
+                have = held.get(j, 0.0) * px
+                # Cap the slice at what the account can actually pay, fee included. Sizing N
+                # equal slices out of NAV and then charging a spread on each leaves the LAST
+                # name unfunded by exactly the fees — a book of eleven names wearing a
+                # twelve-name label, with the shortfall landing silently on whichever name
+                # ranked last.
+                spend = min(max(per_name - have, 0.0), cash / (1 + fee_frac))
+                if spend <= 0:
+                    continue
+                qty = spend / (px * (1 + fee_frac))
+                held[j] = held.get(j, 0.0) + qty
+                cash -= spend
+                costs += spend * fee_frac / (1 + fee_frac)
+                trades.append(dict(ticker=tickers[j], entry_date=dates[i], spend=spend))
+            idle = max(cash, 0.0)
+            if idle > 0:
+                park_qty += idle / (park_px[i] * (1 + spread_frac(1e9)))
+                costs += idle * spread_frac(1e9)
+                cash = 0.0
+        equity.append((dates[i], mark(i), float(park_px[i]) if np.isfinite(park_px[i]) else None))
+    return equity, trades, costs
+
+
+def main():
+    here = pathlib.Path(__file__).resolve().parent
+    code = hashlib.sha256((here / "concentrated.py").read_bytes()).hexdigest()[:16]
+    start_nav = float(os.environ.get("START_NAV", "200000"))
+    want = [c.strip() for c in os.environ.get("CELLS", "").split(",") if c.strip()] or list(CELLS)
+
+    with connect() as conn:
+        with Heartbeat(conn, "concentrated") as hb:
+            with conn.cursor() as cur:
+                tape = load_tape(cur)
+                cur.execute("""select d, coalesce(adj_close, close) from prices
+                                where ticker = %s order by d""", (PARK_TICKER,))
+                park_rows = dict(cur.fetchall())
+                cur.execute("""select d, coalesce(adj_close, close) from prices
+                                where ticker = %s order by d""", (BENCH,))
+                bench_rows = dict(cur.fetchall())
+            dates, tickers, adj, raw, dv = build_grid(tape)
+            park_px = np.array([float(park_rows.get(d, np.nan)) for d in dates])
+            # forward-fill the park so a dark session carries its last mark rather than vanishing
+            for i in range(1, len(park_px)):
+                if not np.isfinite(park_px[i]):
+                    park_px[i] = park_px[i - 1]
+            first = int(np.argmax(np.isfinite(park_px)))
+            print(f"grid {len(dates)} sessions x {len(tickers)} names · park from {dates[first]}")
+
+            written = []
+            for name in want:
+                spec = CELLS[name]
+                eq, trades, costs = simulate(dates, tickers, adj, raw, dv, park_px,
+                                             start_nav=start_nav, **spec)
+                eq = [(d, v, bench_rows.get(d)) for d, v, _ in eq
+                      if d >= dates[first]]
+                nav = np.array([e[1] for e in eq])
+                years = max((eq[-1][0] - eq[0][0]).days / 365.25, 1e-9)
+                total = float(nav[-1] / nav[0] - 1)
+                cagr = float((1 + total) ** (1 / years) - 1)
+                dd = float((nav / np.maximum.accumulate(nav) - 1).min())
+                entries = [t for t in trades if "entry_date" in t]
+                per_year = len(entries) / years
+                rows = [(d, float(v), float(b)) for d, v, b in eq if b is not None]
+                full = finding.score_cut(finding.cut(rows, []))
+                try:
+                    oos = finding.score_cut(finding.cut(rows, [], since=finding.OOS_START))
+                except RuntimeError:
+                    oos = None
+                print(f"{name}: {total:+.1%} · CAGR {cagr:.2%} · maxDD {dd:.1%} · "
+                      f"{len(entries)} entries ({per_year:.1f}/yr) · cost ${costs:,.0f}")
+                if dry():
+                    continue
+                params = dict(variant=name, hypothesis="a4", code_stamp=code, currency="USD",
+                              benchmark=BENCH, start_nav=start_nav, park=PARK_TICKER,
+                              spec=spec, formation=FORMATION, skip=SKIP)
+                stats = dict(a4=dict(spec=spec, entries=len(entries),
+                                     entries_per_year=round(per_year, 2),
+                                     cost_usd=round(costs, 2)),
+                             bars_25=dict(source="wo-a4-2026-08-13", full=full, oos=oos,
+                                          dsr="not scored — see the ledger's swept runs"),
+                             conformance_ok=True, exits={})
+                with conn.cursor() as cur:
+                    cur.execute("""insert into backtest_runs(label,params,start_date,end_date,
+                          trading_days,start_nav,end_nav,total_return,cagr,max_drawdown,
+                          max_dd_date,trades,stats)
+                        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id""",
+                        (f"A4 · concentrated · {name}", json.dumps(params, default=str),
+                         eq[0][0], eq[-1][0], len(eq), start_nav, float(nav[-1]), total, cagr,
+                         dd, eq[int(np.argmin(nav / np.maximum.accumulate(nav)))][0],
+                         len(entries), json.dumps(stats, default=str)))
+                    rid = cur.fetchone()[0]
+                    cur.executemany("""insert into backtest_equity(run_id,d,nav,exposure,
+                                         positions,gate,benchmark) values (%s,%s,%s,%s,%s,%s,%s)""",
+                        [(rid, d, v, spec["sleeve"], spec["n"], None, b) for d, v, b in eq])
+                conn.commit()
+                written.append(rid)
+                print(f"  run {rid} written")
+            hb.rows = len(written)
+            hb.detail["run_ids"] = written
+            if written:
+                pathlib.Path("/tmp/run_ids.txt").write_text("\n".join(str(r) for r in written))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

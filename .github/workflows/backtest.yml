@@ -43,7 +43,10 @@ on:
         description: 'drawdown kill bar for the §2.5 verdict (E3 cells declare -0.34; blank = the arm declares none)'
         default: ''
       research:
-        description: 'run a WO-A3 research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger'
+        description: 'run a research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger, `concentrated` = WO-A4 the winner-catcher'
+        default: ''
+      cells:
+        description: 'concentrated only: comma-separated cells (blank = the whole announced grid)'
         default: ''
       dry_run:
         description: 'compute everything, write nothing'
@@ -133,6 +136,36 @@ jobs:
       - name: autopsy on failure
         if: failure() && steps.engine.outcome == 'failure'
         run: python src/report_fail.py push_study /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  concentrated:
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'concentrated'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: run
+        id: engine
+        run: set -o pipefail; python src/concentrated.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          START_NAV: ${{ inputs.start_nav || '200000' }}
+          CELLS: ${{ inputs.cells }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: capture audit
+        if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true'
+        run: |
+          for rid in $(cat /tmp/run_ids.txt); do RUN_ID=$rid python src/capture_audit.py; done
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: autopsy on failure
+        if: failure() && steps.engine.outcome == 'failure'
+        run: python src/report_fail.py concentrated /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
