@@ -28,6 +28,7 @@ import numpy as np
 
 from db import connect, dry, Heartbeat
 from capture_audit import episodes_for_name, load_tape, LOOKBACK
+import signals as sg
 
 DEFAULT_START = dt.date(2017, 9, 1)      # the E-series record's window (runs 46+)
 GATE_INDEX = "GSPC.INDX"                 # Clenow's regime gate reads the index itself
@@ -40,27 +41,12 @@ SESSIONS_PER_YEAR = 252
 
 
 def exp_regression(closes):
-    """Annualized exponential regression slope and R² over the window — how fast, how clean.
-
-    ln(price) on time, least squares; slope per session annualized as exp(m*252)-1. Returns
-    (None, None) when the window is short or degenerate rather than guessing.
-    """
-    c = np.asarray(closes, dtype=float)
-    if len(c) < SLOPE_WINDOW or np.any(c <= 0):
-        return None, None
-    y = np.log(c[-SLOPE_WINDOW:])
-    x = np.arange(SLOPE_WINDOW, dtype=float)
-    xm, ym = x.mean(), y.mean()
-    sxx = ((x - xm) ** 2).sum()
-    if sxx == 0:
-        return None, None
-    m = ((x - xm) * (y - ym)).sum() / sxx
-    fit = ym + m * (x - xm)
-    ss_res = ((y - fit) ** 2).sum()
-    ss_tot = ((y - ym) ** 2).sum()
-    if ss_tot < 1e-18:            # a flat series has no trend to score, and float noise on a
-        return None, None         # constant is not variance — R² of noise-over-noise is a lie
-    return float(np.exp(m * SESSIONS_PER_YEAR) - 1.0), float(1.0 - ss_res / ss_tot)
+    """Annualized exponential regression slope and R² — `signals.regression_momentum`, which is
+    the law's home for the formula. A second implementation here is how the study's lifts and
+    the engine's ranking would silently measure two different scores."""
+    out = sg.regression_momentum(closes, window=SLOPE_WINDOW,
+                                 sessions_per_year=SESSIONS_PER_YEAR)
+    return (out["slope_ann"], out["r2"]) if out else (None, None)
 
 
 def atr20(high, low, close):

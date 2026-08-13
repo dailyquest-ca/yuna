@@ -1132,3 +1132,36 @@ def risk_size(*, nav, entry, stop, risk_frac=0.005):
     if risk_per_share <= 0 or nav <= 0 or entry <= 0:
         return 0.0
     return float(nav * risk_frac / risk_per_share)
+
+
+def regression_momentum(close, *, window=90, sessions_per_year=252):
+    """How fast the trend runs, times how cleanly it runs — Clenow's momentum score (WO-A3 §3).
+
+    Least-squares fit of ln(price) on time over the trailing `window` sessions: the slope,
+    annualized as exp(m x 252) - 1, answers "what would a year of this trajectory return", and
+    the fit's R² discounts it by how much the path actually hugged that trajectory. A parabolic
+    mover and a grinder can share a slope; the R² separates them — and the frog-in-the-pan
+    result (Da-Gurun-Warachka, RFS 2014: +5.94%/mo continuation for smooth arrivals against
+    -2.07% for gappy ones on the same cumulative gain) is the measured reason the product, not
+    the slope alone, is the score.
+
+    Returns dict(slope_ann, r2, score) or None when the window is short, non-positive, or flat —
+    a trend that cannot be scored is declined, never defaulted.
+    """
+    c = np.asarray(close, dtype=float)
+    if len(c) < window or np.any(~np.isfinite(c[-window:])) or np.any(c[-window:] <= 0):
+        return None
+    y = np.log(c[-window:])
+    x = np.arange(window, dtype=float)
+    xm, ym = x.mean(), y.mean()
+    sxx = ((x - xm) ** 2).sum()
+    if sxx == 0:
+        return None
+    m = ((x - xm) * (y - ym)).sum() / sxx
+    ss_res = ((y - (ym + m * (x - xm))) ** 2).sum()
+    ss_tot = ((y - ym) ** 2).sum()
+    if ss_tot < 1e-18:
+        return None
+    slope_ann = float(np.exp(m * sessions_per_year) - 1.0)
+    r2 = float(1.0 - ss_res / ss_tot)
+    return dict(slope_ann=slope_ann, r2=r2, score=slope_ann * r2)

@@ -75,9 +75,10 @@ permissions:
   pull-requests: write
 
 # Not `yuna-writes`: this job touches `backtest_*` and nothing else (§4.2), so it cannot race the
-# chain. One run per ref is enough — a second push supersedes the first.
+# chain. One run per ref PER JOB is enough — a second push supersedes the first, but a blend
+# dispatch must not cancel a study dispatch riding the same file (run 64 died exactly that way).
 concurrency:
-  group: backtest-${{ github.ref }}
+  group: backtest-${{ github.ref }}-${{ inputs.research || 'engine' }}
   cancel-in-progress: true
 
 jobs:

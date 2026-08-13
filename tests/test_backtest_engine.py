@@ -1225,7 +1225,8 @@ def test_the_a2_preset_switches_off_everything_it_replaces():
     assert a2["chandelier_mult"] == 8.0 and a2["chandelier_atr_window"] == 22
     for off in ("trim_at", "trim_frac", "pyramid_spacing", "breakeven_r", "heat_cap", "max_stop"):
         assert a2[off] is None, f"A2 must not carry {off}"
-    for off in ("breakeven", "euphoria", "require_m4", "m4_swing", "press_on_next_base"):
+    for off in ("breakeven", "euphoria", "require_m4", "m4_swing", "press_on_next_base",
+                "template_exit", "score_exit", "earnings_exit", "gate_off_exit"):
         assert a2[off] is False, f"A2 must not carry {off}"
     assert a2["entry_fraction"] == 1.0 and a2["pyramid_tranches"] == 1
     # every A2 key must exist in LAW or the env-override loop silently drops it
@@ -1339,6 +1340,134 @@ def test_a2_never_exits_on_the_volume_hair_trigger():
     a2 = {**bt.PRESETS["a2"], "park_idle": False, "cash_target": None}
     trades, _, _ = bt.simulate(f, cfg(hyp=a2, max_names=30))
     assert "unconfirmed" not in {t["exit_reason"] for t in trades}
+
+
+A2_OWN_EXITS = {"stop", "gap", "delisted", "end_of_test"}
+
+
+def test_a2_exits_are_the_arms_own_and_nothing_else():
+    """E3 names two exits — the stop and the Chandelier — and runs 54 through 58 all wore §3.2's
+    anyway: run 58's census reads score 711, template 290, earnings 186, gate_off 116 of 1,648,
+    because `forever` only engages after a completed trim ladder and A2 has no trims. The four
+    are now off BY KEY. Asserted across fixtures that fire different §3.2 exits under the law,
+    including the shape whose whole purpose is to trigger the template exit."""
+    for kwargs in (dict(hero_volume_multiple=3.0),
+                   dict(hero_after=0.80, breakout_at=DAYS - 14)):
+        f, _ = frame(**kwargs)
+        a2 = {**bt.PRESETS["a2"], "park_idle": False, "cash_target": None}
+        trades, _, _ = bt.simulate(f, cfg(hyp=a2, max_names=30))
+        stray = {t["exit_reason"] for t in trades} - A2_OWN_EXITS
+        assert stray == set(), f"§3.2 exits leaked back into A2: {sorted(stray)}"
+
+
+def test_every_suppressed_exit_is_named_on_the_table():
+    conf = dict(m4_evaluated=1, m4_known=1, blackout_decisions=1, blackout_known=1,
+                entries=1, entries_refused_below_70=0, reentries=0, recoveries=0,
+                new_high_entries=1, trims=0, heat_refused=0)
+    exits_row = lambda hyp: next(c for c in bt.conformance(conf, [], [], hyp=hyp)
+                                 if c["clause"].startswith("Exits"))
+    a2 = dict(bt.LAW); a2.update(bt.PRESETS["a2"])
+    assert exits_row(a2)["suppressed"] == ["earnings", "gate_off", "score", "template"], (
+        "an arm that replaces the law's exits must say so by name, every one")
+    assert exits_row(dict(bt.LAW))["suppressed"] == [], "the law suppresses nothing"
+
+
+# ------------------------------------------------------- A3: the arm the push study wrote
+#
+# 56,380 resolved episodes, 2017-2026: 3.86% of eligible 252-high breakouts run +50% before a
+# close gives the level back; the rest die in ~10 sessions at -1% to -3%. Completion and EV are
+# monotone in volatility (0.59x -> 1.74x, +0.16% -> +0.91% per episode), a 3xATR trail kills 70%
+# of the winners, and the winners never close below the level on the way — which makes the level
+# itself the measured exit. Every A3 clause below traces to one of those measurements via
+# wo-a3-2026-08-13 §3.
+
+def test_the_level_stop_rides_what_never_breaks_and_cuts_what_does():
+    a3 = {**bt.PRESETS["a3"], "park_idle": False, "cash_target": None,
+          "vol_target": None}                       # the governor is tested on its own dial
+    f, _ = runner_frame(top=2.6)                    # rises forever: never closes below entry
+    trades, _, _ = bt.simulate(f, cfg(hyp=a3, max_names=30))
+    hero = [t for t in trades if t["ticker"] == "N00.US"]
+    assert hero, "the leader makes a fresh high daily — A3 must be in it"
+    assert all(t["exit_reason"] in ("end_of_test", "level_stop") for t in hero)
+    rode = [t for t in hero if t["exit_reason"] == "end_of_test"]
+    assert rode and max(t["bars_held"] for t in rode) > 60, (
+        "a runner that never closes below its level must be HELD, not clipped")
+
+    # a breakout that SLIDES back through its level — hero_after's flat shape cannot test this,
+    # because a flat close sits 0.1% above the fill by construction (open = 0.999 x close).
+    # The breakout sits just past warmup so it is the hero's FIRST eligible signal: on the
+    # default fixture the rise itself makes fresh highs and A3 rightly enters far earlier,
+    # which is the ride case again, not the cut case.
+    f2, br = frame(hero_volume_multiple=3.0, breakout_at=bt.WARMUP + 10)
+    a = {k: v.copy() for k, v in f2["arrays"].items()}
+    pivot = float(a["close"][br, 0]) / 1.03
+    path = pivot * np.linspace(1.02, 0.80, a["close"].shape[0] - br - 1)
+    for key, mult in (("close", 1.0), ("adj", 1.0), ("high", 1.002),
+                      ("low", 0.998), ("open", 0.999)):
+        a[key][br + 1:, 0] = path * mult
+    cut, _, _ = bt.simulate(dict(f2, arrays=a), cfg(hyp=a3, max_names=30))
+    dead = [t for t in cut if t["ticker"] == "N00.US"]
+    assert dead and all(t["exit_reason"] == "level_stop" for t in dead)
+    assert all(t["bars_held"] <= 5 for t in dead), "a failed breakout dies in days, not weeks"
+    assert all(t["pnl_pct"] > -0.15 for t in dead), (
+        "the level stop's whole point is that failures are scratches, not 3xATR losses")
+
+
+def test_the_level_stop_is_declared_and_the_law_does_not_know_it():
+    conf = dict(m4_evaluated=1, m4_known=1, blackout_decisions=1, blackout_known=1,
+                entries=1, entries_refused_below_70=0, reentries=0, recoveries=0,
+                new_high_entries=1, trims=0, heat_refused=0)
+    a3 = dict(bt.LAW); a3.update(bt.PRESETS["a3"])
+    trades = [dict(mcn=None, exit_reason="level_stop")]
+    exits_row = lambda hyp: next(c for c in bt.conformance(conf, trades, [], hyp=hyp)
+                                 if c["clause"].startswith("Exits"))
+    assert "level_stop" in exits_row(a3)["variant_reasons"]
+    assert exits_row(a3)["unknown_reasons"] == []
+    assert exits_row(dict(bt.LAW))["unknown_reasons"] == ["level_stop"], (
+        "under the law a level-stop exit is an invented reason, exactly like volume unconfirmed")
+    assert bt.LAW["level_stop"] is False
+
+
+def test_equal_weight_sizes_every_slot_the_same_and_the_governor_only_shrinks():
+    a3 = {**bt.PRESETS["a3"], "park_idle": False, "cash_target": None, "vol_target": None}
+    f, _ = runner_frame(top=2.6)
+    trades, _, _ = bt.simulate(f, cfg(hyp=a3, max_names=30))
+    assert trades
+    for t in trades:
+        assert t["size_pct"] == pytest.approx(1.0 / 30.0, rel=1e-6), (
+            "a level stop has no distance to size from — the only honest size is 1/N")
+
+    # the governor's dial, on its own: warmup reads 1.0, hot vol shrinks, quiet caps at 1.0
+    calm = [(None, 100_000.0 * (1.0002 ** i)) for i in range(200)]
+    hot = [(None, 100_000.0 * (1 + 0.04 * ((-1) ** i))) for i in range(200)]
+    assert bt._vol_scalar(calm[:50], 0.12, 126) == 1.0, "no history is warmup, not a guess"
+    assert bt._vol_scalar(calm, 0.12, 126) == 1.0, "the governor never levers up"
+    g = bt._vol_scalar(hot, 0.12, 126)
+    assert 0.0 < g < 0.25, f"64% annualized chop against a 12% target must shrink hard: {g}"
+
+
+def test_vol_desc_orders_the_queue_loudest_first():
+    f, _ = frame()
+    a3 = dict(bt.LAW); a3.update(bt.PRESETS["a3"])
+    loud = _ranked(f, a3)
+    key = lambda tk: -loud["atr_fraction"][tk] if loud["atr_fraction"].get(tk) is not None \
+        else float("inf")
+    assert loud["l1m"] == sorted(loud["l1m"], key=key), (
+        "vol_desc must put the loudest trend first — the measured 1.74x completion quartile")
+
+
+def test_the_a3_preset_carries_its_measurements_and_nothing_stray():
+    a3 = bt.PRESETS["a3"]
+    assert a3["level_stop"] is True and a3["size_nav_frac"] == pytest.approx(1 / 30)
+    assert a3["slot_order"] == "vol_desc" and a3["entry_mcn_floor"] is False
+    assert a3["atr_stop_mult"] == 10.0 and a3["max_stop"] is None, (
+        "the catastrophe stop is the Protect layer, wide of the p90 needed trail as an initial")
+    assert a3["chandelier_mult"] is None, "the centre rides the level, not a trail"
+    assert a3["vol_target"] == 0.12 and a3["vol_window"] == 126, "the paper's own constants"
+    for off in ("template_exit", "score_exit", "earnings_exit", "gate_off_exit"):
+        assert a3[off] is False
+    assert [k for k in a3 if k not in bt.LAW] == [], (
+        "every A3 key must exist in LAW or the env-override loop silently drops it")
 
 
 # ------------------------------------------------- the new-high door is declared, not a violation

@@ -81,6 +81,15 @@ LAW = dict(park_idle=False,            # K1  — idle capital sits in cash, earn
            trim_at=None,               # M1  — unrealised gains at which to sell a slice
            trim_frac=0.25,             #     — how much of the full position each slice is
            runner_immunity=False,      #     — what is left after a trim rides on the stop alone
+           score_exit=True,            # §3.2 — sell when MCN falls below the hold floor. A2/A3
+           earnings_exit=True,         #      — the earnings wall; and the §3.3 crash-protocol
+           gate_off_exit=True,         #        exit. All three are the law; an arm that replaces
+                                       #        its exits declares them OFF, and the conformance
+                                       #        table names every suppressed one. Run 58: these
+                                       #        three plus the template closed 79% of an arm
+                                       #        whose spec names none of them — the `forever`
+                                       #        flag never engaged because it is conditioned on
+                                       #        completing a trim ladder A2 does not carry.
            heat_cap=None,              # H1  — total open risk, as a fraction of NAV
            pyramid_spacing=None,       # A1  — average in: tranche spacing, equal thirds
            pyramid_tranches=3,
@@ -111,6 +120,23 @@ LAW = dict(park_idle=False,            # K1  — idle capital sits in cash, earn
                                        #       order, so across days the earliest breakout wins.
                                        #       'trend_vol' is the pre-registered alternative arm:
                                        #       calmest trend (lowest ATR fraction) first.
+                                       #       'vol_desc' is A3's measured centre: LOUDEST first —
+                                       #       the push study's completion lift is 1.74x in the
+                                       #       top volatility quartile against 0.59x in the
+                                       #       bottom, and per-episode EV runs +0.91% vs +0.16%.
+           level_stop=False,           # A3  — the breakout level IS the stop: exit on a CLOSE
+                                       #       below the entry level, acted next open. The push
+                                       #       ledger's own structure — 93% of breakouts die
+                                       #       within ~10 sessions at -1% to -3%, and the 4% that
+                                       #       run +50% never close below the level on the way.
+           size_nav_frac=None,         # A3  — equal weight, one Nth of NAV per slot. A level
+                                       #       stop has no stop distance to size from, and M1's
+                                       #       lesson (conviction chose size, the stop chose the
+                                       #       loss) is honored by having no size choice at all.
+           vol_target=None,            # A3  — Barroso-Santa-Clara governor (WO-17, revived by
+                                       #       WO-A3 §3): entry sizes scale by target/realized
+           vol_window=126,             #       account vol over the trailing 6 months. 12% and
+                                       #       126 sessions are the paper's own constants.
            entry_mcn_floor=True,       #     — §3.2's "MCN < 70 never tickets". E3's door is
                                        #       "breakout + M2" and names no score, so A2 switches
                                        #       the floor off; run 56 logged 752,675 refusals of
@@ -435,6 +461,13 @@ PRESETS["a2"] = dict(
     # ordering — no selection signal beyond "a slot was free when the breakout arrived" — which is
     # the E3 thesis's own claim: the binding constraint is breadth and holding, not selectivity.
     slot_order="breakout_fcfs", entry_mcn_floor=False,
+    # E3 names TWO exits — the 3xATR stop and the Chandelier — and runs 54 through 58 each wore
+    # §3.2's exits anyway: run 58's census reads score 711, template 290, earnings 186, gate_off
+    # 116 out of 1,648, because `forever` (below) only engages after a completed trim ladder and
+    # A2 has no trims. The four are now declared OFF by key, which the conformance table prints
+    # under `suppressed` — the arm's exits are a replacement, not an addition, and this preset
+    # finally says so in a way the engine actually reads.
+    template_exit=False, score_exit=False, earnings_exit=False, gate_off_exit=False,
     # everything §3.2 does that A2 does not: no pyramiding, no trims, no press, no euphoria rung,
     # no MCN floor (the ruling above makes the comment true — until 2026-08-13 the floor was
     # still enforced at the door), no M4 earnings gate.
@@ -448,7 +481,45 @@ PRESETS["a2"] = dict(
 # 2026-08-13): calmest trend first. The strongest selective candidate — the smooth-mover evidence
 # is real — but it is an overlay on the thesis rather than the thesis, so it is the arm and FCFS
 # is the centre. Ordering key: the name's own ATR as a fraction of price, ascending.
+# (The push study then measured it BACKWARD for completion — the calm quartile completes at
+# 0.59x base against the loud quartile's 1.74x — so it stays on the ladder as the arm that
+# prices what smoothness buys on the drawdown side, and it does not centre anything.)
 PRESETS["a2o"] = dict(PRESETS["a2"], slot_order="trend_vol")
+
+# A3 — hold the leaders, every clause pinned by the push study (WO-A3 §3, amendment of
+# 2026-08-13). 56,380 resolved episodes on our own census, 2017-2026:
+#
+#   * the door stays A2's — a fresh 252-high, M2, full breadth. Base rate: 3.86% of eligible
+#     breakouts run +50% before giving the level back; the rest die in ~10 sessions at -1..-3%.
+#   * the queue is LOUDEST FIRST ('vol_desc'): completion lift is monotone in volatility,
+#     0.59x calm quartile -> 1.74x loud, and per-episode EV +0.16% -> +0.91% the same way.
+#   * the LEVEL is the stop ('level_stop'): close below the breakout level, out next open.
+#     Winners never close below it on the way to +50% (that is the episode definition doing the
+#     work); a 3xATR trail would kill 70% of them (survival 0.305 measured). No Chandelier on
+#     the centre — survivors ride until the level breaks. The trail arms live on the ladder.
+#   * sizing is 1/N — a level stop has no distance to size from, and 1/30 puts ~3.3% of NAV
+#     behind each slot; the 10xATR stop below is the Protect layer's resting order
+#     (needed-trail p90 across all pushes is 11.8 ATRs — 10x as an INITIAL stop binds only in a
+#     crash that never printed a close below the level first), not the working exit.
+#   * the Barroso-Santa-Clara governor runs at the paper's own constants (12% target, 126
+#     sessions): entry sizes shrink when the account's trailing vol runs hot. WO-17, revived.
+#   * the regime gate earned nothing on this window (completion 3.84% gate-on vs 4.08% off), so
+#     no new gate is added; §3.2's own entry latch stays as baseline machinery.
+#   * §3.2's exits are OFF and declared, as ruled for A2: score, template, earnings, gate_off.
+PRESETS["a3"] = dict(
+    park_idle=True, cash_target=0.10,
+    entry_new_high=252, slot_order="vol_desc", entry_mcn_floor=False,
+    level_stop=True, size_nav_frac=1.0 / 30.0,
+    atr_window=20, atr_stop_mult=10.0, max_stop=None,
+    chandelier_mult=None, chandelier_atr_window=None, risk_per_trade=None,
+    vol_target=0.12, vol_window=126,
+    max_names=30, sleeve_cap_pct=1.0, heat_cap=None,
+    template_exit=False, score_exit=False, earnings_exit=False, gate_off_exit=False,
+    entry_fraction=1.0, pyramid_tranches=1, pyramid_spacing=None,
+    trim_at=None, trim_frac=None, forever=True,
+    breakeven=False, breakeven_r=None, breakeven_on_full_size=False, euphoria=False,
+    require_m4=False, m4_swing=False, press_on_next_base=False,
+    mq_vol_divisor=False, mcn_drop_atr=False, confirm_before_entry=False)
 
 # E1 — the Micron question (E-series, wo-e-series-2026-08-12 §3). A1V with every MU trade
 # excluded, derived from `a1v` the way `a1v` is derived from `a1`, so the exclusion is the only
@@ -917,6 +988,22 @@ def _reentry_ready(tk, j, t, valid, C, exited, hyp):
     return sg.resumed(C[rows, j], window=int(hyp["reentry_window"]))
 
 
+def _vol_scalar(equity, target, window):
+    """The governor's dial: min(1, target / realized) on the account's own trailing daily
+    returns, annualized at 252 sessions (the same convention §2.5's bars use). It only ever
+    SHRINKS — a quiet stretch never levers the book up, because the paper's symmetric version
+    borrows and this account does not. Too little history reads as 1.0, declared as the warmup
+    rather than a guess about volatility nobody has measured yet."""
+    if len(equity) < window + 1:
+        return 1.0
+    navs = np.array([row[1] for row in equity[-(window + 1):]], dtype=float)
+    rets = navs[1:] / navs[:-1] - 1.0
+    sd = rets.std(ddof=1)
+    if sd <= 0:
+        return 1.0
+    return float(min(1.0, target / (sd * np.sqrt(252.0))))
+
+
 def _tolerance(atr_frac, mult, floor=0.25):
     """The law's flat allowance, or that allowance widened in proportion to the name's own ATR."""
     return floor if not mult else sg.volatility_tolerance(atr_frac, floor=floor, mult=float(mult))
@@ -1041,6 +1128,13 @@ def rank(frame, t, cols, arrays, valid, hyp):
     elif order == "trend_vol":
         ranked_eligible = sorted(eligible, key=lambda tk: atrf.get(tk) if atrf.get(tk) is not None
                                  else float("inf"))
+    elif order == "vol_desc":
+        # A3's measured centre (push study, 2026-08-13): the LOUDEST names first. Completion
+        # lift is monotone in volatility — 0.59x in the calm quartile, 1.74x in the loud one —
+        # and per-episode EV runs +0.16% to +0.91% the same way. The opposite of trend_vol,
+        # which stays on the ladder so the smoothness story is measured rather than argued.
+        ranked_eligible = sorted(eligible, key=lambda tk: -atrf[tk]
+                                 if atrf.get(tk) is not None else float("inf"))
     elif order is None:
         ranked_eligible = sorted(eligible, key=lambda tk: -out[tk]["mcn"])
     else:
@@ -1354,7 +1448,7 @@ def simulate(frame, cfg):
                     hair_trigger_while_pending=cfg["hair_trigger_while_pending"])
             p["confirmed"] = state["confirmed"]
 
-            if not on:
+            if not on and hyp["gate_off_exit"]:
                 pending[tk] = "gate_off"                 # §3.3 crash protocol, acted next open
                 continue
             if state["exit_next_open"] and not hyp["entry_new_high"]:
@@ -1365,6 +1459,16 @@ def simulate(frame, cfg):
                 # 54's 1,352 positions and is why the average hold was 18.9 days for an arm whose
                 # whole thesis is holding. A2 has no volume-confirmation step to enforce.
                 pending[tk] = "unconfirmed"              # the hair-trigger — the only volume exit
+                continue
+            if hyp["level_stop"] and np.isfinite(cl) and cl < p["pivot"]:
+                # A3 (push study, 2026-08-13): the breakout level IS the stop, judged on the
+                # close, acted next open. What run 54 had by ACCIDENT and was rightly called a
+                # defect for an arm specced with a 3xATR stop is, measured across 56,380 resolved
+                # episodes, the structure with positive expectancy in every volatility quartile:
+                # 93% of breakouts die within ~10 sessions costing -1% to -3%, and the winners
+                # never close below the level on their way to +50%. The catastrophe stop below
+                # sits 10 ATRs down and exists for the Protect layer, not as the exit.
+                pending[tk] = "level_stop"
                 continue
 
             row = scored.get(tk)
@@ -1409,8 +1513,8 @@ def simulate(frame, cfg):
                          or cl / p["avg_cost"] - 1 >= float(hyp["screen_exit_min_gain"])):
                 pending[tk] = "no_longer_cheap"
                 continue
-            if not riding and row is not None and row["mcn"] == row["mcn"] \
-                    and row["mcn"] < cfg["mcn_exit"]:
+            if hyp["score_exit"] and not riding and row is not None \
+                    and row["mcn"] == row["mcn"] and row["mcn"] < cfg["mcn_exit"]:
                 pending[tk] = "score"
                 continue
             if not riding and sg.stagnant(sessions_since_high=t - p["hi_at"],
@@ -1471,7 +1575,8 @@ def simulate(frame, cfg):
             conf["blackout_decisions"] += 1
             if _knowable(nxt, day):
                 conf["blackout_known"] += 1
-                if not riding and sg.trading_days_between(day, nxt) <= 1 and \
+                if hyp["earnings_exit"] and not riding \
+                        and sg.trading_days_between(day, nxt) <= 1 and \
                         sg.holds_through_earnings(cl, p["avg_cost"], cushion=cfg["cushion"]) is False:
                     pending[tk] = "earnings"
                     continue
@@ -1664,7 +1769,12 @@ def simulate(frame, cfg):
                     stop = sg.initial_stop(fill, None if kind == "reentry"
                                            else base["contraction_low"], max_stop=hyp["max_stop"])
                 dist = max((fill - stop) / fill, 1e-4)
-                if hyp["risk_per_trade"]:
+                if hyp["size_nav_frac"]:
+                    # A3: equal weight, one Nth of NAV per slot. A level stop has no distance to
+                    # size from — risk_size would divide by ~zero and mint an infinite position —
+                    # and M1's lesson is honored by there being no size decision at all.
+                    size = {"size_pct": float(hyp["size_nav_frac"])}
+                elif hyp["risk_per_trade"]:
                     # A2c: the stop sets the size, never conviction. M1 is the reason this is
                     # structural rather than advisory — positive expectancy of +2.21% and still a
                     # -39.89% drawdown, because conviction chose the size while the stop chose the
@@ -1681,6 +1791,18 @@ def simulate(frame, cfg):
                                             band=(0.08, hyp["band_hi"] or 0.12))
                 if not size:
                     continue
+                # The vol governor (Barroso-Santa-Clara via WO-A3 §3, reviving WO-17): entry
+                # sizes scale by target-over-realized account volatility, trailing vol_window
+                # sessions, capped at 1 — the governor only ever shrinks. Applied at ENTRY, not
+                # as daily book rescaling, for the same reason §2.1 trues up on a band: a rule
+                # Zak cannot execute by hand is not a rule (the O4 lesson). Deviation from the
+                # paper declared: B-SC scale the factor leg daily by its own vol; this scales
+                # new entries by the ACCOUNT's realized vol, park included.
+                if hyp["vol_target"]:
+                    g = _vol_scalar(equity, float(hyp["vol_target"]), int(hyp["vol_window"]))
+                    size = {"size_pct": size["size_pct"] * g}
+                    if size["size_pct"] <= 0:
+                        continue
                 target = size["size_pct"] * nav
                 if exposure + target > (hyp["sleeve_cap_pct"] or cfg["sleeve_cap"]) * nav:
                     continue
@@ -1885,6 +2007,8 @@ def conformance(conf, trades, equity, hyp=None):
     declared |= {f"trim{int(round(x * 100))}" for x in ((hyp or {}).get("trim_at") or ())}
     if (hyp or {}).get("forever"):
         declared.add("profitability")
+    if (hyp or {}).get("level_stop"):
+        declared.add("level_stop")
     if (hyp or {}).get("screen_exit"):
         declared.add("no_longer_cheap")
     if (hyp or {}).get("momentum_exit_r3") is not None:
@@ -1940,15 +2064,28 @@ def conformance(conf, trades, equity, hyp=None):
         dict(clause="Exits — stop, template, MCN < 55", fn="driver",
              coverage=1.0, unknown_reasons=sorted(reasons - legal - declared),
              variant_reasons=sorted(reasons & declared),
-             suppressed=([] if ((hyp or {}).get("template_exit", True)
-                                and not (hyp or {}).get("screen")) else ["template"])),
+             # every §3.2 exit the run stopped enforcing, BY NAME. Run 58 is why the list grew:
+             # score, earnings and gate_off closed 1,013 of its 1,648 positions on an arm whose
+             # spec names none of them, and nothing in this table said so.
+             suppressed=sorted(
+                 (["template"] if (not (hyp or {}).get("template_exit", True)
+                                   or (hyp or {}).get("screen")) else [])
+                 + (["score"] if not (hyp or {}).get("score_exit", True) else [])
+                 + (["earnings"] if not (hyp or {}).get("earnings_exit", True) else [])
+                 + (["gate_off"] if not (hyp or {}).get("gate_off_exit", True) else []))),
         dict(clause="Earnings blackout — 5 trading days", fn="signals.in_blackout",
              coverage=cov(conf["blackout_known"], conf["blackout_decisions"])),
         dict(clause="Sizing — budget / stop distance", fn="signals.momentum_size", coverage=1.0,
              heat_cap=(hyp or {}).get("heat_cap"), heat_refused=conf.get("heat_refused", 0),
              band_ceiling=(hyp or {}).get("band_hi") or 0.12,
              entry_fraction=(hyp or {}).get("entry_fraction", 0.5),
-             sleeve_cap=(hyp or {}).get("sleeve_cap_pct")),
+             sleeve_cap=(hyp or {}).get("sleeve_cap_pct"),
+             # A3's declarations: 1/N sizing and the vol governor are rule surfaces, and a table
+             # that omitted them would let a governed run pass as an ungoverned one.
+             equal_weight=(hyp or {}).get("size_nav_frac"),
+             vol_governor=(dict(target=(hyp or {}).get("vol_target"),
+                                window=(hyp or {}).get("vol_window"))
+                           if (hyp or {}).get("vol_target") else None)),
         # §3.2 has no partial exit: a position is opened once and closed once. The trim ladder
         # sells slices, so the rungs are named here and the count is reported — a run that sold
         # part of a position without declaring it is not law-v0 however its exits are labelled.
