@@ -537,6 +537,20 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         v = mark(i)
         navs.append(v)
         equity.append((dates[i], v, float(park_px[i]) if np.isfinite(park_px[i]) else None))
+
+    # Close the surviving book on paper at the last session's mark. No fee, no cash movement, no
+    # effect on the equity path above — this is bookkeeping, and `reason` says so. It exists
+    # because the alternative is a ledger row with a NULL P&L, and a NULL there is worse than it
+    # looks: the jackknife asks whether the result survives removing its biggest winners, and a
+    # winner the book is still holding is IN the equity curve's return while being invisible to
+    # the trade list. It could never be jackknifed out, which flatters exactly the arm that most
+    # needs the test. (It also crashed both consumers on `float(None)` — twice.)
+    last = len(dates) - 1
+    for j in list(held):
+        px_j = price(last, j)
+        if px_j is not None:
+            trades.append(dict(ticker=tickers[j], exit_date=dates[last], price=px_j,
+                               qty=held[j], reason="open_at_end"))
     return equity, trades, costs, dict(stale_skips=stale_skips,
                                        empty_rebalances=[d.isoformat() for d in empty_rebals])
 
@@ -570,6 +584,10 @@ def pair_trades(trades, dates):
             remaining -= qty
             if e["qty"] <= 1e-9:
                 lots.pop(0)
+    # A lot of zero shares is not an open position. Top-ups can round to a sliver, and a sliver
+    # left at the tail of a ticker's FIFO queue after the exits have consumed everything real
+    # would otherwise be reported as a live holding with no P&L.
+    open_by = {tk: [e for e in lots if e["qty"] > 1e-9] for tk, lots in open_by.items()}
     for tk, lots in open_by.items():
         for e in lots:
             out.append(dict(ticker=tk, entry_date=e["entry_date"], entry_price=e["price"],

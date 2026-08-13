@@ -399,11 +399,14 @@ def test_the_rebalance_sizes_from_the_whole_account_not_the_cash_it_freed():
                                 risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)
     nav_on = {d: v for d, v, _ in eq}
     ti, di = {t: j for j, t in enumerate(tickers)}, {d: i for i, d in enumerate(dates)}
-    rebals = sorted({t.get("entry_date") or t["exit_date"] for t in trades})
+    rebals = sorted({t.get("entry_date") or t["exit_date"] for t in trades
+                     if t.get("reason") != "open_at_end"})
     qty, checked, partial = {}, 0, 0
     for k, day in enumerate(rebals):
         opened = {t["ticker"] for t in trades if t.get("entry_date") == day}
         for tr in trades:
+            if tr.get("reason") == "open_at_end":
+                continue                          # a paper close, not a rebalance leg
             if tr.get("entry_date") == day:
                 qty[tr["ticker"]] = qty.get(tr["ticker"], 0.0) + tr["qty"]
             elif tr.get("exit_date") == day:
@@ -500,3 +503,36 @@ def test_every_cell_carries_a_param_hash_that_moves_with_its_own_spec():
     # and it moves on the axis that matters: a trail cell must not hash as its untrailed parent
     assert hashes["lg12_semi"] != hashes["lg12_semi_trail"]
     assert hashes["lg12_semi_trail"] != hashes["lg12_semi_trail_vt"]
+
+
+def test_the_book_still_held_at_the_end_is_closed_on_paper_with_a_real_pnl():
+    """A winner the arm is still holding is IN the equity curve's return. If the ledger records it
+    with a NULL P&L it is invisible to the jackknife, so the one test that asks 'does this survive
+    without its biggest winners' can never reach the biggest winner. It also crashed both
+    consumers on float(None)."""
+    n = N_DAYS
+    paths = {f"N{i:02d}.US": np.linspace(100.0, 200.0 + i, n) for i in range(4)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    eq, trades, _, _ = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0),
+                                   n=3, months=6, risk_adjusted=False, sleeve=1.0,
+                                   start_nav=200_000.0)
+    closing = [t for t in trades if t.get("reason") == "open_at_end"]
+    assert closing, "the book is still held at the end — it must be closed on paper"
+    assert all(t["exit_date"] == dates[-1] and t["price"] > 0 for t in closing)
+    positions = cc.pair_trades(trades, dates)
+    assert not [p for p in positions if p["pnl"] is None], "no position may carry a NULL P&L"
+    assert all(p["exit_date"] is not None for p in positions)
+
+
+def test_the_paper_close_moves_neither_the_equity_path_nor_the_costs():
+    """It is bookkeeping. A fee or a mark here would be a trade the arm never made."""
+    n = N_DAYS
+    paths = {f"N{i:02d}.US": np.linspace(100.0, 200.0 + i, n) for i in range(4)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    eq, trades, costs, _ = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0),
+                                       n=3, months=6, risk_adjusted=False, sleeve=1.0,
+                                       start_nav=200_000.0)
+    assert eq[-1][0] == dates[-1], "the equity path still ends on the last session"
+    spent = sum(t["spend"] for t in trades if "entry_date" in t)
+    # costs are the sum of the spreads actually paid; a paper close adds none
+    assert costs < spent * 0.01, "the paper close must not charge a spread"

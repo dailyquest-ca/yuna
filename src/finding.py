@@ -74,9 +74,22 @@ def fetch_equity(cur, run_id):
 
 
 def fetch_trade_pnls(cur, run_id):
+    """Every trade's P&L and the date it landed on, for the jackknife.
+
+    Rows with a NULL P&L are legs an arm never closed. An arm that writes them is one whose
+    ledger is incomplete — the position is in the equity curve's return and absent from the trade
+    list, so the biggest winner can be one the jackknife cannot reach. They are dropped here with
+    the count on the record rather than coerced, because `float(None)` is a crash and `0.0` is a
+    lie about a trade that made money. The fix belongs in whatever wrote the row.
+    """
     cur.execute("""select exit_date, pnl_cad from backtest_trades
                     where run_id = %s order by exit_date""", (run_id,))
-    return [(d, float(p)) for d, p in cur.fetchall()]
+    rows = cur.fetchall()
+    priced = [(d, float(p)) for d, p in rows if p is not None and d is not None]
+    if len(priced) < len(rows):
+        print(f"  note: {len(rows) - len(priced)} of {len(rows)} trade rows carry no P&L or no "
+              f"exit date and are outside the jackknife — run {run_id}'s ledger is incomplete")
+    return priced
 
 
 def cut(equity, pnls, since=None):
