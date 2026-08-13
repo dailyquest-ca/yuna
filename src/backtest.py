@@ -29,7 +29,7 @@ of a past statement, so a restatement is seen earlier than the market saw it; in
 today's; and the L0 census is reconstructed from bars rather than from a stored point-in-time
 listing, so a name whose bars we never pulled is still absent.
 """
-import os, sys, json, bisect, hashlib, pathlib, datetime as dt
+import os, sys, json, bisect, hashlib, pathlib, time, datetime as dt
 import numpy as np
 import pandas as pd
 from db import connect, config, config_digest, dry, Heartbeat
@@ -578,6 +578,26 @@ PRESETS["a3e"] = dict(PRESETS["a3"], gate_off_exit=True)
 PRESETS["a1v_blend"] = dict(PRESETS["a1v"], park_tilt=0.20)
 PRESETS["a3_blend"] = dict(PRESETS["a3"], park_tilt=0.20)
 
+# The park-tilt ladder (WO-A3 amendment, 2026-08-13). E4 measured the vehicle three times and the
+# result is monotone — VOO 15.50%, 90/10 16.12%, 80/20 16.53% CAGR — and it stopped at 20% only
+# because that was the pre-registered arm set. Since the park holds ~74% of the account, this is
+# the highest-leverage axis available, and it is priced rather than assumed: 50% and 100%.
+#
+# 100% is deliberately included as the ENDPOINT, not a recommendation. It stacks a momentum ETF
+# under a momentum sleeve, which §2.4.2 already says needs a concentration review before any
+# production role — a research measurement is not that review.
+PRESETS["a1v_b50"] = dict(PRESETS["a1v"], park_tilt=0.50)
+PRESETS["a1v_b100"] = dict(PRESETS["a1v"], park_tilt=1.00)
+
+# The breadth axis, aimed squarely at K3b's ONE failing clause. K3b returns 18.00% and is unproven
+# only because the edge does not survive removing the top three winners (+197.2% ex-top-3 against
+# the benchmark's +260.7%) — the Micron dependency. A1 holds five names; the external evidence
+# (Zarattini-Pagani-Wilcox: <7% of trades produce the cumulative profits) says concentration at
+# five is the reason one name can be the result. Ten names is the same rules with twice the
+# chances, and the ex-top-3 clause is the test it has to move.
+PRESETS["a1v_b10"] = dict(PRESETS["a1v"], park_tilt=0.20, max_names=10)
+PRESETS["a1v_b15"] = dict(PRESETS["a1v"], park_tilt=0.20, max_names=15)
+
 # E1 — the Micron question (E-series, wo-e-series-2026-08-12 §3). A1V with every MU trade
 # excluded, derived from `a1v` the way `a1v` is derived from `a1`, so the exclusion is the only
 # difference. 71.4% of A1's profit is one MU trade; A1V's 73 points over the 90/10 counterfactual
@@ -591,10 +611,15 @@ PRESETS["a3_blend"] = dict(PRESETS["a3"], park_tilt=0.20)
 PRESETS["e1"] = dict(PRESETS["a1v"], exclude_names=("MU.US",))
 
 
-def hypothesis():
-    """The law, with a preset laid over it, with individual env overrides laid over that."""
+def hypothesis(name=None):
+    """The law, with a preset laid over it, with individual env overrides laid over that.
+
+    `name` defaults to the HYPOTHESIS env var. A sweep passes each cell's name explicitly so one
+    process — and one tape load — can price a whole ladder.
+    """
+    name = HYPOTHESIS if name is None else name
     h = dict(LAW)
-    h.update(PRESETS.get(HYPOTHESIS, {}))
+    h.update(PRESETS.get(name, {}))
     for k in list(h):
         raw = os.environ.get(k.upper())
         if raw is None or raw == "":
@@ -2370,7 +2395,9 @@ def main():
         with Heartbeat(conn, "backtest") as hb:
             with conn.cursor() as cur:
                 hyp = hypothesis()
+                t_load = time.monotonic()
                 frame = load(cur)
+                load_secs = time.monotonic() - t_load
                 # The SAME config rows the nightly reads, spelled the same way. Inventing
                 # `momentum_min_mcn` here would have read a row that does not exist, fallen
                 # through to a default, and measured a threshold nobody set — learnings #21,
@@ -2378,9 +2405,9 @@ def main():
                 # decorative for weeks because the code asked for `enterable`).
                 thresholds = config(cur, "score_thresholds", {}) or {}
                 ceilings = config(cur, "sleeve_ceiling", {"momentum": 0.40}) or {}
+                base_max_names = int(config(cur, "momentum_max_names", 4))
                 cfg = dict(start_nav=START_NAV,
-                           max_names=int(hyp["max_names"]
-                                         or config(cur, "momentum_max_names", 4)),
+                           max_names=int(hyp["max_names"] or base_max_names),
                            sleeve_cap=float(ceilings.get("momentum", 0.40)),
                            min_mcn=float(thresholds.get("enter", 70)),
                            mcn_exit=float(thresholds.get("hold", 55)),
@@ -2407,87 +2434,110 @@ def main():
 
             hb.detail.update(tickers=len(frame["cols"]), bars=len(frame["dates"]),
                              benchmark=BENCH, gate_source=frame["gate_source"],
+                             load_secs=round(load_secs, 1),
                              hair_trigger_while_pending=HAIR_TRIGGER_PENDING)
             print(f"backtest {VARIANT}: {len(frame['cols'])} tickers x {len(frame['dates'])} bars "
-                  f"| bench {BENCH} | gate {frame['gate_source']}")
+                  f"| bench {BENCH} | gate {frame['gate_source']} | load {load_secs:.0f}s")
 
-            trades, equity, conf = simulate(frame, cfg)
-            summary = summarise(trades, equity, frame, conf, hyp=hyp)
-            print(f"  {summary['trades']} trades | CAGR {summary['cagr']:.1%} "
-                  f"vs {BENCH} {summary['benchmark_cagr'] or 0:.1%} | "
-                  f"maxDD {summary['max_drawdown']:.1%} | "
-                  f"conformance {'OK' if summary['stats']['conformance_ok'] else 'FAILED'}")
-            for c in summary["stats"]["conformance"]:
-                if c.get("coverage") is not None and c["coverage"] < 1.0:
-                    print(f"    coverage {c['coverage']:.0%} — {c['clause']}")
-
-            if not dry():
-                params = dict(variant=VARIANT, law_stamp=LAW_STAMP, currency="USD",
-                              config_stamp=config_stamp,
-                              # P1, both halves: the digest below covers the resolved params, and
-                              # this covers the code that interpreted them. Folded into the digest
-                              # via the extras, so a code-only change moves param_hash too.
-                              code_stamp=code_stamp(),
-                              benchmark=BENCH, start_nav=START_NAV, warmup=WARMUP,
-                              # The curve that ACTUALLY priced this run (§2.2). Recording the
-                              # retired flat deep/thin pair here would have made the stored params
-                              # describe a costing the engine no longer uses — the exact class of
-                              # drift P1 exists to end.
-                              costs=dict(commission_per_trade=0.0, fx_fee_per_side=0.0,
-                                         half_spread_bps_by_addv=[
-                                             dict(addv_floor=f, bps=b)
-                                             for f, b in cfg["spread_curve"]]),
-                              max_names=cfg["max_names"], sleeve_cap=cfg["sleeve_cap"],
-                              min_mcn=cfg["min_mcn"],
-                              hair_trigger_while_pending=HAIR_TRIGGER_PENDING,
-                              hypothesis=HYPOTHESIS or "law", hyp=cfg["hyp"],
-                              park=dict(check_every=PARK_CHECK_EVERY, band=PARK_BAND))
-                # P1: two runs are the same experiment iff this matches. Derived last, from the
-                # assembled params, so nothing decision-bearing can be added above without moving
-                # it — which is precisely what law_stamp failed to do.
-                params["param_hash"] = param_digest(
-                    cfg["hyp"], {k: v for k, v in params.items() if k != "hyp"})
-                with conn.cursor() as cur:
-                    cur.execute("""insert into backtest_runs(label,params,start_date,end_date,
-                          trading_days,start_nav,end_nav,total_return,cagr,max_drawdown,max_dd_date,
-                          trades,wins,win_rate,avg_win,avg_loss,expectancy,avg_exposure,
-                          avg_hold_days,benchmark_return,benchmark_cagr,stats)
-                        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        returning id""",
-                        (LABEL, json.dumps(params),
-                         summary["start_date"], summary["end_date"], summary["trading_days"],
-                         summary["start_nav"], summary["end_nav"], summary["total_return"],
-                         summary["cagr"], summary["max_drawdown"], summary["max_dd_date"],
-                         summary["trades"], summary["wins"], summary["win_rate"],
-                         summary["avg_win"], summary["avg_loss"], summary["expectancy"],
-                         summary["avg_exposure"], summary["avg_hold_days"],
-                         summary["benchmark_return"], summary["benchmark_cagr"],
-                         json.dumps(summary["stats"], default=str)))
-                    rid = cur.fetchone()[0]
-                    cur.executemany("""insert into backtest_trades(run_id,ticker,entry_date,
-                          entry_price,qty,exit_date,exit_price,mcn,pivot,initial_stop,size_pct,
-                          pyramid_steps,pnl_cad,pnl_pct,bars_held,max_favorable,max_adverse,
-                          exit_reason,entry_kind)
-                        values (%(run_id)s,%(ticker)s,%(entry_date)s,%(entry_price)s,%(qty)s,
-                          %(exit_date)s,%(exit_price)s,%(mcn)s,%(pivot)s,%(initial_stop)s,
-                          %(size_pct)s,%(pyramid_steps)s,%(pnl_usd)s,%(pnl_pct)s,%(bars_held)s,
-                          %(max_favorable)s,%(max_adverse)s,%(exit_reason)s,%(entry_kind)s)""",
-                        [{**t, "run_id": rid} for t in trades])
-                    cur.executemany("""insert into backtest_equity(run_id,d,nav,exposure,positions,
-                                         gate,benchmark) values (%s,%s,%s,%s,%s,%s,%s)""",
-                        [(rid, d, nv, e, p, g, None if bch is None or
-                          (isinstance(bch, float) and np.isnan(bch)) else bch)
-                         for d, nv, e, p, g, bch in equity])
-                conn.commit()
-                hb.detail["run_id"] = rid
-
-            hb.rows = len(trades) + len(equity)
-            hb.detail.update({k: v for k, v in summary.items() if k != "stats"})
-            hb.detail["exits"] = summary["stats"]["exits"]
-            hb.detail["conformance_ok"] = summary["stats"]["conformance_ok"]
-            if not summary["stats"]["conformance_ok"]:
-                hb.amber("conformance table has a failing clause — see stats.conformance")
+            # ---- THE SWEEP (performance, 2026-08-13). Loading the tape is the dominant cost of a
+            # run — ~2.2M price rows off Supabase for every dispatch — and a ladder of N cells was
+            # paying it N times, plus N times the egress. `HYPOTHESES` prices a whole ladder
+            # against ONE load: same frame, same config, one resolved surface per cell. Sequential
+            # dispatches also could not overlap, because the workflow's concurrency group keyed
+            # only on the ref and cancelled its own predecessor.
+            cells = [c.strip() for c in os.environ.get("HYPOTHESES", "").split(",") if c.strip()]
+            cells = cells or [HYPOTHESIS]
+            written, t_sim = [], time.monotonic()
+            for cell in cells:
+                hyp = hypothesis(cell)
+                cfg = dict(cfg, hyp=hyp, max_stop=hyp["max_stop"],
+                           max_names=int(hyp["max_names"] or base_max_names))
+                label = LABEL if len(cells) == 1 else f"{LABEL} · {cell}"
+                variant = VARIANT if len(cells) == 1 else cell
+                rid = run_one(conn, frame, cfg, hyp, cell, label, variant, config_stamp)
+                if rid is not None:
+                    written.append(rid)
+            hb.detail.update(sweep=cells, run_ids=written,
+                             sim_secs=round(time.monotonic() - t_sim, 1))
+            if written:
+                pathlib.Path("/tmp/run_ids.txt").write_text("\n".join(str(r) for r in written))
     return 0
+
+
+def run_one(conn, frame, cfg, hyp, cell, label, variant, config_stamp):
+    """One cell of a sweep: simulate, summarise, write. Returns the run id, or None on DRY_RUN."""
+    trades, equity, conf = simulate(frame, cfg)
+    summary = summarise(trades, equity, frame, conf, hyp=hyp)
+    print(f"  {summary['trades']} trades | CAGR {summary['cagr']:.1%} "
+          f"vs {BENCH} {summary['benchmark_cagr'] or 0:.1%} | "
+          f"maxDD {summary['max_drawdown']:.1%} | "
+          f"conformance {'OK' if summary['stats']['conformance_ok'] else 'FAILED'}")
+    for c in summary["stats"]["conformance"]:
+        if c.get("coverage") is not None and c["coverage"] < 1.0:
+            print(f"    coverage {c['coverage']:.0%} — {c['clause']}")
+
+    if not dry():
+        params = dict(variant=variant, law_stamp=LAW_STAMP, currency="USD",
+                      config_stamp=config_stamp,
+                      # P1, both halves: the digest below covers the resolved params, and
+                      # this covers the code that interpreted them. Folded into the digest
+                      # via the extras, so a code-only change moves param_hash too.
+                      code_stamp=code_stamp(),
+                      benchmark=BENCH, start_nav=START_NAV, warmup=WARMUP,
+                      # The curve that ACTUALLY priced this run (§2.2). Recording the
+                      # retired flat deep/thin pair here would have made the stored params
+                      # describe a costing the engine no longer uses — the exact class of
+                      # drift P1 exists to end.
+                      costs=dict(commission_per_trade=0.0, fx_fee_per_side=0.0,
+                                 half_spread_bps_by_addv=[
+                                     dict(addv_floor=f, bps=b)
+                                     for f, b in cfg["spread_curve"]]),
+                      max_names=cfg["max_names"], sleeve_cap=cfg["sleeve_cap"],
+                      min_mcn=cfg["min_mcn"],
+                      hair_trigger_while_pending=HAIR_TRIGGER_PENDING,
+                      hypothesis=cell or "law", hyp=cfg["hyp"],
+                      park=dict(check_every=PARK_CHECK_EVERY, band=PARK_BAND))
+        # P1: two runs are the same experiment iff this matches. Derived last, from the
+        # assembled params, so nothing decision-bearing can be added above without moving
+        # it — which is precisely what law_stamp failed to do.
+        params["param_hash"] = param_digest(
+            cfg["hyp"], {k: v for k, v in params.items() if k != "hyp"})
+        with conn.cursor() as cur:
+            cur.execute("""insert into backtest_runs(label,params,start_date,end_date,
+                  trading_days,start_nav,end_nav,total_return,cagr,max_drawdown,max_dd_date,
+                  trades,wins,win_rate,avg_win,avg_loss,expectancy,avg_exposure,
+                  avg_hold_days,benchmark_return,benchmark_cagr,stats)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                returning id""",
+                (label, json.dumps(params),
+                 summary["start_date"], summary["end_date"], summary["trading_days"],
+                 summary["start_nav"], summary["end_nav"], summary["total_return"],
+                 summary["cagr"], summary["max_drawdown"], summary["max_dd_date"],
+                 summary["trades"], summary["wins"], summary["win_rate"],
+                 summary["avg_win"], summary["avg_loss"], summary["expectancy"],
+                 summary["avg_exposure"], summary["avg_hold_days"],
+                 summary["benchmark_return"], summary["benchmark_cagr"],
+                 json.dumps(summary["stats"], default=str)))
+            rid = cur.fetchone()[0]
+            cur.executemany("""insert into backtest_trades(run_id,ticker,entry_date,
+                  entry_price,qty,exit_date,exit_price,mcn,pivot,initial_stop,size_pct,
+                  pyramid_steps,pnl_cad,pnl_pct,bars_held,max_favorable,max_adverse,
+                  exit_reason,entry_kind)
+                values (%(run_id)s,%(ticker)s,%(entry_date)s,%(entry_price)s,%(qty)s,
+                  %(exit_date)s,%(exit_price)s,%(mcn)s,%(pivot)s,%(initial_stop)s,
+                  %(size_pct)s,%(pyramid_steps)s,%(pnl_usd)s,%(pnl_pct)s,%(bars_held)s,
+                  %(max_favorable)s,%(max_adverse)s,%(exit_reason)s,%(entry_kind)s)""",
+                [{**t, "run_id": rid} for t in trades])
+            cur.executemany("""insert into backtest_equity(run_id,d,nav,exposure,positions,
+                                 gate,benchmark) values (%s,%s,%s,%s,%s,%s,%s)""",
+                [(rid, d, nv, e, p, g, None if bch is None or
+                  (isinstance(bch, float) and np.isnan(bch)) else bch)
+                 for d, nv, e, p, g, bch in equity])
+        conn.commit()
+        print(f"  run {rid} written · {cell}"
+              f"{'' if summary['stats']['conformance_ok'] else ' · CONFORMANCE FAILED'}")
+        return rid
+    return None
 
 
 if __name__ == "__main__":

@@ -1981,3 +1981,32 @@ def test_first_call_is_inert_when_the_run_does_not_park():
     b, _, cb = bt.simulate(f, cfg(hyp=unparked))
     assert ca["entries"] == cb["entries"]
     assert ca.get("park", {}).get("sells", 0) == 0
+
+
+# ------------------------------------------------------------- the sweep (performance, 2026-08-13)
+#
+# Loading the tape is the dominant cost of a run — ~2.2M price rows per dispatch — and a ladder of
+# N cells was paying it N times, plus N times the Supabase egress. A sweep prices the whole ladder
+# against one load. What must hold: each cell resolves its OWN surface, and one cell's config can
+# never leak into the next.
+
+def test_each_sweep_cell_resolves_its_own_surface(monkeypatch):
+    monkeypatch.setattr(bt, "HYPOTHESIS", "")
+    for k in bt.LAW:
+        monkeypatch.delenv(k.upper(), raising=False)
+    a1v = bt.hypothesis("a1v")
+    b100 = bt.hypothesis("a1v_b100")
+    b10 = bt.hypothesis("a1v_b10")
+    assert a1v["park_tilt"] is None and b100["park_tilt"] == 1.00
+    assert b10["max_names"] == 10 and a1v["max_names"] == 5, (
+        "a cell must not inherit the previous cell's resolved surface")
+    # and resolving the same cell twice is stable — a sweep re-reads, it does not mutate
+    assert bt.hypothesis("a1v") == a1v
+
+
+def test_hypothesis_without_a_name_still_reads_the_environment(monkeypatch):
+    """The single-cell path is unchanged: no HYPOTHESES means the env var still decides."""
+    monkeypatch.setattr(bt, "HYPOTHESIS", "a2")
+    for k in bt.LAW:
+        monkeypatch.delenv(k.upper(), raising=False)
+    assert bt.hypothesis()["entry_new_high"] == 252
