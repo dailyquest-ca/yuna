@@ -29,7 +29,7 @@ of a past statement, so a restatement is seen earlier than the market saw it; in
 today's; and the L0 census is reconstructed from bars rather than from a stored point-in-time
 listing, so a name whose bars we never pulled is still absent.
 """
-import os, sys, json, bisect, hashlib, datetime as dt
+import os, sys, json, bisect, hashlib, pathlib, datetime as dt
 import numpy as np
 import pandas as pd
 from db import connect, config, config_digest, dry, Heartbeat
@@ -101,6 +101,9 @@ LAW = dict(park_idle=False,            # K1  — idle capital sits in cash, earn
            min_base_age=25,            # D3  — sessions a base runs before its pivot is tradeable
            reentry_window=None,        # X1  — buy back on a new N-session closing high
            reentry_cooloff=5,          #       sessions after an exit before a name is buyable
+           exclude_names=(),           # E1  — names the run refuses to enter, through any door.
+                                       #       (E-series E1, the Micron question — not 2026-08-10's
+                                       #       E1 label on `confirm_before_entry` above.)
            max_names=None)             # P2  — from config (4)
 
 PRESETS = {
@@ -424,6 +427,18 @@ PRESETS["a2"] = dict(
     require_m4=False, m4_swing=False, press_on_next_base=False,
     mq_vol_divisor=False, mcn_drop_atr=False, confirm_before_entry=False)
 
+# E1 — the Micron question (E-series, wo-e-series-2026-08-12 §3). A1V with every MU trade
+# excluded, derived from `a1v` the way `a1v` is derived from `a1`, so the exclusion is the only
+# difference. 71.4% of A1's profit is one MU trade; A1V's 73 points over the 90/10 counterfactual
+# inherit that dependency, and this run prices it.
+#
+# The exclusion removes the name from the sleeve's REACH, not from the world: MU still ranks, the
+# book's slots stay open, and whatever capital the sleeve does not ask for follows the chassis into
+# the park — "the capital MU consumed follows chassis rules". This is the honest version of
+# §2.5(b)'s jackknife: `bars.jackknife_arithmetic` subtracts a winner's P&L but keeps the
+# compounding that winner financed, and its own docstring names E1 as the true form.
+PRESETS["e1"] = dict(PRESETS["a1v"], exclude_names=("MU.US",))
+
 
 def hypothesis():
     """The law, with a preset laid over it, with individual env overrides laid over that."""
@@ -432,6 +447,12 @@ def hypothesis():
     for k in list(h):
         raw = os.environ.get(k.upper())
         if raw is None or raw == "":
+            continue
+        if k == "exclude_names":
+            # Tickers, comma-separated, spelled the way `prices` spells them (MU.US). Upper-cased
+            # so a hand-typed dispatch input cannot silently exclude nothing — a filter that
+            # matches no rows reads exactly like a filter that worked.
+            h[k] = tuple(s.strip().upper() for s in raw.split(",") if s.strip())
             continue
         low = raw.strip().lower()
         h[k] = (True if low in ("1", "true", "yes") else
@@ -465,6 +486,21 @@ def param_digest(hyp, extras):
                "extras": {k: extras[k] for k in sorted(extras)}}
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def code_stamp():
+    """The digest of the code that interpreted the params — P1's second half.
+
+    Runs 54, 55 and 56 share one param_hash and measured three different engines: the exit gating,
+    the hair-trigger and the candidate pool all changed between them while the params stood still,
+    so the ledger says "same experiment" three times about three experiments. Two runs are the
+    same experiment only if the code is the same code. Hashing the driver and the law module makes
+    a code-only change visible in the record; a comment-only edit also moves it, which errs in the
+    safe direction — false-different is a shrug, false-same is how a delta gets misattributed.
+    """
+    here = pathlib.Path(__file__).resolve().parent
+    blob = b"".join((here / f).read_bytes() for f in ("backtest.py", "signals.py"))
+    return hashlib.sha256(blob).hexdigest()[:16]
 
 
 # Park true-up cadence and band (E-series §2.1). Weekly check; trade only when cash has drifted
@@ -1031,7 +1067,8 @@ def simulate(frame, cfg):
                                         blackout_known=0, rank_dates=0, entries=0,
                                         entries_refused_below_70=0, gap_no_fill=0,
                                         pressed=0, press_windows=0, press_expired=0,
-                                        reentries=0, trims=0, heat_refused=0, recoveries=0)
+                                        reentries=0, trims=0, heat_refused=0, recoveries=0,
+                                        new_high_entries=0)
 
     def spread(j, t):
         """Half-spread per side, by point-in-time ADDV bucket (E-series §2.2).
@@ -1470,6 +1507,13 @@ def simulate(frame, cfg):
             for tk in queue["l1m"]:
                 if tk in book or len(book) >= cfg["max_names"]:
                     continue
+                # E1: the run is the world with this name removed from the sleeve's reach. The
+                # skip sits before every door — base, recovery, new-high, re-entry — and before
+                # sizing, so the capital the name would have taken follows the chassis instead
+                # (cash floor first, then the park). Leak-guarded in the conformance table: an
+                # excluded name that trades anyway is a violation, not a footnote.
+                if tk in (hyp["exclude_names"] or ()):
+                    continue
                 row = scored[tk]
                 if not sg.enterable(row["mcn"], floor=cfg["min_mcn"]):
                     conf["entries_refused_below_70"] += 1
@@ -1616,6 +1660,12 @@ def simulate(frame, cfg):
                     fired[tk] = round(float(pivot), 4)
                 elif kind == "recovery":
                     conf["recoveries"] += 1
+                elif kind == "new_high":
+                    # Counted at its own door. Before this counter existed, A2's entries landed in
+                    # `reentries` and the conformance table read every one of them as an undeclared
+                    # violation of a §3.2 clause about re-entry — runs 54, 55 and 56 all "failed"
+                    # conformance on exactly that misfiling.
+                    conf["new_high_entries"] += 1
                 else:
                     conf["reentries"] += 1
                 conf["entries"] += 1
@@ -1806,10 +1856,24 @@ def conformance(conf, trades, equity, hyp=None):
              # §3.2 knows one way into a name: a fresh valid base. A run that bought any other way
              # has to say so here, with the count, or a variant could pass as law-v0.
              reentries=conf.get("reentries", 0), recoveries=conf.get("recoveries", 0),
+             new_highs=conf.get("new_high_entries", 0),
              screen=(hyp or {}).get("screen") or "M2 trend template + M3 base (§3.2)",
              m4_required=bool((hyp or {}).get("require_m4", True)),
+             # E1: the names this run refused to enter, listed so the exclusion is reviewable —
+             # a filter nobody can see is indistinguishable from a silent one.
+             excluded_names=sorted((hyp or {}).get("exclude_names") or ()),
              violations=((0 if (hyp or {}).get("reentry_window") else conf.get("reentries", 0))
-                         + (0 if (hyp or {}).get("screen") else conf.get("recoveries", 0)))),
+                         + (0 if (hyp or {}).get("screen") else conf.get("recoveries", 0))
+                         # A2's new-high door is E3's entry RULE, not a deviation from one. Runs
+                         # 54-56 each failed conformance here: every entry was misfiled as an
+                         # undeclared re-entry, because this waiver knew only the doors earlier
+                         # variants had declared. An undeclared new-high entry still fails.
+                         + (0 if (hyp or {}).get("entry_new_high")
+                            else conf.get("new_high_entries", 0))
+                         # ... and the E1 leak guard: an excluded name that traded anyway means
+                         # the filter did not hold, and the run is not the run it claims to be.
+                         + sum(1 for t in trades
+                               if t.get("ticker") in ((hyp or {}).get("exclude_names") or ())))),
         dict(clause="EOD confirmation, freeze at 50%, late window",
              fn="signals.confirmation_state", coverage=1.0),
         dict(clause="Pyramid +2%/+4%, both limits pivot x 1.05", fn="signals.pyramid_orders",
@@ -1981,6 +2045,10 @@ def main():
             if not dry():
                 params = dict(variant=VARIANT, law_stamp=LAW_STAMP, currency="USD",
                               config_stamp=config_stamp,
+                              # P1, both halves: the digest below covers the resolved params, and
+                              # this covers the code that interpreted them. Folded into the digest
+                              # via the extras, so a code-only change moves param_hash too.
+                              code_stamp=code_stamp(),
                               benchmark=BENCH, start_nav=START_NAV, warmup=WARMUP,
                               # The curve that ACTUALLY priced this run (§2.2). Recording the
                               # retired flat deep/thin pair here would have made the stored params

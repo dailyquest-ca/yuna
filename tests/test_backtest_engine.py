@@ -1339,3 +1339,112 @@ def test_a2_never_exits_on_the_volume_hair_trigger():
     a2 = {**bt.PRESETS["a2"], "park_idle": False, "cash_target": None}
     trades, _, _ = bt.simulate(f, cfg(hyp=a2, max_names=30))
     assert "unconfirmed" not in {t["exit_reason"] for t in trades}
+
+
+# ------------------------------------------------- the new-high door is declared, not a violation
+#
+# Runs 54, 55 and 56 all reported conformance FALSE, and the failing clause was never identified in
+# the session that ran them — the handoff narrowed it to the earnings coverage clauses, which was
+# wrong. It was the Entry clause: every A2 entry landed in `reentries`, and the violation waiver
+# knew only the two non-base doors earlier variants had declared (X1's window, C1's screen). The
+# arm's own entry rule was being counted as 1,014 undeclared violations of a re-entry clause.
+
+def test_a_new_high_entry_is_declared_not_a_violation():
+    conf = dict(m4_evaluated=1, m4_known=1, blackout_decisions=1, blackout_known=1,
+                entries=7, entries_refused_below_70=0, reentries=0, recoveries=0,
+                new_high_entries=7, trims=0, heat_refused=0)
+    entry = lambda hyp: next(c for c in bt.conformance(conf, [], [], hyp=hyp)
+                             if c["fn"] == "signals.entry_order")
+    a2 = dict(bt.LAW); a2.update(bt.PRESETS["a2"])
+    assert entry(a2)["violations"] == 0
+    assert entry(a2)["new_highs"] == 7, "the door has to be visible, not merely waived"
+    # law-v0 buying on a new high without the flag is still exactly what the guard exists to catch
+    assert entry(dict(bt.LAW))["violations"] == 7
+
+
+def test_a2_entries_are_counted_at_their_own_door():
+    """Before the counter existed they were misfiled as re-entries, which is the whole defect."""
+    f, _ = frame(hero_volume_multiple=3.0)
+    a2 = {**bt.PRESETS["a2"], "park_idle": False, "cash_target": None}
+    trades, _, conf = bt.simulate(f, cfg(hyp=a2, max_names=30))
+    assert conf["reentries"] == 0
+    assert conf["new_high_entries"] == sum(1 for t in trades if t["entry_kind"] == "new_high")
+
+
+# --------------------------------------------------------------- E1: the world without the name
+#
+# wo-e-series-2026-08-12 §3, E1: "A1V with all MU trades excluded; the capital MU consumed follows
+# chassis rules (sits in the VOO park)." The mechanism is an entry filter, not a P&L subtraction —
+# `bars.jackknife_arithmetic` removes a winner's contribution but keeps the compounding the winner
+# financed, and its docstring names this run as the honest form.
+
+def test_an_excluded_name_never_enters_through_any_door():
+    f, _ = frame(hero_volume_multiple=3.0)
+    kept, _, _ = bt.simulate(f, cfg())
+    assert any(t["ticker"] == "N00.US" for t in kept), "the fixture's leader was never bought"
+    f2, _ = frame(hero_volume_multiple=3.0)
+    cut, _, _ = bt.simulate(f2, cfg(hyp={"exclude_names": ("N00.US",)}))
+    assert not any(t["ticker"] == "N00.US" for t in cut)
+
+    # ... and not through X1's re-entry door either: the recovery fixture deterministically
+    # produces a base entry AND a re-entry for the leader, so both doors are proven shut at once.
+    f3, _ = recovery_frame()
+    back, _, conf3 = bt.simulate(f3, preset("h6", exclude_names=("N00.US",)))
+    assert not any(t["ticker"] == "N00.US" for t in back)
+    assert conf3["reentries"] == 0
+
+
+def test_e1_is_a1v_with_micron_removed_and_nothing_else():
+    """Derived, not copied — the same discipline that keeps a1v honest about a1. If these two
+    surfaces ever differ by more than the exclusion, E1 is measuring something else."""
+    e1, a1v = bt.PRESETS["e1"], bt.PRESETS["a1v"]
+    assert {k for k in e1 if e1[k] != a1v.get(k)} == {"exclude_names"}
+    assert e1["exclude_names"] == ("MU.US",), "the ticker as `prices` spells it, or it filters air"
+    assert bt.LAW["exclude_names"] == (), "the law excludes nothing"
+
+
+def test_an_exclusion_that_leaks_fails_conformance():
+    """The filter is only believable if a leak is a violation. An excluded name that traded anyway
+    means the run is not the run it claims to be, and no summary statistic would ever say so."""
+    conf = dict(m4_evaluated=1, m4_known=1, blackout_decisions=1, blackout_known=1,
+                entries=1, entries_refused_below_70=0, reentries=0, recoveries=0,
+                new_high_entries=0, trims=0, heat_refused=0)
+    e1 = dict(bt.LAW); e1.update(bt.PRESETS["e1"])
+    entry = lambda trades: next(c for c in bt.conformance(conf, trades, [], hyp=e1)
+                                if c["fn"] == "signals.entry_order")
+    assert entry([dict(ticker="MU.US", mcn=90.0, exit_reason="stop")])["violations"] == 1
+    assert entry([])["violations"] == 0
+    assert entry([])["excluded_names"] == ["MU.US"], "the exclusion must be reviewable on the row"
+
+
+def test_exclude_names_env_override_parses_tickers(monkeypatch):
+    """The one LAW key whose env override is a list of tickers rather than a scalar. Upper-cased on
+    the way in, because a lower-case dispatch input that excludes nothing looks exactly like a
+    filter that worked."""
+    monkeypatch.setattr(bt, "HYPOTHESIS", "")
+    for k in bt.LAW:
+        monkeypatch.delenv(k.upper(), raising=False)
+    monkeypatch.setenv("EXCLUDE_NAMES", " mu.us, nvda.us ")
+    assert bt.hypothesis()["exclude_names"] == ("MU.US", "NVDA.US")
+
+
+# ------------------------------------------------------------------- P1's second half: the code
+#
+# Runs 54, 55 and 56 share params and param_hash `dd8735ff2ac4dace` while measuring three different
+# engines — the exit gating, the hair-trigger and the candidate pool all changed between them. The
+# ledger says "same experiment" three times about three experiments, which is precisely the failure
+# P1 was opened to end, one layer down.
+
+def test_two_runs_on_different_code_are_different_experiments():
+    s = bt.code_stamp()
+    assert len(s) == 16 and s == bt.code_stamp(), "the stamp must be deterministic"
+    h = bt.param_digest(dict(bt.LAW), {"code_stamp": s})
+    assert bt.param_digest(dict(bt.LAW), {"code_stamp": "0" * 16}) != h, (
+        "a code-only change must move the digest")
+
+
+def test_the_run_records_the_code_it_ran():
+    """Source-level, like the SHARED_RULES checks: the stamp only helps if main() writes it into
+    params, where it feeds param_digest through the extras."""
+    source = (ROOT / "src" / "backtest.py").read_text()
+    assert "code_stamp=code_stamp()," in source
