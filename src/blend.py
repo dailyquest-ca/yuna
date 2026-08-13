@@ -34,7 +34,12 @@ from backtest import PARK_CHECK_EVERY, PARK_BAND, SPREAD_CURVE, BENCH
 import finding
 
 TILT = "SPMO.US"
-ARMS = ((1.0, 0.0), (0.9, 0.1), (0.8, 0.2))          # (VOO weight, SPMO weight), per the WO
+# (VOO weight, SPMO weight). The first three are the WO's pre-registered arms. The last two are
+# the CONTROLS the park-tilt ladder demands: a1v_b100 parks the whole idle account in SPMO and
+# returns 21.17%, and the only way to know whether the momentum SLEEVE earned any of that is to
+# price the same vehicle holding nothing else. A sleeve that cannot beat its own park is a sleeve
+# doing nothing but adding turnover.
+ARMS = ((1.0, 0.0), (0.9, 0.1), (0.8, 0.2), (0.5, 0.5), (0.0, 1.0))
 ESERIES_START = dt.date(2017, 9, 1)                  # the record's matched window (runs 46+)
 ADDV_WINDOW = 50                                     # §2.2 selects by 50-session median $vol
 
