@@ -178,3 +178,51 @@ def test_a_name_that_goes_dark_does_not_zero_the_account():
     worst = float((nav / np.maximum.accumulate(nav) - 1).min())
     assert worst > -0.5, f"a single dark holding collapsed the account: max drawdown {worst:.1%}"
     assert all(v > 0 for v in nav)
+
+
+def test_the_gate_sells_the_book_when_the_market_breaks_its_trend():
+    """The ungated cells hold through everything between rebalances and drew 54-63%. The gate is
+    the cheapest exit there is: below the index's own 200-day, the sleeve waits in the park."""
+    n = N_DAYS
+    paths = {f"N{i:02d}.US": 100.0 * np.exp(np.linspace(0, 0.4 + i * 0.05, n)) for i in range(5)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    park = np.full(n, 50.0)
+    # the index rises for two thirds, then falls hard enough to break its own 200-day
+    index = np.concatenate([np.linspace(100.0, 200.0, int(n * 0.7)),
+                            np.linspace(200.0, 90.0, n - int(n * 0.7))])
+    _, ungated, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
+                                risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)
+    _, gated, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
+                              risk_adjusted=False, sleeve=1.0, start_nav=200_000.0,
+                              index_px=index)
+    assert not any(t.get("reason") == "gate_off" for t in ungated)
+    assert any(t.get("reason") == "gate_off" for t in gated), (
+        "the index fell through its own 200-day and the book was not sold")
+
+
+def test_an_unevaluable_gate_keeps_the_book_out():
+    """Not enough history is not permission. A gate that cannot be evaluated must not wave the
+    book through — the same polarity every other guard in this repo uses."""
+    index = np.full(50, 100.0)
+    assert cc.regime_ok(10, index) is False
+    rising = np.linspace(100.0, 200.0, 400)
+    assert cc.regime_ok(399, rising) is True
+    falling = np.linspace(200.0, 100.0, 400)
+    assert cc.regime_ok(399, falling) is False
+
+
+def test_the_book_is_paired_into_positions_for_the_ledger():
+    """"Did it hold MRVL" has to be a query, not a belief — so entries and exits are paired into
+    positions with prices, and a name still held at the end is recorded as open rather than lost."""
+    dates = sessions(10)
+    trades = [dict(ticker="A.US", entry_date=dates[0], price=10.0, qty=100.0, spend=1000.0),
+              dict(ticker="A.US", exit_date=dates[5], price=15.0, qty=100.0, reason="rebalance"),
+              dict(ticker="B.US", entry_date=dates[2], price=20.0, qty=50.0, spend=1000.0)]
+    out = cc.pair_trades(trades, dates)
+    closed = [t for t in out if t["exit_date"] is not None]
+    still_open = [t for t in out if t["exit_date"] is None]
+    assert len(closed) == 1 and len(still_open) == 1
+    assert closed[0]["pnl"] == pytest.approx(500.0)
+    assert closed[0]["pnl_pct"] == pytest.approx(0.5)
+    assert closed[0]["bars"] == 5
+    assert still_open[0]["ticker"] == "B.US" and still_open[0]["reason"] == "open_at_end"

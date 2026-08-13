@@ -85,6 +85,17 @@ CELLS = {
     "lg12_semi_third": dict(n=12, months=6, risk_adjusted=True, sleeve=0.30, top_by_addv=500),
     "lg20_semi":       dict(n=20, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500),
     "lg12_annual":     dict(n=12, months=12, risk_adjusted=True, sleeve=1.00, top_by_addv=500),
+    # ---- the gated family. The ungated cells hold through everything between rebalances and
+    # drew 54-63%; peak-to-trough on lg12_semi was $1.66M down to $644k, which is the same
+    # concentration that produced the 8x. This adds the cheapest exit there is — out to the park
+    # while the market is below its own 200-day, checked monthly — and a tighter top-250 pool.
+    "lg12_semi_gated":  dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                             gated=True),
+    "t250_12_semi":     dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=250),
+    "t250_12_gated":    dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=250,
+                             gated=True),
+    "t250_8_gated":     dict(n=8,  months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=250,
+                             gated=True),
 }
 
 
@@ -165,9 +176,32 @@ def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None):
     return [int(j) for j in idx[np.argsort(-score)]]
 
 
+def regime_ok(i, index_px, window=200):
+    """Is the index above its own long moving average? Clenow's gate, and §3.3's M1 latch.
+
+    The concentrated book has NO exit between rebalances — it holds whatever it bought through
+    whatever happens, which is why the ungated cells drew 54-63%. This is the cheapest exit that
+    exists: when the market itself is below its 200-day, the sleeve goes to the park and waits.
+    Unknown (not enough history) is treated as OFF rather than ON — a gate that cannot be
+    evaluated must not wave the book through.
+    """
+    if i < window:
+        return False
+    hist = index_px[i - window + 1:i + 1]
+    if not np.isfinite(index_px[i]) or not np.isfinite(hist).any():
+        return False
+    return bool(index_px[i] > np.nanmean(hist))
+
+
 def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted, sleeve,
-             start_nav, top_by_addv=None):
-    """Hold the top `n` names, changed every `months`, with the rest of the account in the park."""
+             start_nav, top_by_addv=None, index_px=None, gate_every=21):
+    """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
+
+    With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
+    market's own trend: below its 200-day the whole sleeve moves to the park, and it only comes
+    back at a check that finds the market above it again. That is one extra decision a month at
+    most, which the day-job constraint can carry.
+    """
     warmup = FORMATION + 1
     rebals = set(rebalance_dates(dates, months, warmup))
     held = {}                       # ticker index -> shares
@@ -197,9 +231,29 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         p = park_qty * park_px[i] if np.isfinite(park_px[i]) else 0.0
         return cash + v + p
 
+    gated_off = False
     for i in range(warmup, len(dates)):
         nav = mark(i)
-        if i in rebals and np.isfinite(park_px[i]):
+        # ---- the regime check, on its own clock
+        if index_px is not None and i % gate_every == 0 and np.isfinite(park_px[i]):
+            on = regime_ok(i, index_px)
+            if not on and held:
+                for j in list(held):
+                    px_j = price(i, j)
+                    if px_j is None:
+                        continue
+                    gross = held[j] * px_j
+                    fee = gross * spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
+                    cash += gross - fee
+                    costs += fee
+                    trades.append(dict(ticker=tickers[j], exit_date=dates[i], price=px_j,
+                                       qty=held[j], reason="gate_off"))
+                    del held[j]
+                park_qty += cash / (park_px[i] * (1 + spread_frac(1e9)))
+                costs += cash * spread_frac(1e9)
+                cash = 0.0
+            gated_off = not on
+        if i in rebals and np.isfinite(park_px[i]) and not gated_off:
             want = rank_at(i, adj, raw, dv, risk_adjusted=risk_adjusted,
                            top_by_addv=top_by_addv)[:n]
             wanted = set(want)
@@ -212,7 +266,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                     fee = gross * spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
                     cash += gross - fee
                     costs += fee
-                    trades.append(dict(ticker=tickers[j], exit_date=dates[i], proceeds=gross))
+                    trades.append(dict(ticker=tickers[j], exit_date=dates[i], price=px,
+                                       qty=held[j], reason="rebalance"))
                     del held[j]
             if park_qty > 0:
                 gross = park_qty * park_px[i]
@@ -239,7 +294,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                 held[j] = held.get(j, 0.0) + qty
                 cash -= spend
                 costs += spend * fee_frac / (1 + fee_frac)
-                trades.append(dict(ticker=tickers[j], entry_date=dates[i], spend=spend))
+                trades.append(dict(ticker=tickers[j], entry_date=dates[i], spend=spend,
+                                   price=px, qty=qty))
             idle = max(cash, 0.0)
             if idle > 0:
                 park_qty += idle / (park_px[i] * (1 + spread_frac(1e9)))
@@ -247,6 +303,34 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                 cash = 0.0
         equity.append((dates[i], mark(i), float(park_px[i]) if np.isfinite(park_px[i]) else None))
     return equity, trades, costs
+
+
+def pair_trades(trades, dates):
+    """Match each entry to the exit that closed it, so the ledger holds positions rather than
+    legs. A name still held when the window ends is closed at the last session it priced."""
+    idx = {d: i for i, d in enumerate(dates)}
+    open_by, out = {}, []
+    for t in sorted(trades, key=lambda t: t.get("entry_date") or t.get("exit_date")):
+        tk = t["ticker"]
+        if "entry_date" in t:
+            open_by.setdefault(tk, []).append(t)
+            continue
+        lots = open_by.get(tk) or []
+        if not lots:
+            continue
+        e = lots.pop(0)
+        qty = min(e["qty"], t["qty"])
+        pnl = qty * (t["price"] - e["price"])
+        out.append(dict(ticker=tk, entry_date=e["entry_date"], entry_price=e["price"], qty=qty,
+                        exit_date=t["exit_date"], exit_price=t["price"], pnl=pnl,
+                        pnl_pct=(t["price"] / e["price"] - 1.0) if e["price"] else None,
+                        bars=idx[t["exit_date"]] - idx[e["entry_date"]], reason=t["reason"]))
+    for tk, lots in open_by.items():
+        for e in lots:
+            out.append(dict(ticker=tk, entry_date=e["entry_date"], entry_price=e["price"],
+                            qty=e["qty"], exit_date=None, exit_price=None, pnl=None,
+                            pnl_pct=None, bars=None, reason="open_at_end"))
+    return out
 
 
 def main():
@@ -275,10 +359,16 @@ def main():
             print(f"grid {len(dates)} sessions x {len(tickers)} names · park from {dates[first]}")
 
             written = []
+            bench_px = np.array([float(bench_rows.get(d, np.nan)) for d in dates])
+            for i in range(1, len(bench_px)):
+                if not np.isfinite(bench_px[i]):
+                    bench_px[i] = bench_px[i - 1]
             for name in want:
-                spec = CELLS[name]
+                spec = dict(CELLS[name])
+                gated = spec.pop("gated", False)
                 eq, trades, costs = simulate(dates, tickers, adj, raw, dv, park_px,
-                                             start_nav=start_nav, **spec)
+                                             start_nav=start_nav,
+                                             index_px=bench_px if gated else None, **spec)
                 eq = [(d, v, bench_rows.get(d)) for d, v, _ in eq
                       if d >= dates[first]]
                 nav = np.array([e[1] for e in eq])
@@ -300,7 +390,7 @@ def main():
                     continue
                 params = dict(variant=name, hypothesis="a4", code_stamp=code, currency="USD",
                               benchmark=BENCH, start_nav=start_nav, park=PARK_TICKER,
-                              spec=spec, formation=FORMATION, skip=SKIP)
+                              spec=dict(CELLS[name]), formation=FORMATION, skip=SKIP)
                 stats = dict(a4=dict(spec=spec, entries=len(entries),
                                      entries_per_year=round(per_year, 2),
                                      cost_usd=round(costs, 2)),
@@ -320,6 +410,14 @@ def main():
                     cur.executemany("""insert into backtest_equity(run_id,d,nav,exposure,
                                          positions,gate,benchmark) values (%s,%s,%s,%s,%s,%s,%s)""",
                         [(rid, d, v, spec["sleeve"], spec["n"], None, b) for d, v, b in eq])
+                    # the book itself, so "did it hold MRVL" is a query rather than a belief
+                    cur.executemany("""insert into backtest_trades(run_id,ticker,entry_date,
+                          entry_price,qty,exit_date,exit_price,pnl_cad,pnl_pct,bars_held,
+                          exit_reason,entry_kind)
+                        values (%(run_id)s,%(ticker)s,%(entry_date)s,%(entry_price)s,%(qty)s,
+                          %(exit_date)s,%(exit_price)s,%(pnl)s,%(pnl_pct)s,%(bars)s,
+                          %(reason)s,'momentum_rank')""",
+                        [{**t, "run_id": rid} for t in pair_trades(trades, dates)])
                 conn.commit()
                 written.append(rid)
                 print(f"  run {rid} written")
