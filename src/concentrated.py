@@ -152,11 +152,29 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     warmup = FORMATION + 1
     rebals = set(rebalance_dates(dates, months, warmup))
     held = {}                       # ticker index -> shares
+    last_px = {}                    # ticker index -> the most recent price it actually printed
     park_qty, cash = 0.0, start_nav
     equity, trades, costs = [], [], 0.0
 
+    def price(i, j):
+        """What the position is worth today: today's print, or the last one it made.
+
+        A name is NOT worth zero on a session it did not trade. Dropping an unprinted holding
+        out of the mark is precisely the defect that gave run 52 a fake -91.5% drawdown — the
+        account appeared to fall to its cash balance and recover the next day — and it reappeared
+        here as a -100.0% max drawdown on five of eight cells, which is the statistic doing its
+        job. Holidays, halts and the delisting tail all take this path.
+        """
+        if np.isfinite(adj[i, j]):
+            last_px[j] = float(adj[i, j])
+        return last_px.get(j)
+
     def mark(i):
-        v = sum(q * adj[i, j] for j, q in held.items() if np.isfinite(adj[i, j]))
+        v = 0.0
+        for j, q in held.items():
+            px = price(i, j)
+            if px is not None:
+                v += q * px
         p = park_qty * park_px[i] if np.isfinite(park_px[i]) else 0.0
         return cash + v + p
 
@@ -167,8 +185,9 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             wanted = set(want)
             # sell what fell out of the book, and the park, then buy the new book
             for j in list(held):
-                if j not in wanted and np.isfinite(adj[i, j]):
-                    px = adj[i, j]
+                px_j = price(i, j)
+                if j not in wanted and px_j is not None:
+                    px = px_j
                     gross = held[j] * px
                     fee = gross * spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
                     cash += gross - fee
@@ -184,8 +203,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             per_name = nav * sleeve / max(len(want), 1) if want else 0.0
             for j in want:
                 if not np.isfinite(adj[i, j]):
-                    continue
-                px = adj[i, j]
+                    continue          # never BUY on a stale mark — only hold and sell on one
+                px = float(adj[i, j])
                 fee_frac = spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
                 have = held.get(j, 0.0) * px
                 # Cap the slice at what the account can actually pay, fee included. Sizing N

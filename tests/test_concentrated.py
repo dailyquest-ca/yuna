@@ -137,3 +137,22 @@ def test_every_announced_cell_moves_one_axis_off_the_centre():
             continue
         moved = {k for k in spec if spec[k] != centre[k]}
         assert len(moved) == 1, f"{name} moves {moved} — the grid is one axis at a time"
+
+
+def test_a_name_that_goes_dark_does_not_zero_the_account():
+    """Run 52's lesson, in new code: a holding that stops printing is carried at its last mark,
+    not silently valued at zero. The tell was a -100.0% max drawdown on a long-only book — five
+    of the first eight cells reported it before this was fixed."""
+    n = N_DAYS
+    paths = {f"N{i:02d}.US": 100.0 * np.exp(np.linspace(0, 0.3 + i * 0.05, n)) for i in range(5)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    # the strongest name — the one the book will certainly hold — stops trading two thirds in
+    dark = tickers.index("N04.US")
+    adj[int(n * 0.75):, dark] = np.nan
+    park = np.full(n, 50.0)
+    eq, _, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
+                           risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)
+    nav = np.array([v for _, v, _ in eq])
+    worst = float((nav / np.maximum.accumulate(nav) - 1).min())
+    assert worst > -0.5, f"a single dark holding collapsed the account: max drawdown {worst:.1%}"
+    assert all(v > 0 for v in nav)
