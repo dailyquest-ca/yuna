@@ -1,0 +1,41 @@
+name: blend
+# E4 — the buy alternative (WO-A3 §1). Dispatch-only tooling, same standing as the backtests:
+# not on the schedule, and it joins nothing without a plan edit. Writes benchmark rows into
+# backtest_runs (no param_hash — a benchmark is not a strategy trial) and scores each on the
+# spot; the capture audit is deliberately absent, because a two-ETF book holds no names to
+# audit the capture of.
+on:
+  workflow_dispatch:
+    inputs:
+      start_nav:
+        description: 'starting capital, USD'
+        default: '200000'
+      dry_run:
+        description: 'compute everything, write nothing'
+        default: 'false'
+
+permissions:
+  contents: read
+
+jobs:
+  blend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: run
+        id: engine
+        run: set -o pipefail; python src/blend.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          START_NAV: ${{ inputs.start_nav || '200000' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure() && steps.engine.outcome == 'failure'
+        run: python src/report_fail.py blend /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

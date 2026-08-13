@@ -92,9 +92,13 @@ def load_positions(cur, run_id):
     return list(positions.values())
 
 
-def load_tape(cur):
-    """The same census `backtest.load()` reads: US stocks, living and dead, minus the excluded."""
-    cur.execute("""select p.ticker, p.d, p.close, coalesce(p.adj_close, p.close), p.volume
+def load_tape(cur, *, with_range=False):
+    """The same census `backtest.load()` reads: US stocks, living and dead, minus the excluded.
+
+    `with_range` appends high and low — the push study's ATR needs the bar's range, the audit
+    does not, and both must read the SAME census predicate or their universes silently drift."""
+    extra = ", p.high, p.low" if with_range else ""
+    cur.execute(f"""select p.ticker, p.d, p.close, coalesce(p.adj_close, p.close), p.volume{extra}
                      from prices p join universe u on u.ticker = p.ticker
                     where u.kind = 'stock' and u.ticker like '%%.US'
                       and u.ticker not in (select ticker from universe_excluded)
@@ -102,17 +106,23 @@ def load_tape(cur):
     return cur.fetchall()
 
 
-def pushes_for_name(dates_ord, upos, raw, adj, vol, *, start_ord, end_ord):
-    """Every push and failed breakout for one name, walking its own bars.
+def episodes_for_name(dates_ord, upos, raw, adj, vol, *, start_ord, end_ord):
+    """Every episode for one name, walking its own bars: the single definition the audit AND the
+    push study share, so a lift measured by the study describes the same universe the audit
+    counts. A second implementation of this walk is how the two would silently drift apart.
 
     `dates_ord`   the name's own sessions as ordinals, ascending
     `upos`        each session's position on the union date axis (for L0's calendar windows)
-    Returns (pushes, unresolved) — pushes as dicts, unresolved as a count of races the window
-    ended before deciding. Bars with a non-positive adjusted close were dropped by the caller
-    (the vendor pads delisting tails with 0.0000 — learnings #33)."""
+
+    Returns a list of episode dicts — kind 'push' (reached +50% before a close back below the
+    level), 'failed' (gave the level back first), or 'unresolved' (the window ended mid-race) —
+    each with own-bar indices `b` and, when resolved, `e`, plus the level, the ADDV at the
+    breakout, and the gain (for a push, at completion; for a failure, the best close reached
+    before it died — the size of the tease). Bars with a non-positive adjusted close were
+    dropped by the caller (the vendor pads delisting tails with 0.0000 — learnings #33)."""
     n = len(adj)
     if n < LOOKBACK + 1:
-        return [], 0
+        return []
     # prior-252-own-closes max, aligned so pm[i] covers adj[i-252 .. i-1] — the same window
     # signals.new_high_breakout reads. Strict > below, as the door has it.
     win_max = np.lib.stride_tricks.sliding_window_view(adj, LOOKBACK).max(axis=1)
@@ -121,9 +131,9 @@ def pushes_for_name(dates_ord, upos, raw, adj, vol, *, start_ord, end_ord):
     # the last own bar inside the run window: races are clipped here, not resolved by fiat
     idx_end = int(np.searchsorted(dates_ord, end_ord, side="right")) - 1
     if idx_end < LOOKBACK:
-        return [], 0
+        return []
 
-    pushes, unresolved = [], 0
+    out = []
     i = LOOKBACK
     while i <= idx_end:
         if dates_ord[i] < start_ord or not adj[i] > win_max[i - LOOKBACK]:
@@ -144,9 +154,11 @@ def pushes_for_name(dates_ord, upos, raw, adj, vol, *, start_ord, end_ord):
         level = float(adj[i])
         target = level * (1.0 + PUSH_GAIN)
         j = i + 1
+        best = level
         outcome = None
         while j <= idx_end:
             c = adj[j]
+            best = max(best, float(c))
             if c >= target:
                 outcome = "push"
                 break
@@ -155,15 +167,27 @@ def pushes_for_name(dates_ord, upos, raw, adj, vol, *, start_ord, end_ord):
                 break
             j += 1
         if outcome == "push":
-            pushes.append(dict(b=int(i), e=int(j), level=level,
-                               gain=float(adj[j] / level - 1.0)))
+            out.append(dict(kind="push", b=int(i), e=int(j), level=level, addv=addv,
+                            gain=float(adj[j] / level - 1.0)))
             i = j + 1
         elif outcome == "failed":
+            out.append(dict(kind="failed", b=int(i), e=int(j), level=level, addv=addv,
+                            gain=float(best / level - 1.0)))
             i = j + 1
         else:
-            unresolved += 1
+            out.append(dict(kind="unresolved", b=int(i), e=None, level=level, addv=addv,
+                            gain=float(best / level - 1.0)))
             break
-    return pushes, unresolved
+    return out
+
+
+def pushes_for_name(dates_ord, upos, raw, adj, vol, *, start_ord, end_ord):
+    """The audit's view of the shared walk: completed pushes, and a count of unresolved races."""
+    eps = episodes_for_name(dates_ord, upos, raw, adj, vol,
+                            start_ord=start_ord, end_ord=end_ord)
+    pushes = [{k: ep[k] for k in ("b", "e", "level", "gain")} for ep in eps
+              if ep["kind"] == "push"]
+    return pushes, sum(1 for ep in eps if ep["kind"] == "unresolved")
 
 
 def audit(run, positions, tape_rows):
