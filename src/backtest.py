@@ -1699,7 +1699,17 @@ def simulate(frame, cfg):
                     if fill > order["limit"]:
                         continue                          # a gap beyond +5% fills nothing
                     dollars = p["target"] * order["fraction"]
-                    if cash < dollars:
+                    # The pyramid has the same first call as the entry: §3.2 buys the rest of the
+                    # position on the way up, and a tranche skipped for want of cash is a
+                    # position that never reaches its intended size. MU's second and third
+                    # tranches are exactly this case.
+                    # the 1% cushion covers the half-spread the fill is about to be charged:
+                    # raising exactly `dollars` leaves the account a few cents short of `paid`,
+                    # which the no-leverage guard correctly refuses to let pass
+                    add_need = dollars * (1 + 0.01)
+                    if cash < add_need and park_on:
+                        cash += park_sell(park_price(day) or park["mark"], add_need - cash)
+                    if cash < add_need:
                         continue
                     paid = dollars * (1 + spread(j, t))
                     cash -= paid
@@ -1973,7 +1983,22 @@ def simulate(frame, cfg):
                 # whole position at entry, and marks it full so the pyramid does not add again.
                 frac = float(hyp["entry_fraction"])
                 dollars = target * frac
-                if cash < dollars * (1 + 0.01):
+                # MOMENTUM KEEPS FIRST CALL ON THE MONEY (K1/K2, and the a1v preset says so in
+                # as many words). The park is where idle capital WAITS; it is not a position
+                # competing for slots, so an entry the cash balance cannot cover sells the index
+                # to fund itself.
+                #
+                # This was documented and never implemented, and §2.1's banded true-up turned the
+                # omission into a silent capital constraint: under the old daily rebalance cash
+                # was restored to exactly the target every session, so a first tranche needing
+                # ~8.3% of NAV always fit; under the band, cash drifts toward 5% and the entry
+                # was simply skipped. Measured cost — run 71 never bought MU AT ALL, where run 53
+                # made +$206,464 on it, and MU is the whole of A1V's headline. Learnings #21: a
+                # rule stored is not a rule enforced.
+                need = dollars * (1 + 0.01)
+                if cash < need and park_on:
+                    cash += park_sell(park_price(day) or park["mark"], need - cash)
+                if cash < need:
                     continue
                 paid = dollars * (1 + spread(j, t))
                 cash -= paid

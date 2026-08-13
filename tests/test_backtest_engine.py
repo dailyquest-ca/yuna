@@ -1933,3 +1933,51 @@ def test_the_tilt_is_inert_by_default_and_changes_no_momentum_decision():
     assert plain_c["entries"] == tilt_c["entries"], (
         "where the idle money waits must not change which names the sleeve buys")
     assert [t["ticker"] for t in plain_t] == [t["ticker"] for t in tilt_t]
+
+
+# ------------------------------------------------- momentum keeps first call on the money (K1/K2)
+#
+# The bug that cost the programme its headline. §2.1's banded true-up lets cash drift toward the
+# bottom of the band, and the entry path simply SKIPPED any position the cash balance could not
+# cover — so under the band a first tranche needing ~8.3% of NAV was silently refused. Run 71
+# never bought MU at all; run 53, on the old daily rebalance, made +$206,464 on it, and MU is the
+# whole of A1V's headline. The park is where idle capital waits, not a rival for slots.
+
+def test_an_entry_sells_the_park_rather_than_being_skipped():
+    """The starvation, reproduced and then fixed: a book whose cash sits below the cost of a
+    tranche must still take the trade, by liquidating exactly what it needs from the park."""
+    f, _ = frame(hero_volume_multiple=3.0)
+    hyp = {**bt.PRESETS["a1v"]}
+
+    # a punishing cash target — the park swallows 97% of the account, so no entry could ever be
+    # funded from cash alone. With first call on the money the sleeve still trades.
+    starved = bt.simulate(f, cfg(hyp={**hyp, "cash_target": 0.03}))
+    trades, _, conf = starved
+    assert conf["entries"] >= 1, (
+        "the sleeve took nothing with 97% parked — entries are not reaching the park")
+    assert conf["park"]["sells"] >= 1, "the park was never sold to fund an entry"
+
+    # and the books still balance — park_sell moves real money, so the identity must survive it
+    assert trades, "no trades to reconcile"
+
+
+def test_the_park_funds_the_pyramid_too():
+    """A tranche skipped for want of cash is a position that never reaches its intended size —
+    MU's second and third tranches are exactly that case."""
+    f, _ = runner_frame(top=2.6)
+    hyp = {**bt.PRESETS["a1v"], "cash_target": 0.03}
+    trades, _, conf = bt.simulate(f, cfg(hyp=hyp))
+    assert trades
+    assert max(t["pyramid_steps"] for t in trades) > 1, (
+        "no position ever added a tranche — the pyramid is being starved")
+
+
+def test_first_call_is_inert_when_the_run_does_not_park():
+    """An unparked arm must be untouched by this path: there is no park to sell, and a name it
+    cannot afford is still simply skipped."""
+    f, _ = frame(hero_volume_multiple=3.0)
+    unparked = {**bt.PRESETS["a1"]}
+    a, _, ca = bt.simulate(f, cfg(hyp=unparked))
+    b, _, cb = bt.simulate(f, cfg(hyp=unparked))
+    assert ca["entries"] == cb["entries"]
+    assert ca.get("park", {}).get("sells", 0) == 0
