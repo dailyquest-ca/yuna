@@ -51,6 +51,13 @@ HYPOTHESIS = os.environ.get("HYPOTHESIS", "").strip()
 # expectancy turns.
 LAW = dict(park_idle=False,            # K1  — idle capital sits in cash, earning nothing
            cash_target=None,           # K2  — the cash fraction the park rebalances toward
+           park_tilt=None,             # K3  — the fraction of the PARK held in the momentum ETF
+                                       #       rather than the core index. The park is where most
+                                       #       of the account actually lives (A1V ran 74% parked),
+                                       #       so its vehicle decides more of the return than the
+                                       #       sleeve does: E4 measured VOO at 15.50% CAGR against
+                                       #       the 80/20 VOO/SPMO blend at 16.53% over the same
+                                       #       window. None = the core index alone (A1V's park).
            # A2 (E-series E3). All None/absent under the law — §3.2 sizes on conviction, stops on
            # the contraction low, and enters on a pivot. A2 replaces all three and says so.
            entry_new_high=None,        # A2a — enter on an N-session high instead of a base pivot
@@ -563,6 +570,14 @@ PRESETS["a3c"] = dict(PRESETS["a3"], level_stop_sessions=10,
 # exit side. Clenow's rule is the same shape and the same source as M1's latch.
 PRESETS["a3e"] = dict(PRESETS["a3"], gate_off_exit=True)
 
+# K3 — the park upgraded from the core index to E4's best blend. The park is not a detail: A1V
+# ran 74% of the account parked, so the vehicle it sits in decides more of the return than the
+# sleeve does. E4 measured the two side by side on this window — VOO 15.50% CAGR, the 80/20
+# VOO/SPMO blend 16.53% — and every arm below already parks. This changes only where the idle
+# money waits; the sleeve's rules are untouched, which is what makes the pair a measurement.
+PRESETS["a1v_blend"] = dict(PRESETS["a1v"], park_tilt=0.20)
+PRESETS["a3_blend"] = dict(PRESETS["a3"], park_tilt=0.20)
+
 # E1 — the Micron question (E-series, wo-e-series-2026-08-12 §3). A1V with every MU trade
 # excluded, derived from `a1v` the way `a1v` is derived from `a1`, so the exclusion is the only
 # difference. 71.4% of A1's profit is one MU trade; A1V's 73 points over the 90/10 counterfactual
@@ -652,6 +667,9 @@ WARMUP = 280            # >= 266, the deepest window any rule reads (see tests/t
 TAIL = 280
 T10 = 10                # §3.2: every MCN ranking window ends 10 trading days ago
 BENCH = os.environ.get("BENCHMARK", "VOO.US")
+# K3: the momentum ETF the park may tilt into. §2.3 already names SPMO the alpha-arm
+# comparator and E4 priced it as a park vehicle; this is the same instrument, held.
+PARK_TILT_TICKER = os.environ.get("PARK_TILT_TICKER", "SPMO.US")
 DELISTED_AFTER = 5      # sessions without a bar before a holding is treated as gone
 CALENDAR_HORIZON = 100  # a scheduled report we can believe in — one quarter (check.py allows 110)
 
@@ -952,6 +970,17 @@ def load(cur):
     rows = cur.fetchall()
     bench = pd.Series({d: float(a) for d, _, a in rows}).sort_index() if rows else pd.Series(dtype=float)
 
+    # K3's second park vehicle. Loaded unconditionally so the frame has the same shape on every
+    # run; an arm that does not tilt never reads it. SPMO's bars begin 2015-10 — inside every
+    # window this programme uses — and the tilt asserts its own coverage at the point of use
+    # rather than here, because a window reaching further back needs the seam declared, not
+    # silently back-filled with the core index.
+    cur.execute("""select d, coalesce(adj_close, close) from prices
+                    where ticker = %s order by d""", (PARK_TILT_TICKER,))
+    tilt_rows = cur.fetchall()
+    park_tilt = (pd.Series({d: float(a) for d, a in tilt_rows}).sort_index()
+                 if tilt_rows else pd.Series(dtype=float))
+
     # M1 is the S&P 500 (§3.2). GSPC if we hold it deep enough, else the tracker standing in for it.
     cur.execute("select d, close from prices where ticker='GSPC.INDX' order by d")
     spx = pd.Series({d: float(c) for d, c in cur.fetchall()}).sort_index()
@@ -983,7 +1012,7 @@ def load(cur):
 
     return dict(dates=list(dates), cols=list(cols), arrays=arrays, industry=industry,
                 bench=bench, spx=spx, gate_source=gate_source, reports=reports, eps=eps,
-                excluded_discontinuous=excluded)
+                park_tilt=park_tilt, excluded_discontinuous=excluded)
 
 
 def eps_as_of(eps_entry, day):
@@ -1217,8 +1246,40 @@ def simulate(frame, cfg):
     park_on = bool(hyp.get("park_idle")) and hyp.get("cash_target") is not None
     park_bps = cfg["spread_bps"][0] / 10_000.0     # the benchmark is the deep bucket by definition
 
+    # K3. The park may hold a fixed tilt into the momentum ETF beside the core index, priced as a
+    # synthetic total-return index over the two. Two things are declared rather than buried:
+    #
+    #   * it rebalances DAILY, where §2.1's own park trues up on a band. E4 measured the cost of
+    #     that difference and it is nearly nothing — the 80/20 blend trued up ONCE in nine years,
+    #     so the drift never left the 5-point band — but a daily-rebalanced synthetic is still a
+    #     small upper bound on the tilt's contribution, not a tradeable path;
+    #   * the tilt's own history is asserted, not assumed. SPMO does not exist before 2015-10, and
+    #     silently falling back to the core index for the missing stretch would report a blend
+    #     that was never held. A window reaching further back must halt.
+    park_by_day = frame["bench_by_day"]
+    if hyp.get("park_tilt"):
+        tilt_w = float(hyp["park_tilt"])
+        tilt_px = {d: float(v) for d, v in frame["park_tilt"].items()}
+        common = [d for d in dates if d in frame["bench_by_day"] and d in tilt_px]
+        if not common or common[0] > dates[WARMUP]:
+            raise DataIntegrityError(
+                f"the park tilt ({PARK_TILT_TICKER}) has no bars before "
+                f"{common[0] if common else 'ever'}, and the simulated window opens at "
+                f"{dates[WARMUP]} — a tilt cannot be back-filled with the core index without "
+                f"reporting a park that was never held")
+        synth, prev = {}, None
+        level = 1.0
+        for d in common:
+            if prev is not None:
+                r_core = frame["bench_by_day"][d] / frame["bench_by_day"][prev] - 1.0
+                r_tilt = tilt_px[d] / tilt_px[prev] - 1.0
+                level *= 1.0 + (1.0 - tilt_w) * r_core + tilt_w * r_tilt
+            synth[d] = level
+            prev = d
+        park_by_day = synth
+
     def park_price(d):
-        v = frame["bench_by_day"].get(d)
+        v = park_by_day.get(d)
         return float(v) if v else None
 
     def park_sell(px, want):

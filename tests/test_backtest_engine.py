@@ -1885,3 +1885,51 @@ def test_the_floor_off_admits_what_the_spec_admits_and_says_so():
     assert floor(dict(bt.LAW), sub70)["violations"] == 1, (
         "the same trade under the law must still read as a violation — the clause is declared "
         "off, not deleted")
+
+
+# ------------------------------------------------------------- K3: what the park is parked IN
+#
+# The park is not a detail — A1V ran 74% of the account in it, so its vehicle decides more of
+# the return than the sleeve does. E4 measured the two on the same window: VOO at 15.50% CAGR
+# against the 80/20 VOO/SPMO blend at 16.53%.
+
+def _tilted_frame(tilt_daily=0.0012, start_at=0):
+    """The standard fixture with a park-tilt series attached, rising faster than the benchmark."""
+    f, _ = frame(hero_volume_multiple=3.0)
+    days = list(f["bench_by_day"])
+    px = 40.0 * np.exp(np.cumsum(np.full(len(days), tilt_daily)))
+    f = dict(f, park_tilt={d: float(v) for d, v in zip(days[start_at:], px[start_at:])})
+    return f, days
+
+
+def test_the_tilted_park_lands_between_its_two_vehicles():
+    """A blend must beat the slower leg and trail the faster one — anything outside that bracket
+    is not a blend, it is an arithmetic error wearing one."""
+    f, _ = _tilted_frame()
+    hyp = {**bt.PRESETS["a1v"]}
+    plain = bt.simulate(f, cfg(hyp=hyp))[1]
+    tilted = bt.simulate(f, cfg(hyp={**hyp, "park_tilt": 0.20}))[1]
+    allin = bt.simulate(f, cfg(hyp={**hyp, "park_tilt": 1.00}))[1]
+    end = lambda eq: eq[-1][1]
+    assert end(plain) < end(tilted) < end(allin), (
+        f"the 20% tilt must sit between the pure core and the pure tilt: "
+        f"{end(plain):,.0f} / {end(tilted):,.0f} / {end(allin):,.0f}")
+
+
+def test_a_park_tilt_with_no_history_halts_rather_than_back_filling():
+    """SPMO does not exist before 2015-10. Quietly holding the core index for the missing stretch
+    would report a blend that was never held — the same class of silence as a look-ahead."""
+    f, days = _tilted_frame(start_at=len(frame()[0]["bench_by_day"]) - 5)
+    with pytest.raises(bt.DataIntegrityError, match="back-filled"):
+        bt.simulate(f, cfg(hyp={**bt.PRESETS["a1v"], "park_tilt": 0.20}))
+
+
+def test_the_tilt_is_inert_by_default_and_changes_no_momentum_decision():
+    f, _ = _tilted_frame()
+    hyp = {**bt.PRESETS["a1v"]}
+    assert bt.LAW["park_tilt"] is None
+    plain_t, _, plain_c = bt.simulate(f, cfg(hyp=hyp))
+    tilt_t, _, tilt_c = bt.simulate(f, cfg(hyp={**hyp, "park_tilt": 0.20}))
+    assert plain_c["entries"] == tilt_c["entries"], (
+        "where the idle money waits must not change which names the sleeve buys")
+    assert [t["ticker"] for t in plain_t] == [t["ticker"] for t in tilt_t]
