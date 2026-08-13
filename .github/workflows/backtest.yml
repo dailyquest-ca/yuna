@@ -39,6 +39,9 @@ on:
       dd_bar:
         description: 'drawdown kill bar for the §2.5 verdict (E3 cells declare -0.34; blank = the arm declares none)'
         default: ''
+      research:
+        description: 'run a WO-A3 research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger'
+        default: ''
       dry_run:
         description: 'compute everything, write nothing'
         default: 'false'
@@ -78,7 +81,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # WO-A3's research jobs live in this FILE because GitHub only registers dispatch workflows
+  # from the default branch — dispatching runs the branch's own content, but the path must be
+  # known, and this path is. One file, three dispatchable jobs, each exclusive: a research
+  # dispatch runs no backtest and a backtest dispatch runs no research.
+  blend:
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'blend'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: run
+        id: engine
+        run: set -o pipefail; python src/blend.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          START_NAV: ${{ inputs.start_nav || '200000' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure() && steps.engine.outcome == 'failure'
+        run: python src/report_fail.py blend /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  push_study:
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'push_study'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: run
+        id: engine
+        run: set -o pipefail; python src/push_study.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure() && steps.engine.outcome == 'failure'
+        run: python src/report_fail.py push_study /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
   backtest:
+    if: github.event_name != 'workflow_dispatch' || inputs.research == ''
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
