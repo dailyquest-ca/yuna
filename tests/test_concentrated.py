@@ -623,3 +623,46 @@ def test_the_intraday_model_sells_on_a_gap_the_close_model_rides_down():
     i_stop = next(t for t in intra if t.get("reason") == "trail_stop" and t["ticker"] == "GAP.US")
     assert i_stop["exit_date"] <= c_stop["exit_date"], "the broker order cannot fill later"
     assert i_stop["price"] == pytest.approx(118.0), "it fills at the open it gapped to"
+
+
+def test_a_position_cannot_be_stopped_on_the_session_it_was_bought():
+    """Entry fills at the CLOSE, so that session's own open and low printed while the account was
+    still in cash. Testing the resting stop against them stops a name out at a price it traded at
+    before the position existed — a backwards look-ahead that reads as a devastating result.
+
+    Measured when it was live: ENPH bought 2020-01-02 was 'stopped' on 2020-01-02 at -10.1%, and
+    MRNA bought 2020-07-01 on 2020-07-02, each surrendering a move the close-based model kept.
+    """
+    n = N_DAYS
+    # every name's session has a low far below its close, so any same-session test fires at once
+    paths = {f"N{i:02d}.US": np.linspace(100.0, 300.0 + i, n) for i in range(5)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    op, lo = adj.copy(), adj * 0.5          # every session's low is half its close
+    trades = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), n=3, months=6,
+                         risk_adjusted=False, sleeve=1.0, start_nav=200_000.0,
+                         trail=True, intraday=(op, lo))[1]
+    entries = {(t["ticker"], t["entry_date"]) for t in trades if "entry_date" in t}
+    same_day = [t for t in trades if t.get("reason") == "trail_stop"
+                and (t["ticker"], t["exit_date"]) in entries]
+    assert not same_day, f"{len(same_day)} names stopped on their own entry session"
+
+
+def test_the_ladder_moves_the_initial_stop_that_is_actually_set():
+    """`lad_init6` and `lad_init10` vary §3.2's initial stop. If the stop set at entry is hard-
+    wired to the module constant, those probes vary nothing and the ladder reports a plateau it
+    never tested."""
+    n = N_DAYS
+    paths = {}
+    for i in range(4):
+        path = np.linspace(100.0, 130.0 + i, n)
+        # a 20% dip just after the first rebalance, then recovery: a 2% initial stop must exit
+        # into it and a 40% one must ride through, so the two cannot agree
+        path[cc.FORMATION + 5:cc.FORMATION + 25] *= 0.80
+        paths[f"N{i:02d}.US"] = path
+    dates, tickers, adj, raw, dv = grid(paths)
+    kw = dict(n=3, months=6, risk_adjusted=False, sleeve=1.0, start_nav=200_000.0, trail=True)
+    tight = dict(initial=0.02, arm=0.15, wide=0.10, euphoria=0.05)
+    loose = dict(initial=0.40, arm=0.15, wide=0.10, euphoria=0.05)
+    a = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), trail_cfg=tight, **kw)[0]
+    b = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), trail_cfg=loose, **kw)[0]
+    assert a[-1][1] != b[-1][1], "a 2% initial stop and a 40% one cannot produce one number"

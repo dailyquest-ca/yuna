@@ -603,7 +603,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                 if st:      # a carried name: average cost moves, the stop never ratchets down
                     st["entry"] = (st["entry"] * (held[j] - qty) + px * qty) / held[j]
                 else:
-                    state[j] = dict(entry=px, hi=px, stop=px * (1 - TRAIL_INITIAL), armed=False)
+                    state[j] = dict(entry=px, hi=px, armed=False, entered=i,
+                                    stop=px * (1 - (trail_cfg or TRAIL_DEFAULTS)['initial']))
                 funded += 1
                 trades.append(dict(ticker=tickers[j], entry_date=dates[i], spend=spend,
                                    price=px, qty=qty))
@@ -628,9 +629,17 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                 px_j = price(i, j)
                 if st is None or px_j is None or j in queued:
                     continue
-                if op_a is not None and st["stop"] > 0:
-                    # the resting order is tested BEFORE today's close moves the trail up: a stop
-                    # set yesterday is the stop the broker holds this morning
+                if op_a is not None and st["stop"] > 0 and i > st["entered"]:
+                    # The resting order is tested BEFORE today's close moves the trail up: a stop
+                    # set yesterday is the stop the broker holds this morning.
+                    #
+                    # `i > st["entered"]` is not a nicety. Entry fills at the session's CLOSE, so
+                    # that session's own open and low printed BEFORE the position existed —
+                    # testing against them stops a name out at a price it traded at while the
+                    # account was still in cash. It read as a devastating result and was a
+                    # backwards look-ahead: ENPH bought 2020-01-02 was "stopped" on 2020-01-02 at
+                    # -10.1%, and MRNA bought 2020-07-01 on 2020-07-02, each giving up a move the
+                    # close-based model kept. The stop rests from the next session.
                     fill = stop_fill(st["stop"], op_a[i, j], lo_a[i, j])
                     if fill is not None:
                         sell(i, j, held[j], "trail_stop", price_override=fill)
