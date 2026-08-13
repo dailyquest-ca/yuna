@@ -168,10 +168,24 @@ def spread_frac(addv):
     return SPREAD_CURVE[-1][1] / 10_000.0
 
 
-def build_grid(tape):
-    """The tape as (dates, tickers, adjusted closes, raw closes, dollar volume) arrays."""
+def build_grid(tape, calendar):
+    """The tape as (dates, tickers, adjusted closes, raw closes, dollar volume) arrays.
+
+    `calendar` is the set of dates the US market was actually open, and it is REQUIRED. Taking
+    the session list from the tape's own union of dates instead — which is what this did — put
+    New Year's Day in the grid, because 26 junk listings in the store print on it while VOO does
+    not. `rebalance_dates` then picked 2018-01-01, 2019-01-01, 2020-01-01 and 2026-01-01 as the
+    first session of the half-year, and on a day when nothing real prints the book SOLD its whole
+    book (selling carries the last mark) and BOUGHT nothing (buying refuses a stale mark, and
+    rightly). The proceeds went to the park and stayed there until July. Every A4 cell was
+    therefore about half its life in SPMO — which is why they all pinned to SPMO's own -30.95%
+    drawdown on 2020-03-23, a session on which the concentrated book held no stocks at all.
+    """
+    if not calendar:
+        raise RuntimeError("no market calendar — the benchmark printed no bars, and a session "
+                           "list taken from the tape alone silently includes market holidays")
     tickers = sorted({r[0] for r in tape})
-    dates = sorted({r[1] for r in tape})
+    dates = sorted({r[1] for r in tape} & set(calendar))
     ti = {t: i for i, t in enumerate(tickers)}
     di = {d: i for i, d in enumerate(dates)}
     shape = (len(dates), len(tickers))
@@ -179,6 +193,8 @@ def build_grid(tape):
     raw = np.full(shape, np.nan)
     dv = np.full(shape, np.nan)
     for tk, d, close, a, vol in tape:
+        if d not in di:
+            continue          # a bar printed on a day the market was shut — not a session
         i, j = di[d], ti[tk]
         if a is None or a <= 0:
             continue
@@ -323,6 +339,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     park_qty, cash = 0.0, start_nav
     equity, trades, costs = [], [], 0.0
     navs = []                       # the NAV path alone, for the volatility governor
+    stale_skips, empty_rebals = 0, []
 
     def price(i, j):
         """What the position is worth today: today's print, or the last one it made.
@@ -469,9 +486,11 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             nav = cash + sum(q * (price(i, j) or 0.0) for j, q in held.items())
             eff_sleeve = sleeve * (vol_scalar(navs, float(vol_target)) if vol_target else 1.0)
             per_name = nav * eff_sleeve / max(len(want), 1) if want else 0.0
+            funded = 0
             for j in want:
                 if not np.isfinite(adj[i, j]):
-                    continue          # never BUY on a stale mark — only hold and sell on one
+                    stale_skips += 1  # never BUY on a stale mark — only hold and sell on one
+                    continue
                 px = float(adj[i, j])
                 fee_frac = spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
                 have = held.get(j, 0.0) * px
@@ -492,8 +511,16 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                     st["entry"] = (st["entry"] * (held[j] - qty) + px * qty) / held[j]
                 else:
                     state[j] = dict(entry=px, hi=px, stop=px * (1 - TRAIL_INITIAL), armed=False)
+                funded += 1
                 trades.append(dict(ticker=tickers[j], entry_date=dates[i], spend=spend,
                                    price=px, qty=qty))
+            # A rebalance that ends holding NOTHING dumps the whole account in the park until the
+            # next one. Both routes matter and the guard must not care which fired: a holiday in
+            # the session list emptied the RANK (no name clears the $5 floor when no name prints),
+            # while a halt on a real session empties the FUNDING. The first ran for six months at
+            # a time across four Januaries, invisibly, because nothing counted it.
+            if not held:
+                empty_rebals.append(dates[i])
             park_all(i)
         # ---- §3.2's ratchet, every session, on every name held. What breaks today is sold at
         # tomorrow's close (see the docstring); a name already queued is not re-tested.
@@ -510,7 +537,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         v = mark(i)
         navs.append(v)
         equity.append((dates[i], v, float(park_px[i]) if np.isfinite(park_px[i]) else None))
-    return equity, trades, costs
+    return equity, trades, costs, dict(stale_skips=stale_skips,
+                                       empty_rebalances=[d.isoformat() for d in empty_rebals])
 
 
 def pair_trades(trades, dates):
@@ -566,7 +594,9 @@ def main():
                 cur.execute("""select d, coalesce(adj_close, close) from prices
                                 where ticker = %s order by d""", (BENCH,))
                 bench_rows = dict(cur.fetchall())
-            dates, tickers, adj, raw, dv = build_grid(tape)
+            # the benchmark's own bars ARE the market calendar: an index ETF prints on every real
+            # US session and on no holiday, which is exactly the predicate this grid needs
+            dates, tickers, adj, raw, dv = build_grid(tape, set(bench_rows))
             park_px = np.array([float(park_rows.get(d, np.nan)) for d in dates])
             # forward-fill the park so a dark session carries its last mark rather than vanishing
             for i in range(1, len(park_px)):
@@ -583,9 +613,9 @@ def main():
             for name in want:
                 spec = dict(CELLS[name])
                 gated = spec.pop("gated", False)
-                eq, trades, costs = simulate(dates, tickers, adj, raw, dv, park_px,
-                                             start_nav=start_nav,
-                                             index_px=bench_px if gated else None, **spec)
+                eq, trades, costs, health = simulate(dates, tickers, adj, raw, dv, park_px,
+                                                     start_nav=start_nav,
+                                                     index_px=bench_px if gated else None, **spec)
                 exits = {}
                 for t in trades:
                     if "exit_date" in t:
@@ -614,7 +644,7 @@ def main():
                               spec=dict(CELLS[name]), formation=FORMATION, skip=SKIP)
                 stats = dict(a4=dict(spec=spec, entries=len(entries),
                                      entries_per_year=round(per_year, 2),
-                                     cost_usd=round(costs, 2)),
+                                     cost_usd=round(costs, 2), **health),
                              bars_25=dict(source="wo-a4-2026-08-13", full=full, oos=oos,
                                           dsr="not scored — see the ledger's swept runs"),
                              conformance_ok=True, exits=exits)

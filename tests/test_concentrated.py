@@ -101,7 +101,7 @@ def test_the_book_is_the_top_n_and_the_rest_is_parked():
     paths = {f"N{i:02d}.US": 100.0 * np.exp(np.linspace(0, 0.2 + i * 0.05, n)) for i in range(10)}
     dates, tickers, adj, raw, dv = grid(paths)
     park = np.full(n, 50.0)
-    eq, trades, costs = cc.simulate(dates, tickers, adj, raw, dv, park,
+    eq, trades, costs, _ = cc.simulate(dates, tickers, adj, raw, dv, park,
                                     n=3, months=6, risk_adjusted=False, sleeve=1.0,
                                     start_nav=200_000.0)
     entries = [t for t in trades if "entry_date" in t]
@@ -185,7 +185,7 @@ def test_a_name_that_goes_dark_does_not_zero_the_account():
     dark = tickers.index("N04.US")
     adj[int(n * 0.75):, dark] = np.nan
     park = np.full(n, 50.0)
-    eq, _, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
+    eq, _, _, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
                            risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)
     nav = np.array([v for _, v, _ in eq])
     worst = float((nav / np.maximum.accumulate(nav) - 1).min())
@@ -203,9 +203,9 @@ def test_the_gate_sells_the_book_when_the_market_breaks_its_trend():
     # the index rises for two thirds, then falls hard enough to break its own 200-day
     index = np.concatenate([np.linspace(100.0, 200.0, int(n * 0.7)),
                             np.linspace(200.0, 90.0, n - int(n * 0.7))])
-    _, ungated, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
+    _, ungated, _, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
                                 risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)
-    _, gated, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
+    _, gated, _, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
                               risk_adjusted=False, sleeve=1.0, start_nav=200_000.0,
                               index_px=index)
     assert not any(t.get("reason") == "gate_off" for t in ungated)
@@ -395,7 +395,7 @@ def test_the_rebalance_sizes_from_the_whole_account_not_the_cash_it_freed():
              for i in range(6)}
     dates, tickers, adj, raw, dv = grid(paths)
     park = np.full(n, 100.0)                      # a flat park: idle money earns nothing
-    eq, trades, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
+    eq, trades, _, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
                                 risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)
     nav_on = {d: v for d, v, _ in eq}
     ti, di = {t: j for j, t in enumerate(tickers)}, {d: i for i, d in enumerate(dates)}
@@ -421,3 +421,67 @@ def test_the_rebalance_sizes_from_the_whole_account_not_the_cash_it_freed():
             "parks the difference is not a full sleeve")
     assert checked >= 2 and partial >= 2, (
         f"the fixture needs rebalances that carry names: {checked} books, {partial} partial")
+
+
+# ------------------------------------------------------------------- the market calendar
+
+def test_the_grid_takes_its_sessions_from_the_market_calendar_not_the_tape():
+    """The store carries a couple of dozen junk listings that print on US market holidays. Taking
+    the session list from the tape's own union of dates put New Year's Day in the grid; the first
+    session of the half-year landed on it, and a rebalance there sold the whole book at its
+    carried mark and bought nothing, because buying refuses a stale mark. The account then sat in
+    the park until July. Half the window, invisibly."""
+    real = sessions(10)
+    holiday = dt.date(2024, 1, 1)
+    tape = [("REAL.US", d, 10.0, 10.0, 1e6) for d in real]
+    tape += [("JUNK.US", holiday, 1.0, 1.0, 5.0)]          # the only thing printing that day
+    dates, tickers, adj, raw, dv = cc.build_grid(tape, set(real))
+    assert holiday not in dates, "a day the benchmark did not trade is not a session"
+    assert dates == real
+
+
+def test_a_grid_with_no_calendar_refuses_to_build():
+    tape = [("REAL.US", d, 10.0, 10.0, 1e6) for d in sessions(5)]
+    with pytest.raises(RuntimeError, match="calendar"):
+        cc.build_grid(tape, set())
+
+
+def test_a_rebalance_whose_rank_comes_up_empty_is_reported_not_swallowed():
+    """The exact shape of the January defect: on a day nothing prints, no name clears the $5
+    floor, the rank is empty, the whole book is sold and the account sits in the park until the
+    next rebalance. It ran four times over nine years and nothing counted it."""
+    n = N_DAYS
+    paths = {f"N{i:02d}.US": np.linspace(100.0, 130.0 + i, n) for i in range(4)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    rebals = cc.rebalance_dates(dates, 6, cc.FORMATION + 1)
+    adj, raw = adj.copy(), raw.copy()
+    adj[rebals[1], :] = np.nan
+    raw[rebals[1], :] = np.nan                       # nothing prints: the rank cannot be built
+    health = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), n=3, months=6,
+                         risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)[3]
+    assert dates[rebals[1]].isoformat() in health["empty_rebalances"], (
+        "a rebalance that ends holding nothing must be on the record"
+    )
+
+
+def test_a_buy_refused_on_a_stale_mark_is_counted():
+    """The other route to the same place: the rank is fine but the name did not print, so the
+    buy is refused — correctly, it cannot be filled — and the slice goes unfunded."""
+    n = N_DAYS
+    paths = {f"N{i:02d}.US": np.linspace(100.0, 130.0 + i, n) for i in range(4)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    rebals = cc.rebalance_dates(dates, 6, cc.FORMATION + 1)
+    adj = adj.copy()
+    adj[rebals[1], :] = np.nan                       # the rank still builds off older bars
+    health = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), n=3, months=6,
+                         risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)[3]
+    assert health["stale_skips"] >= 3, "every refused buy is counted"
+
+
+def test_a_healthy_run_reports_no_empty_rebalances():
+    n = N_DAYS
+    paths = {f"N{i:02d}.US": np.linspace(100.0, 130.0 + i, n) for i in range(4)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    health = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), n=3, months=6,
+                         risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)[3]
+    assert health["empty_rebalances"] == [] and health["stale_skips"] == 0
