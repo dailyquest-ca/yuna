@@ -551,6 +551,18 @@ PRESETS["a3"] = dict(
 PRESETS["a3c"] = dict(PRESETS["a3"], level_stop_sessions=10,
                       chandelier_mult=8.0, chandelier_atr_window=22)
 
+# A3e — the crash protocol back on. A3d bought the ride (holds 8.9 -> 45.3 sessions once the
+# law's trail stopped clipping) and paid for it with the tail: 85.4% average exposure and a
+# -52.4% drawdown, because 30 slots at 1/30 of NAV each, held five times longer, keep the book
+# fully loaded into a decline that takes every name at once.
+#
+# The push study dismissed the regime gate on COMPLETION (3.84% gate-on against 4.08% off) and
+# that reading stands — it buys nothing on selection. Drawdown is a different question the
+# study never asked, and §3.3's crash protocol is the repo's own answer to it: entries were
+# already refused with the gate off (the day loop requires `on`), so this cell adds only the
+# exit side. Clenow's rule is the same shape and the same source as M1's latch.
+PRESETS["a3e"] = dict(PRESETS["a3"], gate_off_exit=True)
+
 # E1 — the Micron question (E-series, wo-e-series-2026-08-12 §3). A1V with every MU trade
 # excluded, derived from `a1v` the way `a1v` is derived from `a1`, so the exclusion is the only
 # difference. 71.4% of A1's profit is one MU trade; A1V's 73 points over the 90/10 counterfactual
