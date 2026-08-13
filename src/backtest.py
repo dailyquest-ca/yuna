@@ -104,6 +104,17 @@ LAW = dict(park_idle=False,            # K1  — idle capital sits in cash, earn
            exclude_names=(),           # E1  — names the run refuses to enter, through any door.
                                        #       (E-series E1, the Micron question — not 2026-08-10's
                                        #       E1 label on `confirm_before_entry` above.)
+           slot_order=None,            # E3  — what orders competing candidates into scarce slots.
+                                       #       None = MCN descending (§3.2's queue, the law).
+                                       #       Zak's 2026-08-13 ruling for A2: 'breakout_fcfs' —
+                                       #       each day's fresh signals claim free slots in ADDV
+                                       #       order, so across days the earliest breakout wins.
+                                       #       'trend_vol' is the pre-registered alternative arm:
+                                       #       calmest trend (lowest ATR fraction) first.
+           entry_mcn_floor=True,       #     — §3.2's "MCN < 70 never tickets". E3's door is
+                                       #       "breakout + M2" and names no score, so A2 switches
+                                       #       the floor off; run 56 logged 752,675 refusals of
+                                       #       candidates the spec's own text admits.
            max_names=None)             # P2  — from config (4)
 
 PRESETS = {
@@ -419,13 +430,25 @@ PRESETS["a2"] = dict(
     chandelier_mult=8.0, chandelier_atr_window=22,   # A2d/A2e — the runner's only exit
     max_names=30, sleeve_cap_pct=1.0,           # breadth is the thesis; the park holds the rest
     heat_cap=None,                              # derived heat = N x r; the DD bar governs, per M1
+    # Zak's 2026-08-13 ruling closes the fifth and sixth spec gaps (the slot ordering runs 54-56
+    # died on, and the score floor the door was never specified to carry). FCFS is the null
+    # ordering — no selection signal beyond "a slot was free when the breakout arrived" — which is
+    # the E3 thesis's own claim: the binding constraint is breadth and holding, not selectivity.
+    slot_order="breakout_fcfs", entry_mcn_floor=False,
     # everything §3.2 does that A2 does not: no pyramiding, no trims, no press, no euphoria rung,
-    # no MCN floor (risk_per_trade ignores the score), no M4 earnings gate.
+    # no MCN floor (the ruling above makes the comment true — until 2026-08-13 the floor was
+    # still enforced at the door), no M4 earnings gate.
     entry_fraction=1.0, pyramid_tranches=1, pyramid_spacing=None,
     trim_at=None, trim_frac=None, forever=True,
     breakeven=False, breakeven_r=None, breakeven_on_full_size=False, euphoria=False,
     require_m4=False, m4_swing=False, press_on_next_base=False,
     mq_vol_divisor=False, mcn_drop_atr=False, confirm_before_entry=False)
+
+# The one pre-registered alternative on the new ordering axis (E3 sensitivity ladder, amended
+# 2026-08-13): calmest trend first. The strongest selective candidate — the smooth-mover evidence
+# is real — but it is an overlay on the thesis rather than the thesis, so it is the arm and FCFS
+# is the centre. Ordering key: the name's own ATR as a fraction of price, ascending.
+PRESETS["a2o"] = dict(PRESETS["a2"], slot_order="trend_vol")
 
 # E1 — the Micron question (E-series, wo-e-series-2026-08-12 §3). A1V with every MU trade
 # excluded, derived from `a1v` the way `a1v` is derived from `a1`, so the exclusion is the only
@@ -453,6 +476,10 @@ def hypothesis():
             # so a hand-typed dispatch input cannot silently exclude nothing — a filter that
             # matches no rows reads exactly like a filter that worked.
             h[k] = tuple(s.strip().upper() for s in raw.split(",") if s.strip())
+            continue
+        if k == "slot_order":
+            # A string knob — the scalar parser below would crash int()-ing it.
+            h[k] = raw.strip().lower()
             continue
         low = raw.strip().lower()
         h[k] = (True if low in ("1", "true", "yes") else
@@ -924,7 +951,7 @@ def rank(frame, t, cols, arrays, valid, hyp):
         return None
 
     quality, atr_pct, dryup, near_high = {}, {}, {}, {}
-    m2, bases, group_returns = {}, {}, {}
+    m2, bases, group_returns, addv_of, atrf = {}, {}, {}, {}, {}
     for j in idx:
         tk = cols[j]
         f_rows = own_bars(valid, j, t)
@@ -938,6 +965,7 @@ def rank(frame, t, cols, arrays, valid, hyp):
         # 25% — `volatility_tolerance` floors at it, so a quiet name is judged exactly as §3.2
         # judges it and only a name that actually moves is given room.
         apct = sg.atr_fraction(hi_f, lo_f, cl_f)
+        addv_of[tk], atrf[tk] = float(addv[j]), apct
         if hyp["screen"] == "deep_recovery":
             # C1: M2 and M3 both go. The census screen is the whole eligibility test, and it has
             # no pivot — the entry trigger is a new 20-session closing high (`signals.resumed`),
@@ -995,13 +1023,32 @@ def rank(frame, t, cols, arrays, valid, hyp):
     # and NFLX never entered once in nine years while each made repeated 252-day highs. The arm was
     # A2 at the door and A1 in the queue.
     #
-    # A2's door is its own filter — a new 252-session high AND M2 — so the eligible set does not
-    # need narrowing to stay small. MCN still orders the list, which only matters when more names
-    # qualify on one day than there are free slots; what the ORDER should be for a trend-follower
-    # is not specified in E3 and is a live gap, flagged rather than invented.
-    ranked_eligible = sorted(eligible, key=lambda tk: -out[tk]["mcn"])
+    # The gap runs 54-56 flagged is now closed by ruling (Zak, 2026-08-13). The queue's order is a
+    # declared clause of the hypothesis, not an inheritance:
+    #
+    #   * None            — MCN descending, §3.2's own queue. The law, and every non-A2 variant.
+    #   * 'breakout_fcfs' — E3's centre. Within a day, dollar liquidity (ADDV) descending; across
+    #     days, first-come-first-served emerges because the door only fires on a FRESH new-high
+    #     close, so today's signals compete only for today's free slots. No selection signal
+    #     beyond "a slot was free when the breakout arrived" — the thesis says breadth and
+    #     holding are the constraint, not selectivity, and the queue now says the same thing.
+    #   * 'trend_vol'     — the pre-registered alternative arm: calmest trend first, the name's
+    #     own ATR as a fraction of price, ascending. The smooth-mover overlay, kept on the ladder
+    #     so its lift over FCFS is measured rather than assumed.
+    order = hyp.get("slot_order")
+    if order == "breakout_fcfs":
+        ranked_eligible = sorted(eligible, key=lambda tk: -addv_of.get(tk, 0.0))
+    elif order == "trend_vol":
+        ranked_eligible = sorted(eligible, key=lambda tk: atrf.get(tk) if atrf.get(tk) is not None
+                                 else float("inf"))
+    elif order is None:
+        ranked_eligible = sorted(eligible, key=lambda tk: -out[tk]["mcn"])
+    else:
+        raise ValueError(f"unknown slot_order {order!r} — the queue's order is a declared clause, "
+                         f"and an unrecognized one must halt rather than fall back to MCN")
     l1m = ranked_eligible if hyp.get("entry_new_high") else ranked_eligible[:150]
-    return dict(scored=out, l1m=l1m, evaluated=len(ranked), m4_known=m4_known)
+    return dict(scored=out, l1m=l1m, evaluated=len(ranked), m4_known=m4_known,
+                addv=addv_of, atr_fraction=atrf)
 
 
 # =============================================================================== the simulation
@@ -1515,7 +1562,11 @@ def simulate(frame, cfg):
                 if tk in (hyp["exclude_names"] or ()):
                     continue
                 row = scored[tk]
-                if not sg.enterable(row["mcn"], floor=cfg["min_mcn"]):
+                # §3.2's floor, now a declared clause rather than baseline gravity: E3's door is
+                # "breakout + M2" and names no score, and run 56 refused 752,675 candidate-days
+                # below 70 while claiming to test that door. The law and every non-A2 variant
+                # keep the floor exactly as before.
+                if hyp["entry_mcn_floor"] and not sg.enterable(row["mcn"], floor=cfg["min_mcn"]):
                     conf["entries_refused_below_70"] += 1
                     continue
                 j = col[tk]
@@ -1859,6 +1910,9 @@ def conformance(conf, trades, equity, hyp=None):
              new_highs=conf.get("new_high_entries", 0),
              screen=(hyp or {}).get("screen") or "M2 trend template + M3 base (§3.2)",
              m4_required=bool((hyp or {}).get("require_m4", True)),
+             # The queue's order decides who claims a scarce slot, and runs 54-56 proved it can
+             # silently BE the strategy — so it is declared on every run, the law included.
+             slot_order=(hyp or {}).get("slot_order") or "MCN descending (§3.2)",
              # E1: the names this run refused to enter, listed so the exclusion is reviewable —
              # a filter nobody can see is indistinguishable from a silent one.
              excluded_names=sorted((hyp or {}).get("exclude_names") or ()),
@@ -1905,7 +1959,12 @@ def conformance(conf, trades, equity, hyp=None):
              runner_immunity=bool((hyp or {}).get("runner_immunity"))),
         dict(clause="MCN < 70 never tickets", fn="signals.enterable", coverage=1.0,
              refused=conf["entries_refused_below_70"],
-             violations=sum(1 for t in trades if t["mcn"] is not None and t["mcn"] < 70)),
+             # E3 (ruled 2026-08-13): A2's door is breakout + M2, no score — the floor off is a
+             # declared clause of that arm, so a sub-70 entry under it is the rule working, not a
+             # violation. Under the law and every floor-keeping variant, it stays a violation.
+             floor_enforced=bool((hyp or {}).get("entry_mcn_floor", True)),
+             violations=(0 if not (hyp or {}).get("entry_mcn_floor", True)
+                         else sum(1 for t in trades if t["mcn"] is not None and t["mcn"] < 70))),
         dict(clause="Stalled pyramid — 4 weeks", fn="signals.stalled_pyramid", coverage=1.0),
         dict(clause="Survivorship — delisted retained", fn="driver", coverage=1.0,
              delisted_exits=sum(1 for t in trades if t["exit_reason"] == "delisted")),

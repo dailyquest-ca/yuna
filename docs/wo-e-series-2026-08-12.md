@@ -144,3 +144,34 @@ propagate into E0/E1, both of which score against A1V.
   38.1% win, +8.35% expectancy**. The return, CAGR and DD were correct.
 - **C3** read ~175 trades; run 50 took **252**. The 3x expectancy swing against C1 stands, and
   is in fact slightly understated — C3 spread a weaker edge over more trades.
+
+---
+
+## E3 amendment — ruled by Zak, 2026-08-13
+
+Runs 54–56 exposed two clauses E3 depends on and never wrote down. Both are now specified; the
+centre spec above is read WITH this amendment.
+
+**Slot ordering.** When more names qualify on a day than there are free slots, the queue is
+**first-come-first-served by breakout date, same-day ties broken by dollar liquidity (50-session
+median ADDV, descending)**. Mechanically: the door only fires on a fresh 252-session-high close,
+so each day's signals compete only for that day's free slots, in ADDV order; across days the
+earliest breakout to find a free slot keeps it. This is the null ordering — no selection signal
+beyond "a slot was free when the breakout arrived" — chosen because the arm's registered thesis
+is that the binding constraint is breadth and holding, *not selectivity*, and because every
+scored ordering re-imports the failure MCN demonstrated (`slot_order='breakout_fcfs'`).
+
+**The score floor.** §3.2's "MCN < 70 never tickets" comes **off** for A2
+(`entry_mcn_floor=False`): the centre spec's door is "breakout to a new 252-day high close, plus
+the M2 trend template" and names no score, while run 56 logged 752,675 refusals below the floor
+on a run claiming to test that door. The floor stands unchanged for the law and every other
+variant, and the conformance table now declares its state on every run.
+
+**Sensitivity ladder, amended.** One axis joins §E3's list: ordering
+{breakout_fcfs → trend_vol}, where `trend_vol` is calmest-trend-first — the name's own ATR as a
+fraction of price, ascending (preset `a2o`, pre-registered here; the smooth-mover literature is
+the argument for the arm, and measuring its lift over FCFS rather than assuming it is the reason
+FCFS is the centre).
+
+Under P1 as completed (param hash + code stamp), the re-run of the centre spec under this
+amendment is a NEW experiment; runs 54–56 remain in the ledger as the three hybrids they were.

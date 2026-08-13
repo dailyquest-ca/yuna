@@ -1448,3 +1448,107 @@ def test_the_run_records_the_code_it_ran():
     params, where it feeds param_digest through the extras."""
     source = (ROOT / "src" / "backtest.py").read_text()
     assert "code_stamp=code_stamp()," in source
+
+
+# ----------------------------------------------- the slot ordering (Zak's ruling, 2026-08-13)
+#
+# Runs 54-56: the book holds 30, most bull-market days offer more than 30 fresh 252-highs, and
+# MCN — inherited, never specified — decided who got the slots. MSFT, GOOGL, AMZN, AVGO, LLY and
+# NFLX were never bought once in nine years. The ruling makes the queue's order a declared clause:
+# FCFS (ADDV tiebreak) is A2's centre, lowest trend volatility is the pre-registered alternative,
+# and the law keeps MCN exactly as §3.2 writes it.
+
+def _ranked(f, hyp):
+    valid = [np.flatnonzero(~np.isnan(f["arrays"]["close"][:, j]))
+             for j in range(len(f["cols"]))]
+    return bt.rank(f, DAYS - 12, f["cols"], f["arrays"], valid, hyp)
+
+
+def test_each_declared_ordering_orders_by_its_own_key():
+    f, _ = frame()
+    a2 = dict(bt.LAW); a2.update(bt.PRESETS["a2"])
+    fcfs = _ranked(f, a2)
+    assert fcfs["l1m"] == sorted(fcfs["l1m"], key=lambda tk: -fcfs["addv"][tk]), (
+        "breakout_fcfs must hand same-day slots out by dollar liquidity, nothing else")
+
+    a2o = dict(bt.LAW); a2o.update(bt.PRESETS["a2o"])
+    calm = _ranked(f, a2o)
+    key = lambda tk: calm["atr_fraction"][tk] if calm["atr_fraction"].get(tk) is not None \
+        else float("inf")
+    assert calm["l1m"] == sorted(calm["l1m"], key=key), (
+        "trend_vol must put the calmest trend first")
+
+    law = _ranked(f, dict(bt.LAW))
+    assert law["l1m"] == sorted(law["l1m"], key=lambda tk: -law["scored"][tk]["mcn"]), (
+        "the law's queue is MCN descending, exactly as before the ruling")
+
+
+def test_an_unknown_ordering_halts_rather_than_falling_back():
+    """Falling back to MCN is how the defect shipped the first time."""
+    f, _ = frame()
+    with pytest.raises(ValueError, match="slot_order"):
+        _ranked(f, dict(bt.LAW, slot_order="alphabetical"))
+
+
+def test_a2o_moves_exactly_the_ordering_clause():
+    """The ladder discipline (d1/d2/d3's rule): an arm must differ from its centre in one clause,
+    or the axis measures a bundle."""
+    a2, a2o = bt.PRESETS["a2"], bt.PRESETS["a2o"]
+    assert {k for k in a2o if a2o[k] != a2.get(k)} == {"slot_order"}
+
+
+def test_the_queue_order_is_declared_on_every_run_including_the_law():
+    conf = dict(m4_evaluated=1, m4_known=1, blackout_decisions=1, blackout_known=1,
+                entries=1, entries_refused_below_70=0, reentries=0, recoveries=0,
+                new_high_entries=1, trims=0, heat_refused=0)
+    entry = lambda hyp: next(c for c in bt.conformance(conf, [], [], hyp=hyp)
+                             if c["fn"] == "signals.entry_order")
+    a2 = dict(bt.LAW); a2.update(bt.PRESETS["a2"])
+    assert entry(a2)["slot_order"] == "breakout_fcfs"
+    assert entry(dict(bt.LAW))["slot_order"] == "MCN descending (§3.2)"
+    assert entry(None)["slot_order"] == "MCN descending (§3.2)"
+
+
+def test_the_floor_off_admits_what_the_spec_admits_and_says_so():
+    """E3's door is "breakout + M2", no score. On a fixture whose leader ranks below 70 (the
+    dry-up removed — see frame()'s comment: that is the difference between 65 and 77), the law
+    refuses it at the floor; A2 under the ruling buys it through the new-high door, and the
+    conformance table calls that the rule working rather than a violation."""
+    f, breakout = runner_frame()
+    a = {k: v.copy() for k, v in f["arrays"].items()}
+    a["vol"][:, 0] = 1_000_000.0                       # no dry-up, no breakout-day spike
+    f = dict(f, arrays=a)
+
+    law_trades, _, law_conf = bt.simulate(f, cfg())
+    assert law_conf["entries_refused_below_70"] >= 1, (
+        "the un-dried leader was never refused — the fixture no longer sits below the floor "
+        "and this test is measuring nothing")
+    assert not any(t["ticker"] == "N00.US" for t in law_trades)
+
+    a2 = {**bt.PRESETS["a2"], "park_idle": False, "cash_target": None}
+    a2_trades, _, a2_conf = bt.simulate(f, cfg(hyp=a2, max_names=30))
+    assert any(t["ticker"] == "N00.US" for t in a2_trades), (
+        "the floor is off and the leader makes a fresh high every day — it must enter")
+    assert a2_conf["entries_refused_below_70"] == 0
+
+    # The mechanism, flipped in isolation. A2's scoring differs from the law's (no vol divisor),
+    # so the law's sub-70 days say nothing about a2's — instead the floor is raised to a level no
+    # score can clear, and the ONLY difference between these two runs is the declared flag. With
+    # the floor enforced nothing enters and the refusals count; with it declared off, the same
+    # frame under the same scoring trades freely and refuses nobody.
+    shut, _, shut_conf = bt.simulate(f, cfg(hyp={**a2, "entry_mcn_floor": True},
+                                            max_names=30, min_mcn=101.0))
+    open_, _, open_conf = bt.simulate(f, cfg(hyp=a2, max_names=30, min_mcn=101.0))
+    assert shut_conf["entries"] == 0 and shut_conf["entries_refused_below_70"] >= 1
+    assert open_conf["entries"] >= 1 and open_conf["entries_refused_below_70"] == 0
+
+    floor = lambda hyp, trades: next(
+        c for c in bt.conformance(a2_conf, trades, [], hyp=hyp)
+        if c["clause"] == "MCN < 70 never tickets")
+    ruled = dict(bt.LAW); ruled.update(bt.PRESETS["a2"])
+    sub70 = [dict(ticker="X.US", mcn=64.0, exit_reason="stop")]
+    assert floor(ruled, sub70)["violations"] == 0
+    assert floor(ruled, sub70)["floor_enforced"] is False
+    assert floor(dict(bt.LAW), sub70)["violations"] == 1, (
+        "the same trade under the law must still read as a violation — the clause is declared "
+        "off, not deleted")
