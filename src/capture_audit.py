@@ -102,9 +102,10 @@ def load_positions(cur, run_id):
 def load_tape(cur, *, with_range=False):
     """The same census `backtest.load()` reads: US stocks, living and dead, minus the excluded.
 
-    `with_range` appends high and low — the push study's ATR needs the bar's range, the audit
-    does not, and both must read the SAME census predicate or their universes silently drift."""
-    extra = ", p.high, p.low" if with_range else ""
+    `with_range` appends high, low and open — the push study's ATR needs the bar's range and the
+    concentrated arm's stop needs to know whether the session opened through it, and every reader
+    must use the SAME census predicate or their universes silently drift."""
+    extra = ", p.high, p.low, p.open" if with_range else ""
     cur.execute(f"""select p.ticker, p.d, p.close, coalesce(p.adj_close, p.close), p.volume{extra}
                      from prices p join universe u on u.ticker = p.ticker
                     where u.kind = 'stock' and u.ticker like '%%.US'

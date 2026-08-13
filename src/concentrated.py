@@ -21,22 +21,23 @@ the law's defaults until each one is explicitly switched off. This module holds 
 implements only that idea: rank the liquid universe by trend, hold the top N, change the book on
 a slow clock, park the rest in the momentum ETF.
 
-The one exception is the **stop**, and it was added because the first grid measured what its
-absence costs. A book with no exit between rebalances bought in December 2025 and could not change
-its mind until the end of June 2026; it peaked at $1.73M on 2025-10-15 and troughed at $670k on
-2026-07-29. Two cheap fixes were tried against that and BOTH failed, measured:
+The one exception is the **stop**, and it earns its place: `trail=True` runs §3.2's own ratchet
+per name, every session — the exit the plan already legislates and this arm was first built
+without. Measured on the corrected grid (session-2026-08-13 §14), it is the difference between
+unproven and proven:
 
-  * **A large-cap pool** (`top_by_addv`) moved the drawdown the wrong way — -56.5% over the full
-    universe became -61.3% at the top 500 and -60.6% at the top 250. At a momentum peak the
-    most-traded names *are* the crowded trade; restricting to them concentrates the crash.
-  * **A market regime gate** (`gated`) did nothing at all: -61.28% gated against -61.28% ungated,
-    identical to four decimals, because VOO never closed below its own 200-day between 2025-11 and
-    2026-07 while the book lost 61%. The gate was watching the wrong series.
+  * `lg12_semi` (no exit between rebalances) — 36.02% CAGR, bootstrap median drawdown -51.9%,
+    deflated Sharpe 0.897, **unproven**
+  * `lg12_semi_trail` — 29.19%, bootstrap median drawdown **-31.0%**, DSR 0.969, **proven**
+  * `lg8_semi_trail` — **31.75%**, -31.0%, DSR **0.979**, **proven**, at 16.7 names a year
 
-So the cells carrying `trail=True` run §3.2's own ratchet per name, every session — the exit the
-plan already legislates and this arm was built without. `vol_target` carries the other half of the
-answer: Barroso & Santa-Clara's finding is that a momentum crash is forecastable from the
-**strategy's** realized volatility, which is the series the failed gate should have been watching.
+**An earlier version of this docstring said the opposite about two of these knobs**, on numbers
+measured before the calendar defect in `build_grid` was found. The large-cap pool does not hurt —
+it is the biggest single lever in the grid, worth ten points of CAGR (27.31% full universe →
+36.02% top-500 → 37.54% top-250). The market gate is a bad trade rather than a no-op: -6.2 points
+of CAGR for +2.3 of drawdown. `vol_target` (Barroso-Santa-Clara) was the hypothesis that the
+strategy's own volatility forecasts a momentum crash; it does, but the trail collects the same
+information per name and acts faster, so the governor only adds turnover. Tested, rejected.
 
 Deliberate design choices, each with its source:
 
@@ -158,14 +159,57 @@ CELLS = {
                                   top_by_addv=500, vol_target=0.12),
     "lg12_semi_trail_vt":    dict(n=12, months=6, risk_adjusted=True, sleeve=1.00,
                                   top_by_addv=500, trail=True, vol_target=0.12),
+    # ---- WO-A5's robustness ladder. `lg8_semi_trail` came out of a 22-cell search and reached
+    # §2.5 `proven`; these move ONE axis one step either side of it to find out whether it sits on
+    # a plateau or a spike. Declared in the work order BEFORE any of them ran, with the reading
+    # fixed there too — and a probe that beats the champion is evidence about the surface, not a
+    # new champion, because promoting it re-runs the same selection the deflation already prices.
+    "lad_n6":      dict(n=6,  months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500, trail=True),
+    "lad_n10":     dict(n=10, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500, trail=True),
+    "lad_p250":    dict(n=8,  months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=250, trail=True),
+    "lad_p750":    dict(n=8,  months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=750, trail=True),
+    "lad_quarter": dict(n=8,  months=3, risk_adjusted=True, sleeve=1.00, top_by_addv=500, trail=True),
+    "lad_annual":  dict(n=8,  months=12, risk_adjusted=True, sleeve=1.00, top_by_addv=500, trail=True),
+    "lad_wide8":   dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500, trail=True,
+                        trail_cfg=dict(initial=0.08, arm=0.15, wide=0.08, euphoria=0.05)),
+    "lad_wide12":  dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500, trail=True,
+                        trail_cfg=dict(initial=0.08, arm=0.15, wide=0.12, euphoria=0.05)),
+    "lad_arm12":   dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500, trail=True,
+                        trail_cfg=dict(initial=0.08, arm=0.12, wide=0.10, euphoria=0.05)),
+    "lad_arm18":   dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500, trail=True,
+                        trail_cfg=dict(initial=0.08, arm=0.18, wide=0.10, euphoria=0.05)),
+    "lad_init6":   dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500, trail=True,
+                        trail_cfg=dict(initial=0.06, arm=0.15, wide=0.10, euphoria=0.05)),
+    "lad_init10":  dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500, trail=True,
+                        trail_cfg=dict(initial=0.10, arm=0.15, wide=0.10, euphoria=0.05)),
+    "lad_euph4":   dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500, trail=True,
+                        trail_cfg=dict(initial=0.08, arm=0.15, wide=0.10, euphoria=0.04)),
+    "lad_euph6":   dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500, trail=True,
+                        trail_cfg=dict(initial=0.08, arm=0.15, wide=0.10, euphoria=0.06)),
+    # ---- WO-A5 §3.1: costs at 2x and 4x §2.2's curve. 16.7 entries a year should not be
+    # cost-fragile; "should not be" is not a measurement.
+    "lad_cost2x":  dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                        trail=True, cost_mult=2.0),
+    "lad_cost4x":  dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                        trail=True, cost_mult=4.0),
+    # ---- WO-A5 §2.1: the same champion, filled the way a broker fills a resting stop — at the
+    # open when the session gaps through it, at the stop otherwise. Reported ALONGSIDE the
+    # close-based cell, not instead of it.
+    "lg8_trail_intraday":  dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                               trail=True, intraday=True),
+    "lg12_trail_intraday": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                               trail=True, intraday=True),
 }
+
+
+COST_MULT = 1.0          # WO-A5 §3.1 sets this per cell; §2.2's curve is the 1.0 case
 
 
 def spread_frac(addv):
     for floor, bps in SPREAD_CURVE:
         if addv >= floor:
-            return bps / 10_000.0
-    return SPREAD_CURVE[-1][1] / 10_000.0
+            return bps / 10_000.0 * COST_MULT
+    return SPREAD_CURVE[-1][1] / 10_000.0 * COST_MULT
 
 
 def build_grid(tape, calendar):
@@ -192,7 +236,10 @@ def build_grid(tape, calendar):
     adj = np.full(shape, np.nan)
     raw = np.full(shape, np.nan)
     dv = np.full(shape, np.nan)
-    for tk, d, close, a, vol in tape:
+    op = np.full(shape, np.nan)
+    lo = np.full(shape, np.nan)
+    for row in tape:
+        tk, d, close, a, vol = row[:5]
         if d not in di:
             continue          # a bar printed on a day the market was shut — not a session
         i, j = di[d], ti[tk]
@@ -201,7 +248,14 @@ def build_grid(tape, calendar):
         adj[i, j] = float(a)
         raw[i, j] = float(close) if close is not None else np.nan
         dv[i, j] = float(a) * float(vol) if vol is not None else np.nan
-    return dates, tickers, adj, raw, dv
+        if len(row) >= 8 and close:
+            # the whole bar is rescaled by the session's own adj/close factor, so open and low sit
+            # on the SAME axis as the adjusted closes the stop is set from. Comparing a raw low to
+            # an adjusted stop is the split defect that invalidated runs 18-44, in a new place.
+            f = float(a) / float(close)
+            op[i, j] = float(row[7]) * f if row[7] is not None else np.nan
+            lo[i, j] = float(row[6]) * f if row[6] is not None else np.nan
+    return dates, tickers, adj, raw, dv, op, lo
 
 
 def rebalance_dates(dates, months, warmup):
@@ -289,17 +343,50 @@ def vol_scalar(equity, target, window=VOL_TARGET_WINDOW):
     return float(min(1.0, target / (sd * np.sqrt(252.0))))
 
 
-def trail_stop(px, st, closes):
+TRAIL_DEFAULTS = dict(initial=TRAIL_INITIAL, arm=TRAIL_ARM, wide=TRAIL_WIDE,
+                      euphoria=TRAIL_EUPHORIA)
+
+
+def stop_fill(stop, op, lo):
+    """Where a resting stop-market order actually fills on a session, given its bar.
+
+    Broker semantics, not close semantics:
+      * the session **opens through** the stop → it fills at the OPEN, worse than the stop. This
+        is the gap, and a close-based test cannot see it at all.
+      * the stop sits inside the day's range → it fills AT the stop.
+      * the low never reaches it → no fill.
+
+    Returns None when the bar cannot decide, so the caller falls back to the close-based path
+    rather than inventing a fill. Whether this flatters the arm or not is genuinely unknown in
+    advance and is the reason WO-A5 pre-registers both: it fills earlier on a name that keeps
+    falling, and it also fires on an intraday spike the close recovered from — the classic reason
+    mechanical stops underperform the backtest that priced them on closes.
+    """
+    if not (np.isfinite(lo) and np.isfinite(op)):
+        return None
+    if op <= stop:
+        return float(op)
+    if lo <= stop:
+        return float(stop)
+    return None
+
+
+def trail_stop(px, st, closes, cfg=None):
     """§3.2's ratchet for one name on one session. Returns the stop, never below its last value.
 
     `closes` is the name's own trailing window of adjusted closes ending today, for the euphoria
     test. The initial stop is live from entry; the 10% trail replaces it only once the name has
     printed +15% from average cost, and stays armed thereafter (the plan ratchets up, never down).
+
+    `cfg` overrides the four bands. WO-A5's ladder moves each one step either side to find out
+    whether the champion is a plateau or a spike; the DEFAULTS, and only the defaults, are §3.2's
+    own numbers, and a cell that varies them is a probe rather than a candidate.
     """
-    want = st["entry"] * (1 - TRAIL_INITIAL)
-    if st["armed"] or px >= st["entry"] * (1 + TRAIL_ARM):
+    c = cfg or TRAIL_DEFAULTS
+    want = st["entry"] * (1 - c["initial"])
+    if st["armed"] or px >= st["entry"] * (1 + c["arm"]):
         st["armed"] = True
-        band = TRAIL_WIDE
+        band = c["wide"]
         w = closes[np.isfinite(closes)]
         if len(w) >= EUPHORIA_WINDOW:
             sd = w.std(ddof=1)
@@ -307,14 +394,14 @@ def trail_stop(px, st, closes):
             # calls any uptick euphoric, and a halted name printing one price for fifty sessions
             # arrives back from the halt on a 5% leash.
             if sd > 0 and px > w.mean() + EUPHORIA_SD * sd:
-                band = TRAIL_EUPHORIA
+                band = c["euphoria"]
         want = max(want, st["hi"] * (1 - band))
     return max(st["stop"], want)
 
 
 def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted, sleeve,
              start_nav, top_by_addv=None, index_px=None, gate_every=21, trail=False,
-             vol_target=None):
+             vol_target=None, trail_cfg=None, intraday=None):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -363,12 +450,18 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         p = park_qty * park_px[i] if np.isfinite(park_px[i]) else 0.0
         return cash + v + p
 
-    def sell(i, j, qty, reason):
+    def sell(i, j, qty, reason, price_override=None):
         """Sell `qty` shares of name j at its price today. A name that did not print cannot be
         sold — the position stays and is retried next session, which is what a halt or a holiday
-        actually does to an order."""
+        actually does to an order.
+
+        `price_override` is the intraday stop fill: a resting order does not execute at the close.
+        `price()` is still called so the name's last mark stays current for the rest of the walk.
+        """
         nonlocal cash, costs
         px_j = price(i, j)
+        if price_override is not None and np.isfinite(price_override):
+            px_j = float(price_override)
         if px_j is None or qty <= 0:
             return False
         gross = qty * px_j
@@ -522,17 +615,30 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             if not held:
                 empty_rebals.append(dates[i])
             park_all(i)
-        # ---- §3.2's ratchet, every session, on every name held. What breaks today is sold at
-        # tomorrow's close (see the docstring); a name already queued is not re-tested.
+        # ---- §3.2's ratchet, every session, on every name held. A name already queued is not
+        # re-tested. Two fill models, chosen by `intraday` and pre-registered in WO-A5 §2.1:
+        #   * close-based — the stop is judged on the close and filled at the NEXT close, because
+        #     a tape of closes cannot price an intraday fill
+        #   * intraday — the stop rests at the broker and fills from the bar, at the open when the
+        #     session gaps through it and at the stop otherwise
         if trail and held:
+            op_a, lo_a = intraday if intraday is not None else (None, None)
             for j in list(held):
                 st = state.get(j)
                 px_j = price(i, j)
                 if st is None or px_j is None or j in queued:
                     continue
+                if op_a is not None and st["stop"] > 0:
+                    # the resting order is tested BEFORE today's close moves the trail up: a stop
+                    # set yesterday is the stop the broker holds this morning
+                    fill = stop_fill(st["stop"], op_a[i, j], lo_a[i, j])
+                    if fill is not None:
+                        sell(i, j, held[j], "trail_stop", price_override=fill)
+                        continue
                 st["hi"] = max(st["hi"], px_j)
-                st["stop"] = trail_stop(px_j, st, adj[max(0, i - EUPHORIA_WINDOW + 1):i + 1, j])
-                if px_j < st["stop"]:
+                st["stop"] = trail_stop(px_j, st, adj[max(0, i - EUPHORIA_WINDOW + 1):i + 1, j],
+                                        trail_cfg)
+                if op_a is None and px_j < st["stop"]:
                     queued.append(j)
         v = mark(i)
         navs.append(v)
@@ -605,7 +711,7 @@ def main():
     with connect() as conn:
         with Heartbeat(conn, "concentrated") as hb:
             with conn.cursor() as cur:
-                tape = load_tape(cur)
+                tape = load_tape(cur, with_range=True)
                 cur.execute("""select d, coalesce(adj_close, close) from prices
                                 where ticker = %s order by d""", (PARK_TICKER,))
                 park_rows = dict(cur.fetchall())
@@ -614,7 +720,7 @@ def main():
                 bench_rows = dict(cur.fetchall())
             # the benchmark's own bars ARE the market calendar: an index ETF prints on every real
             # US session and on no holiday, which is exactly the predicate this grid needs
-            dates, tickers, adj, raw, dv = build_grid(tape, set(bench_rows))
+            dates, tickers, adj, raw, dv, op, lo = build_grid(tape, set(bench_rows))
             park_px = np.array([float(park_rows.get(d, np.nan)) for d in dates])
             # forward-fill the park so a dark session carries its last mark rather than vanishing
             for i in range(1, len(park_px)):
@@ -629,11 +735,17 @@ def main():
                 if not np.isfinite(bench_px[i]):
                     bench_px[i] = bench_px[i - 1]
             for name in want:
+                global COST_MULT
                 spec = dict(CELLS[name])
                 gated = spec.pop("gated", False)
-                eq, trades, costs, health = simulate(dates, tickers, adj, raw, dv, park_px,
-                                                     start_nav=start_nav,
-                                                     index_px=bench_px if gated else None, **spec)
+                COST_MULT = float(spec.pop("cost_mult", 1.0))
+                bars_in = (op, lo) if spec.pop("intraday", False) else None
+                try:
+                    eq, trades, costs, health = simulate(
+                        dates, tickers, adj, raw, dv, park_px, start_nav=start_nav,
+                        index_px=bench_px if gated else None, intraday=bars_in, **spec)
+                finally:
+                    COST_MULT = 1.0        # never leak a probe's costing into the next cell
                 exits = {}
                 for t in trades:
                     if "exit_date" in t:

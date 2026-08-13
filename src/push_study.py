@@ -199,7 +199,7 @@ def main():
                         **{k: v for k, v in f.items() if k != "atr_dollars"},
                         **autopsy))
 
-            for tk, d, close, adj, vol, high, low in tape:
+            for tk, d, close, adj, vol, high, low, _open in tape:
                 if tk != current:
                     flush()
                     current = tk

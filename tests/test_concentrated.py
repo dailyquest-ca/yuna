@@ -144,6 +144,16 @@ PARENT = {
     "lg12_semi_trail": "lg12_semi", "lg8_semi_trail": "lg12_semi_trail",
     "lg12_semi_trail_third": "lg12_semi_trail", "t250_12_trail": "t250_12_semi",
     "lg12_semi_vt": "lg12_semi", "lg12_semi_trail_vt": "lg12_semi_trail",
+    # WO-A5's ladder: every probe moves one axis off the champion it is probing
+    "lad_n6": "lg8_semi_trail", "lad_n10": "lg8_semi_trail",
+    "lad_p250": "lg8_semi_trail", "lad_p750": "lg8_semi_trail",
+    "lad_quarter": "lg8_semi_trail", "lad_annual": "lg8_semi_trail",
+    "lad_wide8": "lg8_semi_trail", "lad_wide12": "lg8_semi_trail",
+    "lad_arm12": "lg8_semi_trail", "lad_arm18": "lg8_semi_trail",
+    "lad_init6": "lg8_semi_trail", "lad_init10": "lg8_semi_trail",
+    "lad_euph4": "lg8_semi_trail", "lad_euph6": "lg8_semi_trail",
+    "lad_cost2x": "lg8_semi_trail", "lad_cost4x": "lg8_semi_trail",
+    "lg8_trail_intraday": "lg8_semi_trail", "lg12_trail_intraday": "lg12_semi_trail",
 }
 
 
@@ -438,7 +448,7 @@ def test_the_grid_takes_its_sessions_from_the_market_calendar_not_the_tape():
     holiday = dt.date(2024, 1, 1)
     tape = [("REAL.US", d, 10.0, 10.0, 1e6) for d in real]
     tape += [("JUNK.US", holiday, 1.0, 1.0, 5.0)]          # the only thing printing that day
-    dates, tickers, adj, raw, dv = cc.build_grid(tape, set(real))
+    dates, tickers, adj, raw, dv, _op, _lo = cc.build_grid(tape, set(real))
     assert holiday not in dates, "a day the benchmark did not trade is not a session"
     assert dates == real
 
@@ -536,3 +546,80 @@ def test_the_paper_close_moves_neither_the_equity_path_nor_the_costs():
     spent = sum(t["spend"] for t in trades if "entry_date" in t)
     # costs are the sum of the spreads actually paid; a paper close adds none
     assert costs < spent * 0.01, "the paper close must not charge a spread"
+
+
+# ------------------------------------------------- WO-A5 §2.1: how a resting stop actually fills
+
+def test_a_stop_inside_the_days_range_fills_at_the_stop():
+    assert cc.stop_fill(90.0, op=100.0, lo=85.0) == pytest.approx(90.0)
+
+
+def test_a_session_that_gaps_through_the_stop_fills_at_the_open_not_the_stop():
+    """The case a close-based test cannot see at all, and the one that costs real money."""
+    assert cc.stop_fill(90.0, op=72.0, lo=70.0) == pytest.approx(72.0)
+
+
+def test_a_low_that_never_reaches_the_stop_does_not_fill():
+    assert cc.stop_fill(90.0, op=100.0, lo=95.0) is None
+
+
+def test_an_undecidable_bar_falls_back_rather_than_inventing_a_fill():
+    assert cc.stop_fill(90.0, op=np.nan, lo=85.0) is None
+    assert cc.stop_fill(90.0, op=100.0, lo=np.nan) is None
+
+
+def test_intraday_fills_are_never_better_than_the_stop():
+    """A stop-market order cannot execute above its trigger. Any model that lets it is inventing
+    money on exactly the trades that hurt."""
+    for op, lo in ((100.0, 85.0), (72.0, 70.0), (90.0, 88.0), (89.9, 60.0)):
+        f = cc.stop_fill(90.0, op=op, lo=lo)
+        if f is not None:
+            assert f <= 90.0 + 1e-9, f"filled at {f} on a stop of 90 (open {op}, low {lo})"
+
+
+def test_the_ladder_probes_vary_only_the_bands_and_the_defaults_are_the_plans():
+    """§3.2's four numbers are the law. A probe may move them to map the surface; the DEFAULTS
+    must stay exactly what the plan says, or the ladder has quietly become the strategy."""
+    assert cc.TRAIL_DEFAULTS == dict(initial=0.08, arm=0.15, wide=0.10, euphoria=0.05)
+    champ = cc.CELLS["lg8_semi_trail"]
+    assert "trail_cfg" not in champ, "the champion runs the plan's own numbers, unparameterised"
+    for name, spec in cc.CELLS.items():
+        if not name.startswith("lad_") or "trail_cfg" not in spec:
+            continue
+        moved = {k for k, v in spec["trail_cfg"].items() if v != cc.TRAIL_DEFAULTS[k]}
+        assert len(moved) == 1, f"{name} moves {moved} — one band at a time"
+
+
+def test_a_cost_multiplier_scales_every_fee_and_does_not_leak():
+    base = cc.spread_frac(1e9)
+    cc.COST_MULT = 4.0
+    try:
+        assert cc.spread_frac(1e9) == pytest.approx(base * 4)
+        assert cc.spread_frac(1.0) == pytest.approx(
+            cc.SPREAD_CURVE[-1][1] / 10_000.0 * 4)
+    finally:
+        cc.COST_MULT = 1.0
+    assert cc.spread_frac(1e9) == pytest.approx(base), "the dial must reset"
+
+
+def test_the_intraday_model_sells_on_a_gap_the_close_model_rides_down():
+    """End to end: a name that gaps far below its stop and stays there. The close-based model
+    cannot fill until the next close; the broker model fills at the open it gapped to."""
+    n = N_DAYS
+    path = np.concatenate([np.linspace(100.0, 300.0, n - 80), np.full(80, 120.0)])
+    paths = {"GAP.US": path}
+    for i in range(5):
+        paths[f"N{i:02d}.US"] = np.linspace(100.0, 130.0 + i, n)
+    dates, tickers, adj, raw, dv = grid(paths)
+    park = np.full(n, 100.0)
+    j = tickers.index("GAP.US")
+    op, lo = adj.copy(), adj.copy()
+    gap = n - 80
+    op[gap, j], lo[gap, j] = 118.0, 115.0        # the session opens far through the trail
+    kw = dict(n=3, months=6, risk_adjusted=False, sleeve=1.0, start_nav=200_000.0, trail=True)
+    closed = cc.simulate(dates, tickers, adj, raw, dv, park, **kw)[1]
+    intra = cc.simulate(dates, tickers, adj, raw, dv, park, intraday=(op, lo), **kw)[1]
+    c_stop = next(t for t in closed if t.get("reason") == "trail_stop" and t["ticker"] == "GAP.US")
+    i_stop = next(t for t in intra if t.get("reason") == "trail_stop" and t["ticker"] == "GAP.US")
+    assert i_stop["exit_date"] <= c_stop["exit_date"], "the broker order cannot fill later"
+    assert i_stop["price"] == pytest.approx(118.0), "it fills at the open it gapped to"
