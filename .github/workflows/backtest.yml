@@ -83,8 +83,10 @@ permissions:
 # Not `yuna-writes`: this job touches `backtest_*` and nothing else (§4.2), so it cannot race the
 # chain. One run per ref PER JOB is enough — a second push supersedes the first, but a blend
 # dispatch must not cancel a study dispatch riding the same file (run 64 died exactly that way).
+# `cells` is in the key for the same reason: two concentrated dispatches carrying different
+# halves of the grid are different work, and the second must not kill the first.
 concurrency:
-  group: backtest-${{ github.ref }}-${{ inputs.research || 'engine' }}-${{ inputs.hypotheses || inputs.hypothesis || 'law' }}
+  group: backtest-${{ github.ref }}-${{ inputs.research || 'engine' }}-${{ inputs.hypotheses || inputs.hypothesis || 'law' }}-${{ inputs.cells }}
   cancel-in-progress: true
 
 jobs:
@@ -142,7 +144,7 @@ jobs:
   concentrated:
     if: github.event_name == 'workflow_dispatch' && inputs.research == 'concentrated'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
