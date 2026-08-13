@@ -210,6 +210,28 @@ CELLS = {
                                 trail=True, next_open=True),
     "lg12_trail_nextopen": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                                 trail=True, next_open=True),
+    # ---- the clock, measured on the RULED execution path. Zak, 2026-08-13: *"you said we
+    # rebalance only twice a year... what about 12 times a year? Monthly even? Twice a year seems
+    # like a long time."* It is a fair question and the trail makes it sharper than it looks: the
+    # trail exits names continuously, so the rebalance is really the RE-ENTRY clock. A stop-out
+    # wave currently parks the whole book until the next one — the July 2026 book stopped out by
+    # the 8th and the arm has been 100% SPMO since, with nothing scheduled until 2027-01.
+    "clk_monthly":   dict(n=8, months=1,  risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True),
+    "clk_bimonthly": dict(n=8, months=2,  risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True),
+    "clk_quarter":   dict(n=8, months=3,  risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True),
+    "clk_annual":    dict(n=8, months=12, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True),
+    # ---- the loose sector cap Zak allowed. At eight names, 0.7 permits five of one sector — it
+    # would have trimmed the July 2026 book (7 of 8 Technology) to five and left three slots for
+    # the next-ranked names outside it. Priced, not assumed: if it costs return, he is right that
+    # there should not be one.
+    "sec70_semi":    dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True, sector_cap=0.70),
+    "sec70_monthly": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True, sector_cap=0.70),
 }
 
 
@@ -319,6 +341,35 @@ def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None):
     return [int(j) for j in idx[np.argsort(-score)]]
 
 
+def pick_book(ranked, n, sectors=None, cap=None):
+    """The top `n` off the ranked list, optionally with no sector taking more than `cap` of the
+    book. Skipped names are passed over, not dropped — the slot goes to the next eligible name, so
+    the book is still `n` deep.
+
+    Zak, 2026-08-13: *"I don't think there should be a theme cap honestly... Maybe 70%. It's OK to
+    go in and go hard on a theme... and accept a bad drawdown when it happens. Ride the wins."* So
+    the cap is deliberately loose: at eight names, 0.7 permits five of one sector.
+
+    **Stated limit:** `universe.sector` is the vendor's CURRENT label, not a point-in-time one.
+    Sector membership is far more stable than price, so this is a mild look-ahead rather than a
+    material one — but it is a look-ahead, and a cell that uses it cannot be compared to one that
+    does not without saying so.
+    """
+    if not cap or sectors is None:
+        return ranked[:n]
+    room = max(1, int(n * cap))
+    picked, used = [], {}
+    for j in ranked:
+        sec = sectors[j] or "?"
+        if used.get(sec, 0) >= room:
+            continue
+        picked.append(j)
+        used[sec] = used.get(sec, 0) + 1
+        if len(picked) >= n:
+            break
+    return picked
+
+
 def regime_ok(i, index_px, window=200):
     """Is the index above its own long moving average? Clenow's gate, and §3.3's M1 latch.
 
@@ -412,7 +463,8 @@ def trail_stop(px, st, closes, cfg=None):
 
 def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted, sleeve,
              start_nav, top_by_addv=None, index_px=None, gate_every=21, trail=False,
-             vol_target=None, trail_cfg=None, intraday=None, next_open=None):
+             vol_target=None, trail_cfg=None, intraday=None, next_open=None,
+             sectors=None, sector_cap=None):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -573,8 +625,9 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                     park_all(i)
         if i in rebals and np.isfinite(park_px[i]) and not gated_off:
             queued.clear()
-            want = rank_at(i, adj, raw, dv, risk_adjusted=risk_adjusted,
-                           top_by_addv=top_by_addv)[:n]
+            ranked = rank_at(i, adj, raw, dv, risk_adjusted=risk_adjusted,
+                             top_by_addv=top_by_addv)
+            want = pick_book(ranked, n, sectors, sector_cap)
             wanted = set(want)
             # sell what fell out of the book, and the park, then buy the new book
             for j in list(held):
@@ -744,6 +797,8 @@ def main():
                 cur.execute("""select d, coalesce(adj_close, close) from prices
                                 where ticker = %s order by d""", (BENCH,))
                 bench_rows = dict(cur.fetchall())
+                cur.execute("select ticker, sector from universe where sector <> ''")
+                sector_by_ticker = dict(cur.fetchall())
             # the benchmark's own bars ARE the market calendar: an index ETF prints on every real
             # US session and on no holiday, which is exactly the predicate this grid needs
             dates, tickers, adj, raw, dv, op, lo = build_grid(tape, set(bench_rows))
@@ -756,6 +811,7 @@ def main():
             print(f"grid {len(dates)} sessions x {len(tickers)} names · park from {dates[first]}")
 
             written = []
+            sectors = [sector_by_ticker.get(t) for t in tickers]
             bench_px = np.array([float(bench_rows.get(d, np.nan)) for d in dates])
             for i in range(1, len(bench_px)):
                 if not np.isfinite(bench_px[i]):
@@ -771,7 +827,7 @@ def main():
                     eq, trades, costs, health = simulate(
                         dates, tickers, adj, raw, dv, park_px, start_nav=start_nav,
                         index_px=bench_px if gated else None, intraday=bars_in,
-                        next_open=opens, **spec)
+                        next_open=opens, sectors=sectors, **spec)
                 finally:
                     COST_MULT = 1.0        # never leak a probe's costing into the next cell
                 exits = {}

@@ -155,6 +155,9 @@ PARENT = {
     "lad_cost2x": "lg8_semi_trail", "lad_cost4x": "lg8_semi_trail",
     "lg8_trail_intraday": "lg8_semi_trail", "lg12_trail_intraday": "lg12_semi_trail",
     "lg8_trail_nextopen": "lg8_semi_trail", "lg12_trail_nextopen": "lg12_semi_trail",
+    "clk_monthly": "lg8_trail_nextopen", "clk_bimonthly": "lg8_trail_nextopen",
+    "clk_quarter": "lg8_trail_nextopen", "clk_annual": "lg8_trail_nextopen",
+    "sec70_semi": "lg8_trail_nextopen", "sec70_monthly": "sec70_semi",
 }
 
 
@@ -688,3 +691,41 @@ def test_the_next_open_model_fills_at_the_open_after_the_close_that_broke_the_st
     o = next(t for t in opens if t.get("reason") == "trail_stop" and t["ticker"] == "DROP.US")
     assert o["exit_date"] == c["exit_date"], "same trigger session — only the fill price differs"
     assert o["price"] == pytest.approx(c["price"] * 0.97), "filled at that session's open"
+
+
+# --------------------------------------------------------------- the loose sector cap
+
+def test_without_a_cap_the_book_is_whatever_the_rank_says():
+    ranked = list(range(20))
+    sectors = ["Tech"] * 20
+    assert cc.pick_book(ranked, 8, sectors, None) == list(range(8))
+    assert cc.pick_book(ranked, 8, None, 0.7) == list(range(8))
+
+
+def test_a_seventy_percent_cap_lets_five_of_eight_ride_one_sector():
+    """Zak's ruling: go hard on a theme, but not the whole book. At eight names 0.7 is five."""
+    ranked = list(range(20))
+    sectors = ["Tech"] * 10 + ["Gold"] * 10
+    book = cc.pick_book(ranked, 8, sectors, 0.70)
+    assert len(book) == 8, "the slot passes to the next eligible name — the book stays n deep"
+    assert sum(1 for j in book if sectors[j] == "Tech") == 5
+    assert book[:5] == [0, 1, 2, 3, 4], "the five it keeps are the five highest-ranked"
+
+
+def test_the_cap_would_have_trimmed_the_july_2026_book():
+    """That book was seven of eight Technology and every name stopped inside three days."""
+    july = ["Technology"] * 7 + ["Industrials"]        # MU SNDK WDC STX LITE CIEN AXTI + BE
+    ranked = list(range(len(july) + 6))
+    sectors = july + ["Healthcare", "Energy", "Utilities", "Gold", "Gold", "Healthcare"]
+    book = cc.pick_book(ranked, 8, sectors, 0.70)
+    assert sum(1 for j in book if sectors[j] == "Technology") == 5
+    assert len(book) == 8
+
+
+def test_an_unlabelled_name_is_its_own_bucket_not_a_free_pass():
+    """95.7% of the census carries a sector. The rest must not all pile into one book unchecked
+    OR be excluded — they share the '?' bucket, which caps them like any other."""
+    ranked = list(range(20))
+    sectors = [None] * 20
+    book = cc.pick_book(ranked, 8, sectors, 0.70)
+    assert len(book) == 5, "unlabelled names share one bucket and hit the same ceiling"
