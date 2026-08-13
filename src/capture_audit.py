@@ -84,9 +84,16 @@ def load_positions(cur, run_id):
     for tk, ed, xd, qty, ep, pnl, reason in cur.fetchall():
         key = (tk, ed)
         p = positions.setdefault(key, dict(ticker=tk, entry=ed, exit=xd, qty=0.0,
-                                           entry_price=float(ep), pnl=0.0))
+                                           entry_price=float(ep), pnl=0.0, open=False))
         p["qty"] += float(qty)
-        p["pnl"] += float(pnl)
+        # A leg still open at the end of the window has no realized P&L, and the ledger stores
+        # NULL rather than a zero for exactly that reason. Coercing it crashed the audit; coercing
+        # it to 0.0 would have been worse — an open winner would have read as a flat trade in the
+        # capture arithmetic. It is counted as open and left out of the realized sum.
+        if pnl is None:
+            p["open"] = True
+        else:
+            p["pnl"] += float(pnl)
         if xd and (p["exit"] is None or xd > p["exit"]):
             p["exit"] = xd
     return list(positions.values())
@@ -236,11 +243,15 @@ def audit(run, positions, tape_rows):
                 close_e = float(adj[g["e"]])
                 counterfactual = first["qty"] * (close_e - first["entry_price"])
                 actual = sum(p["pnl"] for p in overlapping)
-                entry.update(actual_pnl=round(actual, 2),
+                # A push still being ridden at the end of the window has no realized P&L to
+                # divide, and scoring it 0/counterfactual would report the best trades in the
+                # book as the ones that kept none of their move.
+                still_open = any(p["open"] for p in overlapping)
+                entry.update(actual_pnl=round(actual, 2), open_at_end=still_open,
                              hold_to_end_pnl=(round(counterfactual, 2)
                                               if counterfactual > 0 else None),
                              ride_share=(round(actual / counterfactual, 4)
-                                         if counterfactual > 0 else None))
+                                         if counterfactual > 0 and not still_open else None))
             pushes.append(entry)
 
     for tk, d, close, adj, vol in tape_rows:
@@ -306,7 +317,7 @@ def audit(run, positions, tape_rows):
         net=net, ride=ride, junk=junk,
         missed_top=[{k: p[k] for k in ("ticker", "b", "e", "gain")} for p in missed[:TOP_N]],
         caught_top=[{k: p.get(k) for k in ("ticker", "b", "e", "gain", "actual_pnl",
-                                           "hold_to_end_pnl", "ride_share")}
+                                           "hold_to_end_pnl", "ride_share", "open_at_end")}
                     for p in sorted(caught, key=lambda p: -p["gain"])[:TOP_N]],
         worst_names=worst_names[:TOP_N])
 
@@ -341,7 +352,8 @@ def render(run, out):
                   "| name | breakout | +50% reached | gain | P&L | hold-to-end | share kept |",
                   "|---|---|---|---:|---:|---:|---:|"]
         for p in out["caught_top"]:
-            share = f"{p['ride_share']:.0%}" if p.get("ride_share") is not None else "—"
+            share = ("still open" if p.get("open_at_end")
+                     else f"{p['ride_share']:.0%}" if p.get("ride_share") is not None else "—")
             hold = f"${p['hold_to_end_pnl']:,.0f}" if p.get("hold_to_end_pnl") else "—"
             lines += [f"| {p['ticker']} | {p['b']} | {p['e']} | {p['gain']:+.1%} | "
                       f"${p['actual_pnl']:,.0f} | {hold} | {share} |"]

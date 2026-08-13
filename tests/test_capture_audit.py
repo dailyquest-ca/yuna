@@ -132,9 +132,9 @@ def test_the_net_the_ride_and_the_junk():
     run = fixture_run()
     # one position riding most of WINNER's first push, one on FAIL that overlaps no push
     positions = [dict(ticker="WINNER.US", entry=DATES[270], exit=DATES[290], qty=10.0,
-                      entry_price=115.0, pnl=470.0),
+                      entry_price=115.0, pnl=470.0, open=False),
                  dict(ticker="FAIL.US", entry=DATES[262], exit=DATES[270], qty=20.0,
-                      entry_price=51.0, pnl=-100.0)]
+                      entry_price=51.0, pnl=-100.0, open=False)]
     out = ca.audit(run, positions, fixture_rows())
 
     # THE NET — WINNER pushed twice, the arm entered once; PENNY's pushes never count
@@ -166,7 +166,7 @@ def test_a_position_entered_before_the_breakout_still_counts_as_caught():
     reading — overlap is entry <= completion and exit >= breakout, not entry inside the window."""
     run = fixture_run()
     positions = [dict(ticker="WINNER.US", entry=DATES[255], exit=DATES[310], qty=10.0,
-                      entry_price=100.0, pnl=3_000.0)]
+                      entry_price=100.0, pnl=3_000.0, open=False)]
     out = ca.audit(run, positions, fixture_rows())
     assert out["net"]["caught"] >= 1
     assert out["junk"]["junk"] == 0
@@ -178,3 +178,51 @@ def test_an_empty_book_is_all_net_and_no_ride():
     assert out["ride"]["dollar_share"] is None
     assert out["junk"]["positions"] == 0
     assert out["junk"]["share"] is None
+
+
+class _Cur:
+    """The narrowest stand-in for a cursor `load_positions` will accept."""
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, *_a, **_k):
+        return None
+
+    def fetchall(self):
+        return self._rows
+
+
+def test_a_position_still_open_at_the_end_is_counted_open_not_flat():
+    """The ledger stores NULL P&L for a leg that never closed. Coercing it crashed the audit
+    (`float(None)`); coercing it to zero would have been worse — the book's best trade, still
+    being ridden on the last session, would have read as a flat one."""
+    d0, d1 = dt.date(2024, 1, 2), dt.date(2024, 6, 3)
+    rows = [("WIN.US", d0, d1, 100.0, 10.0, 500.0, "rebalance"),
+            ("RIDE.US", d0, None, 100.0, 10.0, None, "open_at_end")]
+    positions = {p["ticker"]: p for p in ca.load_positions(_Cur(rows), 1)}
+    assert positions["WIN.US"]["pnl"] == 500.0 and not positions["WIN.US"]["open"]
+    assert positions["RIDE.US"]["open"], "an unclosed leg must be visible as open"
+    assert positions["RIDE.US"]["pnl"] == 0.0, "and contribute nothing to REALIZED P&L"
+
+
+def test_a_partly_closed_position_keeps_its_realized_pnl_and_stays_open():
+    d0, d1 = dt.date(2024, 1, 2), dt.date(2024, 6, 3)
+    rows = [("HALF.US", d0, d1, 40.0, 10.0, 200.0, "vol_governor"),
+            ("HALF.US", d0, None, 60.0, 10.0, None, "open_at_end")]
+    p = ca.load_positions(_Cur(rows), 1)[0]
+    assert p["qty"] == 100.0 and p["pnl"] == 200.0 and p["open"]
+
+
+def test_a_push_still_being_ridden_is_not_scored_on_a_share_it_has_not_realized():
+    """The ride is realized P&L over the hold-to-completion counterfactual. A position still open
+    has realized nothing, so it has no share — reporting 0.0 would rank the trades the book is
+    still winning as the ones that kept none of their move."""
+    run = fixture_run()
+    positions = [dict(ticker="WINNER.US", entry=DATES[270], exit=None, qty=10.0,
+                      entry_price=115.0, pnl=0.0, open=True)]
+    out = ca.audit(run, positions, fixture_rows())
+    assert out["net"]["caught"] >= 1, "an open position still caught the push"
+    caught = next(p for p in out["caught_top"] if p["ticker"] == "WINNER.US")
+    assert caught["open_at_end"] is True
+    assert caught["ride_share"] is None
+    assert out["ride"]["pushes_measurable"] == 0, "nothing measurable — not a zero share"
