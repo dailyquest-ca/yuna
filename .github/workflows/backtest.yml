@@ -36,6 +36,9 @@ on:
       hair_trigger_pending:
         description: 'exit a pending breakout that closes below its pivot (rejected reading — ruled 2026-08-10 to wait out the window). Set true only to price the ruling.'
         default: 'false'
+      dd_bar:
+        description: 'drawdown kill bar for the §2.5 verdict (E3 cells declare -0.34; blank = the arm declares none)'
+        default: ''
       dry_run:
         description: 'compute everything, write nothing'
         default: 'false'
@@ -107,6 +110,26 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           REPORT_PATH: /tmp/report.md
+
+      # The standing rule (docs/handoff-2026-08-13.md): no arm's number is believed until a
+      # capture audit runs. `always()` because the report step above exits non-zero on a
+      # conformance failure by design — and a run that broke a clause needs its capture on the
+      # table MORE, not less. Skipped when the engine wrote nothing (dry run or engine death).
+      - name: capture audit
+        if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true'
+        run: python src/capture_audit.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      # §2.5 applied mechanically, same conditions. Neither step gates the build: the bars decide
+      # what may be CALLED a finding, not whether the code is broken — the conformance step above
+      # keeps that job.
+      - name: §2.5 bars
+        if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true'
+        run: python src/finding.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DD_BAR: ${{ inputs.dd_bar }}
 
       - name: comment on the pull request
         if: always() && github.event_name == 'pull_request' && hashFiles('/tmp/report.md') != ''
