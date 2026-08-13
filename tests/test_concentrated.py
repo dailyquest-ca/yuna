@@ -154,6 +154,7 @@ PARENT = {
     "lad_euph4": "lg8_semi_trail", "lad_euph6": "lg8_semi_trail",
     "lad_cost2x": "lg8_semi_trail", "lad_cost4x": "lg8_semi_trail",
     "lg8_trail_intraday": "lg8_semi_trail", "lg12_trail_intraday": "lg12_semi_trail",
+    "lg8_trail_nextopen": "lg8_semi_trail", "lg12_trail_nextopen": "lg12_semi_trail",
 }
 
 
@@ -666,3 +667,24 @@ def test_the_ladder_moves_the_initial_stop_that_is_actually_set():
     a = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), trail_cfg=tight, **kw)[0]
     b = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), trail_cfg=loose, **kw)[0]
     assert a[-1][1] != b[-1][1], "a 2% initial stop and a 40% one cannot produce one number"
+
+
+def test_the_next_open_model_fills_at_the_open_after_the_close_that_broke_the_stop():
+    """The third execution path: trigger judged on the close, order placed that night, filled at
+    the next open. Neither the same-session intraday fill nor the next CLOSE."""
+    n = N_DAYS
+    path = np.concatenate([np.linspace(100.0, 300.0, n - 80), np.full(80, 200.0)])
+    paths = {"DROP.US": path}
+    for i in range(5):
+        paths[f"N{i:02d}.US"] = np.linspace(100.0, 130.0 + i, n)
+    dates, tickers, adj, raw, dv = grid(paths)
+    op = adj.copy()
+    j = tickers.index("DROP.US")
+    op[:, j] = adj[:, j] * 0.97                  # every open sits 3% under its own close
+    kw = dict(n=3, months=6, risk_adjusted=False, sleeve=1.0, start_nav=200_000.0, trail=True)
+    closes = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), **kw)[1]
+    opens = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), next_open=op, **kw)[1]
+    c = next(t for t in closes if t.get("reason") == "trail_stop" and t["ticker"] == "DROP.US")
+    o = next(t for t in opens if t.get("reason") == "trail_stop" and t["ticker"] == "DROP.US")
+    assert o["exit_date"] == c["exit_date"], "same trigger session — only the fill price differs"
+    assert o["price"] == pytest.approx(c["price"] * 0.97), "filled at that session's open"

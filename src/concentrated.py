@@ -199,6 +199,17 @@ CELLS = {
                                trail=True, intraday=True),
     "lg12_trail_intraday": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                                trail=True, intraday=True),
+    # ---- WO-A5 amendment: the THIRD fill model, and the honest disclosure is that it was
+    # proposed after seeing the second one cost 5.9 points. The argument for it does not depend
+    # on that number: a resting GTC stop is one execution path and a decision taken at the close
+    # for the next open is the other, §3.2 already legislates BOTH (stops rest at the broker; the
+    # hair-trigger "exits next morning"), and §5.1 has Zak placing every order from a morning
+    # brief. Which one this arm would actually run under is an operational question, not a
+    # modelling preference — so it is measured and reported alongside, never instead of.
+    "lg8_trail_nextopen":  dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                                trail=True, next_open=True),
+    "lg12_trail_nextopen": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                                trail=True, next_open=True),
 }
 
 
@@ -401,7 +412,7 @@ def trail_stop(px, st, closes, cfg=None):
 
 def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted, sleeve,
              start_nav, top_by_addv=None, index_px=None, gate_every=21, trail=False,
-             vol_target=None, trail_cfg=None, intraday=None):
+             vol_target=None, trail_cfg=None, intraday=None, next_open=None):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -502,9 +513,15 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         # ---- yesterday's stops, filled today. §3.2 acts on the session after the close that
         # broke the stop; this tape has no intraday range to fill against, so the next close it is.
         for j in list(queued):
-            if j in held and sell(i, j, held[j], "trail_stop"):
+            if j not in held:
                 queued.remove(j)
-            elif j not in held:
+                continue
+            # `next_open` fills the morning after the close that broke the stop — the path a
+            # person who reviews at night and places a market-on-open order actually takes, and
+            # the one §3.2's hair-trigger already names ("exit next morning").
+            at = float(next_open[i, j]) if (next_open is not None
+                                            and np.isfinite(next_open[i, j])) else None
+            if sell(i, j, held[j], "trail_stop", price_override=at):
                 queued.remove(j)
         park_all(i)
         nav = mark(i)
@@ -749,10 +766,12 @@ def main():
                 gated = spec.pop("gated", False)
                 COST_MULT = float(spec.pop("cost_mult", 1.0))
                 bars_in = (op, lo) if spec.pop("intraday", False) else None
+                opens = op if spec.pop("next_open", False) else None
                 try:
                     eq, trades, costs, health = simulate(
                         dates, tickers, adj, raw, dv, park_px, start_nav=start_nav,
-                        index_px=bench_px if gated else None, intraday=bars_in, **spec)
+                        index_px=bench_px if gated else None, intraday=bars_in,
+                        next_open=opens, **spec)
                 finally:
                     COST_MULT = 1.0        # never leak a probe's costing into the next cell
                 exits = {}
