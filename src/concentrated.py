@@ -782,6 +782,30 @@ CELLS = {
                       trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
                       displace=True, base_door=False, rider=False,
                       exit_rank=12, entry_rank=3, swap_gap=True),
+    # ================== WO-A14: the interaction grid ==================
+    #
+    # Zak, 2026-08-15, and he is right: *"an entry band of 5 seems so noisy."* It is worse than
+    # noisy — at entry_rank == n it DEGENERATES the rule. If any unowned name inside the top 5
+    # displaces the worst holding, the book is pulled continuously toward owning exactly the top
+    # 5, and the exit band never binds because a holding can only slide out while something better
+    # takes its place, which is a displacement anyway. The ledger said so and I read past it:
+    # `b5_8_5` and `b5_5_5` both returned 13.39% over twenty years, identical to two decimals,
+    # and the entry band drove turnover 52 -> 63 -> 129 trades a year from 1 -> 3 -> 5.
+    #
+    # Which also means every ladder in WO-A13 was the wrong instrument. One-axis-at-a-time is only
+    # valid when the axes are independent, and these two are not: **the entry band sets the steady
+    # state and the exit band only governs the tail, when no eligible entrant exists.** A grid is
+    # the right shape for an interaction; a ladder cannot see one.
+    #
+    # Read it for a CONTIGUOUS REGION that holds on both windows, not for the single best cell —
+    # with twenty cells on a surface this noisy the maximum is a coin toss, and picking it is the
+    # error this programme has already made three times.
+    **{f"b5_{x}_{e}": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                           trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                           displace=True, base_door=False, rider=False,
+                           exit_rank=x, entry_rank=e)
+       for x in (8, 10, 12, 14, 16) for e in (2, 3, 4, 5)
+       if f"b5_{x}_{e}" not in ("b5_8_3", "b5_8_5", "b5_10_3", "b5_12_3")},
 }
 
 

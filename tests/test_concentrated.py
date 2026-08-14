@@ -218,6 +218,12 @@ PARENT = {
                              "b5_nodisp", "b5_close", "b5_door",
                              "b5_15_3", "b5_20_3", "b5_25_3", "b5_30_3")},
     "b5_12_gap": "b5_12_3",
+    # WO-A14's grid. The exit rungs chain along one axis, and each entry variant is one hop off
+    # the entry-3 cell at its own exit band, so every cell is still a single move from its parent.
+    "b5_14_3": "b5_12_3", "b5_16_3": "b5_14_3",
+    **{f"b5_{x}_{e}": f"b5_{x}_3" for x in (8, 10, 12, 14, 16) for e in (2, 4, 5)
+       if f"b5_{x}_{e}" != "b5_8_5"},
+    "b5_8_5": "b5_8_3",
     "b5_5_5": "b5_8_5",
 }
 
