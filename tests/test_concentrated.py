@@ -1563,3 +1563,121 @@ def test_the_rising_clause_refuses_a_bounce_off_a_falling_average():
     up = np.concatenate([np.linspace(300.0, 120.0, 300), np.linspace(120.0, 400.0, 400)])
     j = 690
     assert cc.regime_ok(j, up) and cc.regime_rising(j, up), "a real recovery must pass both"
+
+
+# ==================== WO-A13: Zak's band rule, displacement and open fills ====================
+
+def _ladder_world(n=N_DAYS, k=30):
+    """k names on a strict, fixed performance ladder: N00 strongest, N29 weakest, never crossing.
+
+    A frozen ranking is what makes the displacement tests decisive — the book either holds the top
+    slice or it does not, and any trade after the first is churn the rule was supposed to prevent.
+    """
+    paths = {f"N{i:02d}.US": 100.0 * np.exp(np.linspace(0, 1.2 - 0.03 * i, n)) for i in range(k)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    return dates, tickers, adj, raw, dv, np.full(n, 100.0)
+
+
+BAND = dict(n=5, months=6, risk_adjusted=False, sleeve=1.0, start_nav=200_000.0,
+            trail=False, entry_rule="banded", base_door=False, rider=False)
+
+
+def test_the_rank_sort_is_stable_so_a_tie_resolves_the_same_way_every_run():
+    """Two names carrying an IDENTICAL series score identically, and numpy's default quicksort is
+    unstable — which copy ranked higher was an implementation detail that could differ between
+    builds. That is not a returns question, it is the reason no parity vector could ever be
+    pinned. The tape loads in ticker order, so a stable sort resolves the tie alphabetically."""
+    n = N_DAYS
+    series = 100.0 * np.exp(np.linspace(0, 1.0, n))
+    paths = {"AAA.US": series.copy(), "ZZZ.US": series.copy(),
+             **{f"N{i:02d}.US": 100.0 * np.exp(np.linspace(0, 0.4 - 0.01 * i, n))
+                for i in range(10)}}
+    dates, tickers, adj, raw, dv = grid(paths)
+    order = cc.rank_at(n - 1, adj, raw, dv, risk_adjusted=False)
+    first, second = tickers[order[0]], tickers[order[1]]
+    assert {first, second} == {"AAA.US", "ZZZ.US"}, "the identical pair must top the rank"
+    assert first == "AAA.US", "a tie resolves ticker-ascending, not by numpy's internals"
+    for _ in range(5):
+        assert cc.rank_at(n - 1, adj, raw, dv, risk_adjusted=False) == order
+
+
+def test_without_displacement_a_number_one_name_cannot_enter_a_full_book():
+    """The defect Zak's rule fixes, pinned so it cannot come back silently. WO-A6's banded book
+    fills EMPTY slots only, so a name that climbs to rank 1 waits for a holding to fall past the
+    exit band — at band 40 that can be for ever."""
+    d, t, adj, raw, dv, park = _ladder_world()
+    # a late star: worthless for most of the window, then the strongest name in the pool
+    star = np.concatenate([np.full(N_DAYS - 200, 10.0), 10.0 * np.exp(np.linspace(0, 2.5, 200))])
+    adj = np.column_stack([adj, star])
+    raw = np.column_stack([raw, star])
+    dv = np.column_stack([dv, np.full(N_DAYS, 5e8)])
+    t = list(t) + ["STAR.US"]
+    trades = cc.simulate(d, t, adj, raw, dv, park, exit_rank=40, entry_rank=3,
+                         displace=False, **BAND)[1]
+    assert "STAR.US" not in {x["ticker"] for x in trades if "entry_date" in x}, (
+        "without displacement a full book cannot take the best name in the pool")
+
+
+def test_displacement_lets_the_best_name_take_the_worst_holding_s_slot():
+    """Zak, 2026-08-14: 'in the case that an option went as high as #3 or higher, then we would
+    displace #6 for it.' Same world, same bands, displacement on."""
+    d, t, adj, raw, dv, park = _ladder_world()
+    star = np.concatenate([np.full(N_DAYS - 200, 10.0), 10.0 * np.exp(np.linspace(0, 2.5, 200))])
+    adj = np.column_stack([adj, star])
+    raw = np.column_stack([raw, star])
+    dv = np.column_stack([dv, np.full(N_DAYS, 5e8)])
+    t = list(t) + ["STAR.US"]
+    trades = cc.simulate(d, t, adj, raw, dv, park, exit_rank=40, entry_rank=3,
+                         displace=True, **BAND)[1]
+    assert "STAR.US" in {x["ticker"] for x in trades if "entry_date" in x}, (
+        "displacement must let a top-3 name into a full book")
+    out = [x for x in trades if x.get("reason") == "displaced"]
+    assert out, "the name it replaced must be recorded as displaced, not as a rank-band exit"
+
+
+def test_a_book_already_holding_the_top_names_never_trades_again():
+    """The churn test, and the one Zak actually asked for: 'we shouldn't be swapping #4,5,6,7 back
+    and forth. When the scale is top 500... they are all great.' On a frozen ladder the book fills
+    once and must then sit still — displacement requires a STRICT improvement, so a book holding
+    the top five has nothing to displace with."""
+    d, t, adj, raw, dv, park = _ladder_world()
+    trades = cc.simulate(d, t, adj, raw, dv, park, exit_rank=8, entry_rank=3,
+                         displace=True, **BAND)[1]
+    entries = [x for x in trades if "entry_date" in x]
+    assert len(entries) == 5, f"one fill per slot and no churn, got {len(entries)}"
+    assert not [x for x in trades if x.get("reason") in ("displaced", "rank_band")], (
+        "a book holding the top five has no reason to trade")
+
+
+def test_fill_at_open_prices_entries_at_tomorrows_open_not_todays_close():
+    """The defect found 2026-08-14: every fill landed on adj[i], the same close the rank was
+    computed from — a price nobody could take, because you learn the answer AT the close. The
+    fixture opens each session 10% above the previous close, so an entry filled at the open is
+    unmistakably distinguishable from one filled at the deciding close."""
+    d, t, adj, raw, dv, park = _ladder_world()
+    opens = adj * 1.10
+    at_close = cc.simulate(d, t, adj, raw, dv, park, exit_rank=8, entry_rank=3,
+                           displace=True, next_open=opens, fill_at_open=False, **BAND)[1]
+    at_open = cc.simulate(d, t, adj, raw, dv, park, exit_rank=8, entry_rank=3,
+                          displace=True, next_open=opens, fill_at_open=True, **BAND)[1]
+    e_close = [x for x in at_close if "entry_date" in x]
+    e_open = [x for x in at_open if "entry_date" in x]
+    assert e_close and e_open, "both paths must actually enter"
+    assert all(x["price"] > 0 for x in e_open)
+    # the deferred fill lands a session later AND on the open, so it cannot equal the close path
+    assert [x["price"] for x in e_open] != [x["price"] for x in e_close], (
+        "fill_at_open must change the price actually paid")
+    assert min(x["entry_date"] for x in e_open) > min(x["entry_date"] for x in e_close), (
+        "a deferred order fills the session AFTER the one that decided it")
+
+
+def test_an_order_that_finds_no_print_is_cancelled_rather_than_carried():
+    """A market-on-open order either fills or the stock did not trade. Carrying it would leave an
+    order resting on a decision made against a rank that has since moved."""
+    d, t, adj, raw, dv, park = _ladder_world()
+    opens = adj * 1.10
+    opens[:, :] = np.nan                       # nothing ever opens
+    eq, trades, *_ = cc.simulate(d, t, adj, raw, dv, park, exit_rank=8, entry_rank=3,
+                                 displace=True, next_open=opens, fill_at_open=True, **BAND)
+    assert not [x for x in trades if "entry_date" in x], "no print means no fill, ever"
+    assert max(row[4] for row in eq) == 0, "and the book stays empty rather than half-filled"

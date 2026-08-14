@@ -817,7 +817,15 @@ def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None):
             score = np.where(vol > 0, score / vol, np.nan)
     ok = np.isfinite(score)
     idx, score = idx[ok], score[ok]
-    return [int(j) for j in idx[np.argsort(-score)]]
+    # `kind="stable"` is not about ties being common — it is about the book being reproducible.
+    # numpy's default is quicksort, which is UNSTABLE, so two names on an identical score land in
+    # whichever order the algorithm's internals happen to produce, and that can differ between
+    # numpy builds. The tape is loaded ordered by ticker, so a stable sort resolves a tie
+    # ticker-ascending and does so the same way every run, on every machine. Exact ties are rare on
+    # real prices and completely reliable on the one case we know exists: a duplicate listing
+    # carries an identical series, therefore an identical score, and which copy got bought was
+    # being decided by the sort. Nothing can be pinned by a parity vector until this is fixed.
+    return [int(j) for j in idx[np.argsort(-score, kind="stable")]]
 
 
 def base_state(i, j, adj):
@@ -1214,7 +1222,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              start_offset=0, every_sessions=None, rank_lag=0, rider_bets=None,
              rider=True, exit_rank=None, path_quality_gate=False, tranches=1,
              rider_calendar=False, base_gate=False,
-             latch=None, gate_rising=False):
+             latch=None, gate_rising=False,
+             entry_rank=None, displace=False, base_door=True, fill_at_open=False):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -1325,6 +1334,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     gated_off = False
     regime_state = {}               # WO-A10's latch: {on, up, down} carried across sessions
     queued = []                     # trail stops hit at yesterday's close, filled at today's
+    queue_reason = {}               # why each queued name is leaving — trail, band or displaced
+    pending_buys = []               # entries decided at yesterday's close, filled at today's open
     for i in range(warmup, len(dates)):
         # ---- yesterday's stops, filled today. §3.2 acts on the session after the close that
         # broke the stop; this tape has no intraday range to fill against, so the next close it is.
@@ -1337,8 +1348,43 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             # the one §3.2's hair-trigger already names ("exit next morning").
             at = float(next_open[i, j]) if (next_open is not None
                                             and np.isfinite(next_open[i, j])) else None
-            if sell(i, j, held[j], "trail_stop", price_override=at):
+            if sell(i, j, held[j], queue_reason.pop(j, "trail_stop"), price_override=at):
                 queued.remove(j)
+        # ---- WO-A13: buys decided at yesterday's close, filled at today's OPEN.
+        #
+        # The exits above already worked this way; entries did not, and for a cell with no trail
+        # that meant EVERY fill — entry and exit — landed on `adj[i]`, the same close the rank was
+        # computed from. That is a price nobody could have taken: you learn the answer at the close
+        # and you buy the next morning. Measured on the stored ten-year run, the next open sits
+        # +0.130% above that close on the names this book buys, so the old path was quietly
+        # collecting thirteen basis points a trade it could never have earned.
+        #
+        # Sells drain first, above, so the proceeds fund the buy — which is Zak's ruling of
+        # 2026-08-14 that the swap happens in one morning, sell then buy, on unsettled cash.
+        #
+        # An order that finds no print today is CANCELLED rather than carried. A market-on-open
+        # order either fills or the stock did not trade, and the band logic re-proposes tonight
+        # against a fresh rank. Carrying it would be an order resting on a stale decision.
+        for od in list(pending_buys):
+            pending_buys.remove(od)
+            j = od["j"]
+            px_j = float(next_open[i, j]) if (next_open is not None
+                                              and np.isfinite(next_open[i, j])) else None
+            if px_j is None or px_j <= 0:
+                continue
+            fee_frac = spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
+            if cash < od["spend"] * (1 + fee_frac):
+                unpark(i, od["spend"] * (1 + fee_frac) - cash)
+            spend = min(od["spend"], cash / (1 + fee_frac))
+            if spend <= 0:
+                continue
+            qty = spend / (px_j * (1 + fee_frac))
+            held[j] = held.get(j, 0.0) + qty
+            cash -= spend
+            costs += spend * fee_frac / (1 + fee_frac)
+            state[j] = open_state(px_j, i, j, trail_cfg, bars, adj)
+            trades.append(dict(ticker=tickers[j], entry_date=dates[i], spend=spend,
+                               price=px_j, qty=qty))
         park_all(i)
         nav = mark(i)
         # ---- the regime check, on its own clock
@@ -1566,17 +1612,59 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             for j in list(held):
                 if rank_of.get(j, 10 ** 9) > band and j not in queued:
                     queued.append(j)
-            # entry gate: the state-door, highest qualifying rank first, rider on the RESULT
-            if len(held) < n:
+                    queue_reason[j] = "rank_band"
+            # ---- WO-A13, Zak's rule of 2026-08-14: *"Just because #5 goes to #6 doesn't mean #6
+            # is bad... we should only eject something when it is #8 or lower. Or in the case that
+            # an option went as high as #3 or higher, then we would displace #6 for it. But we
+            # shouldn't be swapping #4,5,6,7 back and forth. When the scale is top 500... they are
+            # all great."*
+            #
+            # The band above is only half of that. Without displacement a name that climbs to #1
+            # CANNOT enter a full book — it waits for a holding to fall past the exit band, which
+            # at a wide band can be months. So the entry band gets teeth: a name inside it takes
+            # the worst holding's slot outright.
+            #
+            # **One displacement per session, and only on a strict improvement.** The cap is what
+            # stops this becoming the churn Zak is objecting to: without it a single session could
+            # rotate most of the book, which is the daily-rebalance behaviour the band exists to
+            # avoid. The strict test means a book already holding the top `n` names never trades.
+            entry_band = A6_ENTRY_RANK if entry_rank is None else int(entry_rank)
+            if displace and len([j for j in held if j not in queued]) >= n:
+                live = [j for j in held if j not in queued]
+                worst = max(live, key=lambda j: rank_of.get(j, 10 ** 9))
+                worst_rank = rank_of.get(worst, 10 ** 9)
+                for j in order[:entry_band]:
+                    if j in held or j in queued or j in {b["j"] for b in pending_buys}:
+                        continue
+                    if rank_of.get(j, 10 ** 9) < worst_rank:
+                        queued.append(worst)
+                        queue_reason[worst] = "displaced"
+                    break               # only the best candidate is ever considered
+            # entry gate: the state-door, highest qualifying rank first, rider on the RESULT.
+            #
+            # **The fill pool is the EXIT band, not the entry band.** Zak's entry band is a
+            # displacement threshold — "a name at #3 or better takes #6's slot" — and using it to
+            # fill empty slots as well makes a book that can never fill: with five slots and an
+            # entry band of three, only three names are ever eligible and two slots stay empty for
+            # the life of the run. The first test written against this rule caught exactly that.
+            # The exit band already states what "good enough to hold" means, so it is the right
+            # pool for an empty slot and it costs no new constant.
+            fill_band = max(band, n)
+            committed = len([j for j in held if j not in queued]) + len(pending_buys)
+            if committed < n:
                 nav_now = mark(i)
                 eff = sleeve * (vol_scalar(navs, float(vol_target)) if vol_target else 1.0)
                 per_name = nav_now * eff / n
-                for j in order[:A6_ENTRY_RANK]:
-                    if len(held) >= n:
+                for j in order[:fill_band]:
+                    if committed >= n:
                         break
-                    if j in held or j in queued or not np.isfinite(adj[i, j]):
+                    if (j in held or j in queued or not np.isfinite(adj[i, j])
+                            or j in {b["j"] for b in pending_buys}):
                         continue
-                    if not base_state(obs, j, adj):
+                    # The state door is WO-A6's own entry condition and it is NOT part of Zak's
+                    # band rule, so a cell can switch it off. Leaving it welded on would have made
+                    # the band ladder measure the door and the band together.
+                    if base_door and not base_state(obs, j, adj):
                         continue
                     if path_quality_gate and not path_gate(obs, j, adj, order[:A6_PATH_POOL]):
                         rider_blocks["path quality"] = rider_blocks.get("path quality", 0) + 1
@@ -1589,6 +1677,13 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                         if not ok:
                             rider_blocks[why] = rider_blocks.get(why, 0) + 1
                             continue        # step DOWN the rank to the next qualifier
+                    # ---- the fill. `fill_at_open` defers to tomorrow's open, which is the only
+                    # price a person reading a morning brief can actually take; the default fills
+                    # at today's close and is what every stored cell ran, so it is left alone.
+                    if fill_at_open:
+                        pending_buys.append(dict(j=j, spend=per_name))
+                        committed += 1
+                        continue
                     px = float(adj[i, j])
                     fee_frac = spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
                     if cash < per_name * (1 + fee_frac):
@@ -1600,6 +1695,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                     held[j] = held.get(j, 0.0) + qty
                     cash -= spend
                     costs += spend * fee_frac / (1 + fee_frac)
+                    committed += 1
                     state[j] = open_state(px, i, j, trail_cfg, bars, adj)
                     trades.append(dict(ticker=tickers[j], entry_date=dates[i], spend=spend,
                                        price=px, qty=qty))
