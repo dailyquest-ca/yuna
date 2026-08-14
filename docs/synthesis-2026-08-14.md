@@ -10,56 +10,46 @@ genuinely unknown. Every number is a measurement from a stored run, not a recoll
 
 ## 1 · The headline, stated honestly
 
-**One piece of the strategy was broken — the rebalance interval — and fixing it produces a result
-that is both higher and far more stable than the one it replaces.**
+**No version of this strategy beats holding SPMO once it is tested properly.** Every rebalance
+clock tested — weekly, monthly, bi-monthly, semi-annual — is heavily sensitive to *which dates*
+it rebalances on, and averaged across those dates none of them beats the ETF risk-adjusted.
 
-The original book rebalanced twice a year and measured 32.07%/yr. That number turned out to
-belong to the January/July calendar rather than to the strategy: the identical rule started one
-month later returns 23.44%, started in June it returns 14.45%. Twice a year over nine years is
-**eighteen observations of the ranking**, and an eighteen-sample estimate is what that spread
-looks like.
-
-Sampling the same ranking **every two months** — 54 observations instead of 18 — removes the
-problem. The whole frequency axis was then measured, from annual down to daily, each interval at
-two to six arbitrary start dates so the spread is measured rather than assumed:
-
-| interval | mean CAGR | spread | **mean Sharpe** | mean bootstrap DD | names/yr | spreads paid |
+| clock | phases tested | mean CAGR | **spread across phases** | **mean Sharpe** | mean bootstrap DD | names/yr |
 |---|---:|---:|---:|---:|---:|---:|
-| daily (1 session) | 37.01% | 0.6 | 0.939 | **−56.4%** | **861** | **$416k** |
-| weekly (5) | **38.17%** | 7.2 | 1.003 | −51.8% | 247 | $273k |
-| fortnightly (10) | 33.22% | 4.5 | 0.963 | −46.4% | 147 | $167k |
-| monthly (21) | 32.79% | 2.1 | 1.021 | −44.5% | 84 | $98k |
-| **bi-monthly (42)** | 33.37% | **2.0** | **1.113** | −40.1% | 46 | $70k |
-| semi-annual (the original) | 22.04% | **17.6** | 0.933 | −33.3% | 17 | $32k |
-| **SPMO** (the bar) | **21.12%** | — | 0.987 | **−31.0%** | 0 | — |
+| weekly (5 sessions) | 5 (all) | **36.25%** | 14.1 pts | 0.970 | −51.2% | 247 |
+| monthly (21 sessions) | 6 | 23.26% | 8.3 pts | 0.803 | −47.2% | 83 |
+| bi-monthly (42 sessions) | 6 | 20.58% | 15.1 pts | 0.790 | −40.7% | 46 |
+| semi-annual | 6 | 22.04% | 17.6 pts | 0.933 | −33.3% | 17 |
+| **SPMO** (the bar) | — | **21.12%** | — | **0.987** | **−31.0%** | 0 |
 
-Three things in that table, and they do not all point the same way:
+**Read the Sharpe column. Every clock is below the ETF.** The best of them, weekly at 0.970, is
+still under SPMO's 0.987 — and it gets there with 247 trades a year, a −51% expected drawdown and
+$273k of spreads on a $200k account.
 
-1. **Raw return keeps climbing with frequency.** That is a real result about the signal: 12-1
-   momentum decays fast enough that fresher sampling genuinely finds more. It is not a story about
-   calendars.
-2. **Risk-adjusted return peaks at bi-monthly and falls.** Every point of extra return past that
-   is bought with more than a point of extra risk, and expected drawdown deteriorates
-   monotonically: −40% → −44% → −46% → −52% → **−56%**.
-3. **Cost becomes the dominant term.** Daily pays **$416,000 in spreads on a $200,000 account** —
-   more than twice the starting capital, in friction, over nine years. It still nets 37%, which
-   says the gross return is enormous and most of it is being eaten.
+### The methodological error that produced the earlier version of this document
 
-**Bi-monthly is the answer**: the best Sharpe on the entire axis, the tightest spread, a third the
-cost of fortnightly, and ~46 names a year — about one a week, the only high-frequency point
-compatible with holding down a job. Weekly's 41.68% best cell is the highest number in this study
-and it is exactly the shape the 32.07% was: one lucky offset out of three, on a 7.2-point spread.
+An earlier draft reported bi-monthly at "33.37% with a 2.0-point spread" and recommended it. That
+spread was measured with `start_offset`, which drops the first few rebalances but **leaves the
+calendar phase untouched** — every one of those cells still rebalanced in the same months. It
+measured start-date sensitivity and was reported as phase stability.
 
-Read the Sharpe column against the benchmark, not just the return: **semi-annual's mean Sharpe
-(0.933) is below SPMO's (0.987)** — the original rule was never better than the ETF
-risk-adjusted, only its lucky phase was. Bi-monthly at 1.113 is genuinely better.
+The real test moves *which dates* the rebalance falls on. On the same bi-monthly cadence it gives
+**15.1 points**, not 2.0, and the mean drops from 33.37% to **20.58% — below SPMO**. The calendar
+version has only two phases at all, and they differ by 16.5 points (33.32% against 16.87%).
 
-The costs are real and stated: **expected drawdown −40% against SPMO's −31%**, about 46 new names
-a year, and **$70k of spreads** over nine years on a $200k account against the semi-annual book's
-$32k. And it remains `unproven` under §2.5 — deflated Sharpe 0.85 against a 0.95 bar, at a trial
-count of 138 that includes every cell this research has run.
+The reasoning behind that draft was also wrong on its own terms. "54 samples beats 18" predicted
+that bi-monthly would be stable where semi-annual was not; measured properly, bi-monthly spreads
+15.1 against semi-annual's 17.6. Sampling more often bought almost nothing.
 
-What *did* survive every test is narrower and still valuable:
+### The one framing under which an active book still makes sense
+
+Weekly returns **36.25% mean against SPMO's 21.12%** — about 1.7× — at a −51% expected drawdown
+against −31%, also about 1.7×. Its Sharpe is essentially the ETF's. That is the signature of
+**leverage, not of edge**: the same risk-adjusted return, scaled up. For a twenty-year horizon
+with genuine indifference to drawdown that can be a rational thing to want, but it should be
+called what it is, and it costs 247 trades a year and $273k in spreads to synthesise.
+
+### What survives regardless
 
 | finding | status |
 |---|---|
@@ -68,12 +58,10 @@ What *did* survive every test is narrower and still valuable:
 | Volatility-adjusting the momentum rank is worth ~12 points | **holds** |
 | A market-regime gate is a bad trade | **holds** |
 | The Barroso–Santa-Clara volatility governor adds nothing once a trail exists | **holds** |
-| Semi-annual rebalancing beats monthly | **withdrawn — date luck** |
-| Sampling the rank every two months is stable AND higher-returning | **holds — 2.0pt spread** |
-| Raw return keeps rising with sampling frequency, all the way to daily | **holds** |
-| Risk-adjusted return peaks at bi-monthly and falls after it | **holds** |
-| The concentrated arm beats the ETF on return and Sharpe | **holds on the bi-monthly clock** |
-| It clears §2.5's deflated-Sharpe bar | **no — 0.85 against 0.95** |
+| A market-observed re-entry door replaces the calendar's date luck | **holds — and returns 1.5%** |
+| Raw return rises with sampling frequency | **holds** |
+| Any clock beats the ETF risk-adjusted | **no — all four are below SPMO's Sharpe** |
+| Semi-annual beats monthly · bi-monthly is stable · the arm beats the ETF | **all withdrawn** |
 
 ---
 
@@ -391,54 +379,44 @@ the result still swings 17 points on an arbitrary starting choice, it is not.
 
 ## 11 · Where this leaves a V1
 
-**The candidate is the bi-monthly book.** Rank the 500 most-traded US names by 12-1 momentum
-divided by realized volatility, hold the top 8 equal-weight, re-sample the ranking every two
-months, run §3.2's trailing stop on each name, execute exits at the next morning's open, park idle
-cash in SPMO. Optionally cap any one sector at 70% of the book, which measured free.
+**Recommendation: hold SPMO.**
 
-| | bi-monthly book | SPMO |
-|---|---:|---:|
-| mean CAGR across start dates | **33.37%** | 21.12% |
-| spread across those start dates | 2.0 pts | — |
-| mean Sharpe | **1.113** | 0.987 |
-| expected (bootstrap median) drawdown | −40.1% | −31.0% |
-| new names a year | ~46 | 0 |
-| spreads paid over 9 years on $200k | $70k | — |
+It returned 21.12% on this window with a −31.0% expected drawdown and a Sharpe of 0.987, requires
+no decisions, no infrastructure and no spreads. Every active variant built here is below it
+risk-adjusted once the phase test is applied, and the two that came closest did so by taking
+substantially more drawdown.
 
-**What it has earned:** it beats the benchmark on return and on risk-adjusted return, it is stable
-across the arbitrary choice that destroyed its predecessor, its parameters sit on a plateau rather
-than a spike, and it survives deleting its three best trades.
+That is a real conclusion rather than a failure. The research produced findings that are true
+independent of the clock — the large-cap pool, the trailing stop, the volatility-adjusted rank,
+and two risk overlays now known not to work — plus a test harness that found seven defects in its
+own simulator and a statistical discipline that killed three of its own champions, including one
+this document recommended two revisions ago.
 
-**What it has not earned:** §2.5 still returns `unproven` — deflated Sharpe 0.85 against the 0.95
-bar at a trial count of 138. That count includes every cell this research has run, so a real part
-of the penalty is the breadth of the search itself. It is a legitimate penalty and it has not been
-argued away.
+### If an active book is wanted anyway
 
-### Honest reasons to hold SPMO instead
+The weekly clock is the only variant returning materially more than the ETF: **36.25% mean across
+all five of its phases, against 21.12%**. It is not better risk-adjusted — Sharpe 0.970 against
+0.987 — so it is leverage rather than edge, and it costs a −51% expected drawdown, 247 trades a
+year and $273k of spreads over nine years on $200k. Whether that trade is worth making is a
+risk-posture call, and it should be made knowing it is a leverage decision.
 
-1. **Nine points more expected drawdown** (−40% against −31%), estimated from a window with no
-   momentum crash in it, so the true gap is probably wider.
-2. **26 months underwater** on the semi-annual book — longer than the ETF's 23.2 — and the
-   bi-monthly book's underwater profile has not been measured separately.
-3. **~46 decisions a year and $70k of friction** against an ETF that needs neither.
-4. **`unproven` is `unproven`.** The bar exists because a hundred-cell search produces good-looking
-   numbers by construction.
+### What would actually change the picture
 
-### The three things that would most change the picture, in order
-
-1. **Phase-test the bi-monthly clock on its month-phase**, not just its start date. Bi-monthly has
-   six month-phases exactly as semi-annual had six; only the start offset has been varied so far.
-   This is cheap and it is the direct analogue of the test that broke the last champion — **it
-   should be run before any money moves.**
-2. **The 2003–2016 backfill**, so a drawdown estimate exists that has seen a momentum crash.
+1. **The 2003–2016 backfill.** Every drawdown estimate here is resampled from a window with no
+   momentum crash in it. This is the largest single gap and it is a data problem, not an analysis
+   problem.
+2. **A different signal.** Nine years of testing says 12-1 momentum over a large-cap pool is a
+   weak, fast-decaying signal whose apparent strength has repeatedly come from *when* it was
+   sampled. Improving the clock has now been exhausted; the next real gain has to come from
+   ranking on something else.
 3. **A correlation control**, since the book is frequently a 1.84-effective-bet position.
 
 ### What was tried and did not work
 
-- **A market-observed re-entry door** replacing the calendar (§10) — robust, and returned 1.5%.
+- **Every rebalance clock** from weekly to annual — all phase-sensitive, all below SPMO's Sharpe.
+- **A market-observed re-entry door** replacing the calendar — robust, and returned 1.5%.
 - **A market regime gate** — costs 6.2 points to save 2.3.
 - **The Barroso–Santa-Clara volatility governor** — the trail already does its job, faster.
-- **Faster than bi-monthly** — raw return keeps rising, risk-adjusted return does not.
 
 None of this repo places, modifies, or cancels an order. Every trade is placed by hand.
 
