@@ -10,12 +10,33 @@ genuinely unknown. Every number is a measurement from a stored run, not a recoll
 
 ## 1 · The headline, stated honestly
 
-**There is no proven strategy here yet that beats holding SPMO.**
+**One piece of the strategy was broken — the rebalance interval — and fixing it produces a result
+that is both higher and far more stable than the one it replaces.**
 
-A concentrated momentum book with a trailing stop measured **32.07%/yr** — but that number
-depends on rebalancing in January and July specifically. Run the identical rule starting one
-month later and it returns 23.44%. Start in June and it returns 14.45%. The honest expectation is
-near the mean of the six phases, **~22%**, against SPMO's **21.12%** over the same window.
+The original book rebalanced twice a year and measured 32.07%/yr. That number turned out to
+belong to the January/July calendar rather than to the strategy: the identical rule started one
+month later returns 23.44%, started in June it returns 14.45%. Twice a year over nine years is
+**eighteen observations of the ranking**, and an eighteen-sample estimate is what that spread
+looks like.
+
+Sampling the same ranking **every two months** — 54 observations instead of 18 — removes the
+problem, and the result is better on every axis except drawdown:
+
+| rule | mean CAGR | spread across arbitrary start dates | mean Sharpe | mean bootstrap DD |
+|---|---:|---:|---:|---:|
+| **bi-monthly** | **33.37%** | **2.00 pts** | **1.113** | −40.1% |
+| monthly | 32.79% | 2.14 pts | 1.021 | −44.5% |
+| semi-annual (the original) | 22.04% | **17.62 pts** | 0.933 | −33.3% |
+| **SPMO** (the bar) | **21.12%** | — | **0.987** | **−31.0%** |
+
+Read the Sharpe column, not just the return: **semi-annual's mean Sharpe (0.933) is below SPMO's
+(0.987)** — the original rule was never better than the ETF risk-adjusted, only its lucky phase
+was. Bi-monthly at 1.113 is genuinely better.
+
+The costs are real and stated: **expected drawdown −40% against SPMO's −31%**, about **46 new
+names a year** (roughly one a week), and **$70k of spreads** over nine years on a $200k account
+against the semi-annual book's $32k. And it remains `unproven` under §2.5 — deflated Sharpe 0.85
+against a 0.95 bar, at a trial count of 138 that includes every cell this research has run.
 
 What *did* survive every test is narrower and still valuable:
 
@@ -27,7 +48,9 @@ What *did* survive every test is narrower and still valuable:
 | A market-regime gate is a bad trade | **holds** |
 | The Barroso–Santa-Clara volatility governor adds nothing once a trail exists | **holds** |
 | Semi-annual rebalancing beats monthly | **withdrawn — date luck** |
-| The concentrated arm beats the ETF | **not established** |
+| Sampling the rank every two months is stable AND higher-returning | **holds — 2.0pt spread** |
+| The concentrated arm beats the ETF on return and Sharpe | **holds on the bi-monthly clock** |
+| It clears §2.5's deflated-Sharpe bar | **no — 0.85 against 0.95** |
 
 ---
 
