@@ -68,7 +68,7 @@ def db(migrated):
                                     gate_state, group_strength, quarantine, corporate_actions,
                                     fundamentals, balances, rulings, learnings, backtest_runs,
                                     backtest_trades, backtest_equity, runs, bill_rates,
-                                    universe_excluded restart identity
+                                    universe_excluded, push_study restart identity
                                     cascade""")
             cur.execute("delete from universe")
             # config is append-only by design (§4.3), so a test that overrides a threshold leaves
