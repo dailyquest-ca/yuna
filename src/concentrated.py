@@ -71,7 +71,24 @@ from backtest import SPREAD_CURVE, BENCH, PARK_BAND, param_digest
 from capture_audit import load_tape
 import finding
 
-PARK_TICKER = "SPMO.US"
+# WO-A9: the park, the market calendar and the window are all env-level for the deep test, and
+# every default reproduces the ten-year regime byte for byte.
+#
+# The park has to move because **SPMO does not exist before 2015-10-12.** A test that reaches 2008
+# cannot park in it or be benchmarked against it, and picking a substitute silently would be
+# choosing the answer: parking in SPY measures the book against the market, parking in a momentum
+# ETF measures it against its own factor, and the two give very different verdicts on a crash that
+# hit momentum far harder than the index. Zak had not ruled when the run was dispatched, so the
+# ruling is turned into an AXIS — the deep test runs against all three parks and reports each.
+#
+# The calendar has to move because `build_grid` takes the market's session list from the benchmark's
+# own bars, and BENCH is VOO, whose first stored bar is **2016-08-12**. Left alone, a 2006 window
+# would silently produce an empty grid. SPY reaches 2003-08-18 and satisfies the same predicate the
+# original comment names: an index ETF prints on every real session and on no holiday.
+PARK_TICKER = os.environ.get("PARK", "SPMO.US")
+CALENDAR_TICKER = os.environ.get("CALENDAR", BENCH)
+WINDOW_START = os.environ.get("START_DATE", "").strip()
+WINDOW_END = os.environ.get("END_DATE", "").strip()
 FORMATION = 252          # the twelve months the rank is measured over
 SKIP = 21                # ... minus the most recent month (12-1, the standard)
 VOL_WINDOW = 252
@@ -1657,13 +1674,23 @@ def main():
                                 where ticker = %s order by d""", (PARK_TICKER,))
                 park_rows = dict(cur.fetchall())
                 cur.execute("""select d, coalesce(adj_close, close) from prices
-                                where ticker = %s order by d""", (BENCH,))
+                                where ticker = %s order by d""", (CALENDAR_TICKER,))
                 bench_rows = dict(cur.fetchall())
                 cur.execute("select ticker, sector from universe where sector <> ''")
                 sector_by_ticker = dict(cur.fetchall())
             # the benchmark's own bars ARE the market calendar: an index ETF prints on every real
             # US session and on no holiday, which is exactly the predicate this grid needs
-            dates, tickers, adj, raw, dv, op, lo, hi = build_grid(tape, set(bench_rows))
+            cal = set(bench_rows)
+            if WINDOW_START:
+                cal = {d for d in cal if d.isoformat() >= WINDOW_START}
+            if WINDOW_END:
+                cal = {d for d in cal if d.isoformat() <= WINDOW_END}
+            if not cal:
+                raise RuntimeError(
+                    f"the window {WINDOW_START or 'open'}..{WINDOW_END or 'open'} contains no "
+                    f"session of {CALENDAR_TICKER}, whose bars run "
+                    f"{min(bench_rows) if bench_rows else 'never'}..{max(bench_rows) if bench_rows else 'never'}")
+            dates, tickers, adj, raw, dv, op, lo, hi = build_grid(tape, cal)
             park_px = np.array([float(park_rows.get(d, np.nan)) for d in dates])
             # forward-fill the park so a dark session carries its last mark rather than vanishing
             for i in range(1, len(park_px)):
@@ -1722,8 +1749,14 @@ def main():
                     continue
                 params = dict(variant=name, hypothesis="a4", code_stamp=code, currency="USD",
                               benchmark=PARK_TICKER, start_nav=start_nav, park=PARK_TICKER,
-                              regime_source=BENCH,
+                              regime_source=CALENDAR_TICKER,
                               spec=dict(CELLS[name]), formation=FORMATION, skip=SKIP)
+                # WO-A9: the WINDOW is part of the rule surface. Without it a deep-window run and a
+                # ten-year run of the same cell hash identically, and `finding.trial_sharpes` would
+                # treat "does this survive 2008" and "is this the best parameter on 2017-2026" as
+                # the same trial — conflating two different questions inside one deflation.
+                if WINDOW_START or WINDOW_END:
+                    params["window"] = f"{WINDOW_START or 'open'}..{WINDOW_END or 'open'}"
                 # P1's digest, on this arm's own surface. Without it these cells carry no
                 # param_hash, `finding.trial_sharpes` cannot see them, and a grid of twenty-odd
                 # configurations contributes NOTHING to the deflation that exists to price

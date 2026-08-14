@@ -1460,3 +1460,20 @@ def test_rank_lag_reaches_the_calendar_path_and_actually_lags_it():
     moved = [(x["ticker"], x["entry_date"]) for x in lagged[1] if "entry_date" in x]
     assert same != moved, "rank_lag changed nothing on the calendar path — it is not wired"
     assert abs(base[0][-1][1] - lagged[0][-1][1]) > 1.0, "the equity path must differ too"
+
+
+def test_the_window_and_park_defaults_reproduce_the_ten_year_regime():
+    """WO-A9 made the park, the market calendar and the window env-level so a 2008 test is
+    possible. Every default must reproduce the ten-year regime exactly — a deep-test knob that
+    quietly changed the routine regime would re-price every stored cell."""
+    assert cc.PARK_TICKER == "SPMO.US"
+    assert cc.CALENDAR_TICKER == cc.BENCH
+    assert cc.WINDOW_START == "" and cc.WINDOW_END == ""
+
+
+def test_an_empty_window_raises_rather_than_producing_an_empty_grid():
+    """The calendar comes from an index ETF's own bars, and VOO's first stored bar is 2016-08-12.
+    A 2008 window against VOO would silently yield no sessions — and `build_grid` on an empty
+    calendar is exactly the class of defect that cost this repo runs 95-164. It must throw."""
+    with pytest.raises(RuntimeError, match="no market calendar"):
+        cc.build_grid([("REAL.US", dt.date(2024, 1, 2), 10.0, 10.0, 1e6)], set())

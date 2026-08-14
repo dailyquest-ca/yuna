@@ -48,6 +48,12 @@ on:
       cells:
         description: 'concentrated only: comma-separated cells (blank = the whole announced grid)'
         default: ''
+      park:
+        description: 'concentrated only: the park AND §2.5 benchmark (blank = SPMO.US). A pre-2015 window must name one — SPMO did not exist.'
+        default: ''
+      calendar:
+        description: 'concentrated only: the ETF whose bars ARE the market calendar (blank = VOO.US, first bar 2016-08-12). SPY.US reaches 2003.'
+        default: ''
       audit:
         description: 'concentrated only: run the capture audit. It reloads the whole tape PER RUN, so a wide ladder costs ~90s x cells and is what pushed the 22-cell grid past its timeout. Set false for WO-A5 probes — they are about the CAGR surface, not which pushes were caught.'
         default: 'true'
@@ -162,6 +168,14 @@ jobs:
           START_NAV: ${{ inputs.start_nav || '200000' }}
           CELLS: ${{ inputs.cells }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          # WO-A9's deep test. Blank reproduces the ten-year regime exactly: park SPMO, calendar
+          # VOO, the whole stored window. A 2008 run needs all three moved, because SPMO's first
+          # bar is 2015-10-12 and VOO's — which is where the market calendar comes from — is
+          # 2016-08-12.
+          PARK: ${{ inputs.park }}
+          CALENDAR: ${{ inputs.calendar }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
       - name: capture audit
         if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true' && inputs.audit != 'false'
         run: |
