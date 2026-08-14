@@ -97,6 +97,9 @@ EUPHORIA_SD = 2.0
 # them for A3 (vol_target=0.12, vol_window=126). PARK_BAND is §2.1's park deadband, reused for
 # its own purpose: how far the parked weight may drift before it is worth a trade.
 VOL_TARGET_WINDOW = 126
+# WO-A6's entry door: a close above every close in the prior 252 sessions. §3.2 enters on a break
+# above a pivot; this is that with the base detection removed, and the same window A2 used.
+ENTRY_HIGH = 252
 
 # The announced grid (WO-A4). One axis moves per cell against the centre `n12_semi`.
 CELLS = {
@@ -252,6 +255,26 @@ CELLS = {
                       trail=True, next_open=True, offset=1),
     "ph_qtr_2":  dict(n=8, months=3, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                       trail=True, next_open=True, offset=2),
+    # ---- WO-A6: no calendar. A slot is filled the session a qualifying name prints a new
+    # 252-day high; names leave only via the trail. `months` is inert in this mode and is left at
+    # the champion's value so the cell spec still reads as one axis off it.
+    "evt_hi8":       dict(n=8,  months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True, entry_rule="new_high"),
+    "evt_hi6":       dict(n=6,  months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True, entry_rule="new_high"),
+    "evt_hi12":      dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True, entry_rule="new_high"),
+    "evt_hi8_sec70": dict(n=8,  months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True, entry_rule="new_high", sector_cap=0.70),
+    # the phase analogue: an event rule has no calendar to shift, so shift when watching begins
+    "evt_hi8_s1":    dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True, entry_rule="new_high", start_offset=1),
+    "evt_hi8_s2":    dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True, entry_rule="new_high", start_offset=2),
+    "evt_hi8_s3":    dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True, entry_rule="new_high", start_offset=3),
+    "evt_hi8_s4":    dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                          trail=True, next_open=True, entry_rule="new_high", start_offset=4),
 }
 
 
@@ -374,7 +397,21 @@ def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None):
     return [int(j) for j in idx[np.argsort(-score)]]
 
 
-def pick_book(ranked, n, sectors=None, cap=None):
+def at_new_high(i, j, adj, window=ENTRY_HIGH):
+    """Does today's close exceed every close in the PRIOR `window` sessions?
+
+    Strictly prior — `adj[i - window:i]` excludes today, so the comparison is against history the
+    market had already printed. Unknown (not enough history, or today did not print) is False: a
+    door that cannot be evaluated must not open.
+    """
+    if i < window or not np.isfinite(adj[i, j]):
+        return False
+    past = adj[i - window:i, j]
+    past = past[np.isfinite(past)]
+    return bool(len(past) and adj[i, j] > past.max())
+
+
+def pick_book(ranked, n, sectors=None, cap=None, held_sectors=None):
     """The top `n` off the ranked list, optionally with no sector taking more than `cap` of the
     book. Skipped names are passed over, not dropped — the slot goes to the next eligible name, so
     the book is still `n` deep.
@@ -391,7 +428,7 @@ def pick_book(ranked, n, sectors=None, cap=None):
     if not cap or sectors is None:
         return ranked[:n]
     room = max(1, int(n * cap))
-    picked, used = [], {}
+    picked, used = [], dict(held_sectors or {})
     for j in ranked:
         sec = sectors[j] or "?"
         if used.get(sec, 0) >= room:
@@ -497,7 +534,8 @@ def trail_stop(px, st, closes, cfg=None):
 def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted, sleeve,
              start_nav, top_by_addv=None, index_px=None, gate_every=21, trail=False,
              vol_target=None, trail_cfg=None, intraday=None, next_open=None,
-             sectors=None, sector_cap=None, offset=0):
+             sectors=None, sector_cap=None, offset=0, entry_rule=None,
+             start_offset=0):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -515,7 +553,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     `gate_every` clock, trading only when the drift exceeds §2.1's PARK_BAND.
     """
     warmup = FORMATION + 1
-    rebals = set(rebalance_dates(dates, months, warmup, offset))
+    warmup = warmup + int(start_offset * 21)      # WO-A6: shift when trading begins, in months
+    rebals = set() if entry_rule else set(rebalance_dates(dates, months, warmup, offset))
     held = {}                       # ticker index -> shares
     state = {}                      # ticker index -> {entry, hi, stop, armed} for the §3.2 trail
     last_px = {}                    # ticker index -> the most recent price it actually printed
@@ -719,6 +758,43 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             if not held:
                 empty_rebals.append(dates[i])
             park_all(i)
+        # ---- WO-A6: the door, checked every session. No calendar exists in this mode; a free
+        # slot is filled by the highest-ranked name printing a new 252-session high, and a name
+        # that stopped out cannot return until it has climbed back to one. That is the churn fix
+        # and it costs no invented constant.
+        if entry_rule and len(held) < n and np.isfinite(park_px[i]) and i >= warmup:
+            ranked = [j for j in rank_at(i, adj, raw, dv, risk_adjusted=risk_adjusted,
+                                         top_by_addv=top_by_addv) if j not in held]
+            door = [j for j in ranked if at_new_high(i, j, adj)]
+            if door:
+                held_sec = {}
+                if sectors is not None:
+                    for j in held:
+                        sec = sectors[j] or "?"
+                        held_sec[sec] = held_sec.get(sec, 0) + 1
+                take = pick_book(door, n - len(held), sectors, sector_cap, held_sec)
+                nav = mark(i)
+                eff = sleeve * (vol_scalar(navs, float(vol_target)) if vol_target else 1.0)
+                per_name = nav * eff / n
+                for j in take:
+                    px = float(adj[i, j])
+                    fee_frac = spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
+                    want_cash = per_name * (1 + fee_frac)
+                    if cash < want_cash:
+                        unpark(i, want_cash - cash)
+                    spend = min(per_name, cash / (1 + fee_frac))
+                    if spend <= 0:
+                        continue
+                    qty = spend / (px * (1 + fee_frac))
+                    held[j] = held.get(j, 0.0) + qty
+                    cash -= spend
+                    costs += spend * fee_frac / (1 + fee_frac)
+                    state[j] = dict(entry=px, hi=px, armed=False, entered=i,
+                                    stop=px * (1 - (trail_cfg or TRAIL_DEFAULTS)["initial"]))
+                    trades.append(dict(ticker=tickers[j], entry_date=dates[i], spend=spend,
+                                       price=px, qty=qty))
+                park_all(i)
+
         # ---- §3.2's ratchet, every session, on every name held. A name already queued is not
         # re-tested. Two fill models, chosen by `intraday` and pre-registered in WO-A5 §2.1:
         #   * close-based — the stop is judged on the close and filled at the NEXT close, because

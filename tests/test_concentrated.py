@@ -161,6 +161,9 @@ PARENT = {
     "ph_semi_0": "lg8_trail_nextopen", "ph_semi_1": "ph_semi_0", "ph_semi_2": "ph_semi_0",
     "ph_semi_3": "ph_semi_0", "ph_semi_4": "ph_semi_0", "ph_semi_5": "ph_semi_0",
     "ph_qtr_1": "clk_quarter", "ph_qtr_2": "clk_quarter",
+    "evt_hi8": "lg8_trail_nextopen", "evt_hi6": "evt_hi8", "evt_hi12": "evt_hi8",
+    "evt_hi8_sec70": "evt_hi8", "evt_hi8_s1": "evt_hi8", "evt_hi8_s2": "evt_hi8",
+    "evt_hi8_s3": "evt_hi8", "evt_hi8_s4": "evt_hi8",
 }
 
 
@@ -770,3 +773,96 @@ def test_offset_zero_reproduces_the_original_calendar():
                 seen.add(key)
                 old.append(i)
         assert cc.rebalance_dates(dates, months, 0, offset=0) == old, months
+
+
+# ------------------------------------------------ WO-A6: the door that replaces the calendar
+
+def test_a_new_high_reads_only_prior_sessions():
+    """Strictly prior — comparing today against a window that includes today makes every session
+    a new high, which would turn the door into no door at all."""
+    n = 400
+    adj = np.linspace(100.0, 200.0, n).reshape(-1, 1)
+    assert cc.at_new_high(n - 1, 0, adj, window=252)
+    flat = np.full((n, 1), 100.0)
+    assert not cc.at_new_high(n - 1, 0, flat, window=252), "equal is not above"
+
+
+def test_the_door_stays_shut_without_enough_history():
+    adj = np.linspace(100.0, 200.0, 300).reshape(-1, 1)
+    assert not cc.at_new_high(100, 0, adj, window=252), "a door that cannot be evaluated is shut"
+
+
+def test_a_name_below_its_year_high_cannot_enter():
+    n = 400
+    path = np.concatenate([np.linspace(100.0, 300.0, 300), np.linspace(300.0, 200.0, 100)])
+    adj = path.reshape(-1, 1)
+    assert not cc.at_new_high(n - 1, 0, adj, window=252)
+
+
+def test_the_door_prevents_re_buying_a_name_that_just_stopped_out():
+    """The churn fix, and the reason this door was chosen over a tuned cooldown. On the monthly
+    calendar the book re-bought a name within 45 days of a LOSING stop-out 213 times and 111 of
+    those lost again. A stopped-out name is by construction below its recent high, so it cannot
+    come back until it has climbed to a new one."""
+    n = N_DAYS
+    # one name climbs, breaks, and drifts sideways well under its old high; the others are flat
+    broken = np.concatenate([np.linspace(100.0, 300.0, n - 200),
+                             np.linspace(300.0, 180.0, 40),
+                             np.full(160, 185.0)])
+    paths = {"BROKE.US": broken}
+    for i in range(4):
+        paths[f"N{i:02d}.US"] = np.full(n, 100.0 + i)
+    dates, tickers, adj, raw, dv = grid(paths)
+    trades = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), n=3, months=6,
+                         risk_adjusted=False, sleeve=1.0, start_nav=200_000.0,
+                         trail=True, entry_rule="new_high")[1]
+    legs = [t for t in trades if t["ticker"] == "BROKE.US"]
+    stops = [t for t in legs if t.get("reason") == "trail_stop"]
+    assert stops, "the fixture must actually stop the name out"
+    after = [t for t in legs if "entry_date" in t and t["entry_date"] > stops[0]["exit_date"]]
+    assert not after, f"re-bought {len(after)} times while still below its old high"
+
+
+def test_the_event_book_holds_no_calendar():
+    """No rebalance dates exist in this mode: every entry is a session a name printed a new high,
+    and those are scattered rather than clustered on period boundaries."""
+    n = N_DAYS
+    rng = np.random.default_rng(3)
+    paths = {f"N{i:02d}.US": 100.0 * np.exp(np.cumsum(rng.normal(0.0007, 0.02, n)))
+             for i in range(8)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    trades = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), n=3, months=6,
+                         risk_adjusted=False, sleeve=1.0, start_nav=200_000.0,
+                         trail=True, entry_rule="new_high")[1]
+    entry_days = sorted({t["entry_date"] for t in trades if "entry_date" in t})
+    assert len(entry_days) > 4, "the door must actually open more than a calendar would"
+    firsts = sum(1 for d in entry_days if d.day <= 3)
+    assert firsts < len(entry_days), "entries clustered on month starts would mean a calendar"
+
+
+def test_the_start_offset_delays_the_first_entry():
+    """The phase analogue. An event rule has no calendar to shift, so the arbitrary choice being
+    tested is when you started watching."""
+    n = N_DAYS
+    paths = {f"N{i:02d}.US": 100.0 * np.exp(np.linspace(0, 0.9 + 0.02 * i, n)) for i in range(5)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    kw = dict(n=3, months=6, risk_adjusted=False, sleeve=1.0, start_nav=200_000.0,
+              trail=True, entry_rule="new_high")
+    a = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), **kw)[1]
+    b = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), start_offset=3, **kw)[1]
+    first_a = min(t["entry_date"] for t in a if "entry_date" in t)
+    first_b = min(t["entry_date"] for t in b if "entry_date" in t)
+    assert first_b > first_a, "a three-month offset must delay the first purchase"
+    assert (first_b - first_a).days >= 80
+
+
+def test_the_sector_cap_counts_names_already_held():
+    """In event mode slots fill one at a time, so a cap that ignores the current book would let a
+    sector accumulate a name at a time up to the whole book."""
+    ranked = [10, 11, 12, 13]
+    sectors = {10: "Tech", 11: "Tech", 12: "Gold", 13: "Gold"}
+    secs = [None] * 14
+    for k, v in sectors.items():
+        secs[k] = v
+    take = cc.pick_book(ranked, 2, secs, 0.70, held_sectors={"Tech": 5})
+    assert all(secs[j] != "Tech" for j in take), "Tech is already full and must be skipped"
