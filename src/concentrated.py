@@ -1669,7 +1669,8 @@ def main():
     with connect() as conn:
         with Heartbeat(conn, "concentrated") as hb:
             with conn.cursor() as cur:
-                tape = load_tape(cur, with_range=True)
+                tape = load_tape(cur, with_range=True,
+                                 since=WINDOW_START or None, until=WINDOW_END or None)
                 cur.execute("""select d, coalesce(adj_close, close) from prices
                                 where ticker = %s order by d""", (PARK_TICKER,))
                 park_rows = dict(cur.fetchall())

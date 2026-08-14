@@ -99,18 +99,34 @@ def load_positions(cur, run_id):
     return list(positions.values())
 
 
-def load_tape(cur, *, with_range=False):
+def load_tape(cur, *, with_range=False, since=None, until=None):
     """The same census `backtest.load()` reads: US stocks, living and dead, minus the excluded.
 
     `with_range` appends high, low and open — the push study's ATR needs the bar's range and the
     concentrated arm's stop needs to know whether the session opened through it, and every reader
-    must use the SAME census predicate or their universes silently drift."""
+    must use the SAME census predicate or their universes silently drift.
+
+    `since`/`until` bound the bars. WO-A9 added them because the 2005 backfill took this table from
+    8.9M rows to 11.6M and the unbounded query started **timing out** — runs 391 and 392 both died
+    on `canceling statement due to statement timeout`, in `load_tape`, before doing any work. A
+    windowed test has no use for bars outside its window: the grid is built from the calendar's own
+    sessions and the 252-session formation is taken from inside the window, so filtering here
+    changes no result and cuts the query to the span actually read. Both default to None, which is
+    the whole tape and the behaviour every existing caller gets.
+    """
     extra = ", p.high, p.low, p.open" if with_range else ""
+    bounds, args = "", []
+    if since:
+        bounds += " and p.d >= %s"
+        args.append(since)
+    if until:
+        bounds += " and p.d <= %s"
+        args.append(until)
     cur.execute(f"""select p.ticker, p.d, p.close, coalesce(p.adj_close, p.close), p.volume{extra}
                      from prices p join universe u on u.ticker = p.ticker
                     where u.kind = 'stock' and u.ticker like '%%.US'
-                      and u.ticker not in (select ticker from universe_excluded)
-                    order by p.ticker, p.d""")
+                      and u.ticker not in (select ticker from universe_excluded){bounds}
+                    order by p.ticker, p.d""", args)
     return cur.fetchall()
 
 
