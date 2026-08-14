@@ -265,7 +265,40 @@ Every run is scored by `src/finding.py` against `docs/yuna_plan.md` §2.5:
 
 ---
 
-## 10 · The next hypothesis, and why the data points at it
+## 10 · The re-entry rule was tested. It passed the robustness test and failed the strategy test.
+
+The calendar was removed entirely and replaced with a market observation: a slot fills the session
+a qualifying name prints a new 252-day high; names leave only via the trail.
+
+| | spread across arbitrary starting choices | mean CAGR |
+|---|---:|---:|
+| calendar rule (6 phases) | **17.6 points** | ~22% |
+| event rule (5 start offsets) | **5.5 points** | **1.54%** |
+
+**The phase sensitivity vanished, as predicted.** And the return vanished with it. The book is
+fully invested throughout — eight names on essentially every sampled date — so this is not cash
+drag. It is stable, and stably worse than the index.
+
+**Why:** when a slot frees, only names printing a new high *that day* qualify. That is a handful
+of names, so the book takes the best of a tiny set rather than the strongest name in the pool. It
+becomes a portfolio of "whatever broke out today" instead of "the strongest names" — 155 distinct
+names against the calendar's 128, only 44 shared, and a best trade of +60.6% against +169.7%. It
+never held the 4-6x names at all.
+
+### What the two results say together
+
+- The calendar rule earns 32% on one phase and 14% on another → the return depends on **when** the
+  rank is sampled.
+- Removing the sampling date drops the return to ~1.5% → the return came from **holding
+  top-ranked names**, which the door prevents.
+
+Both point the same way: **the 12-1 rank has value that decays fast and unevenly.** Sampled at the
+right moment on the right phase it produces a spectacular number; sampled any other way it
+produces the index or worse. That is a weak signal amplified by luck, not a robust edge.
+
+---
+
+## 10b · The original next hypothesis, now answered
 
 Monthly rebalancing re-bought a name within 45 days of stopping out of it **at a loss** 213 times,
 average 13.5 days out of the name — and **111 of those 213 lost money again.**
