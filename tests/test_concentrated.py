@@ -179,6 +179,8 @@ PARENT = {
     "a6": "lg12_trail_nextopen", "a6_s10": "a6", "a6_s21": "a6", "a6_s42": "a6", "a6_s63": "a6",
     "a6_lag1": "a6", "a6_lag2": "a6", "a6_lag5": "a6",
     "a6_floor4": "a6", "a6_floor0": "a6",
+    "a6f0_s21": "a6_floor0", "a6f0_s42": "a6_floor0", "a6f0_s63": "a6_floor0",
+    "a6f0_lag1": "a6_floor0", "a6f0_lag5": "a6_floor0",
 }
 
 

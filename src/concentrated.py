@@ -409,6 +409,23 @@ CELLS = {
                       trail=True, next_open=True, entry_rule="banded", rider_bets=4.0),
     "a6_floor0": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                       trail=True, next_open=True, entry_rule="banded", rider_bets=0.0),
+    # §4's falsifiers, re-run on the book that actually fills. The first pass measured them on a
+    # 32.6%-deployed book, so its 0.94-point spread was largely the park holding still.
+    "a6f0_s21":  dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
+                      start_offset=1),
+    "a6f0_s42":  dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
+                      start_offset=2),
+    "a6f0_s63":  dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
+                      start_offset=3),
+    "a6f0_lag1": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
+                      rank_lag=1),
+    "a6f0_lag5": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
+                      rank_lag=5),
 }
 
 
