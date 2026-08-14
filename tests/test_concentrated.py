@@ -83,6 +83,54 @@ def test_the_liquidity_and_price_floors_bind():
     assert cc.rank_at(n - 1, adj, raw, thin, risk_adjusted=False) == []
 
 
+def test_a_name_that_rests_on_its_own_market_holidays_fails_the_participation_gate():
+    """The foreign-listing gate. `PLZL.US` is Polyus on MOEX quoted in roubles, and the vendor
+    labels it NYSE / USD / USA, so nothing in the metadata can catch it. What it cannot fake is
+    trading when the NYSE is open and Moscow is shut.
+
+    The fixture gives the foreign name a better 12-1 return than the domestic one, so if the gate
+    does not bind it ranks FIRST and the assertion cannot pass by accident.
+    """
+    n = N_DAYS
+    home = 100.0 * np.exp(np.linspace(0, 0.5, n))
+    abroad = 100.0 * np.exp(np.linspace(0, 1.2, n))       # the stronger name, deliberately
+    dates, tickers, adj, raw, dv = grid({"HOME.US": home, "ABROAD.US": abroad})
+    j = tickers.index("ABROAD.US")
+
+    # ~4% of sessions are its own market's holidays. The vendor PADS them rather than omitting
+    # them — IVL.US carries 271 zero-volume bars in 1,483 — so the bar stays finite and only the
+    # volume goes to zero. That is why the gate counts dollar volume and not finite bars.
+    dv[::25, j] = 0.0
+    rest = (dv[:, j] > 0).sum() / n
+    assert 0.95 < rest < 0.97, "the fixture must sit between the rungs it is testing"
+
+    assert tickers[cc.rank_at(n - 1, adj, raw, dv, risk_adjusted=False)[0]] == "ABROAD.US", (
+        "with the gate off the foreign name must still rank first — otherwise the test below "
+        "would pass for the wrong reason")
+    kept = [tickers[k] for k in
+            cc.rank_at(n - 1, adj, raw, dv, risk_adjusted=False, min_participation=0.99)]
+    assert kept == ["HOME.US"], "a name absent on 4% of US sessions is not a US-liquid name"
+    # and the rung matters: a threshold below the name's own participation must let it back in
+    loose = [tickers[k] for k in
+             cc.rank_at(n - 1, adj, raw, dv, risk_adjusted=False, min_participation=0.90)]
+    assert set(loose) == {"HOME.US", "ABROAD.US"}
+
+
+def test_the_participation_gate_is_inert_when_it_is_not_set():
+    """Every cell ruled before WO-A16 must reproduce to the last decimal, so the default must not
+    merely be lenient — it must not run at all. A name with a genuine trading halt proves it."""
+    n = N_DAYS
+    a = 100.0 * np.exp(np.linspace(0, 0.6, n))
+    b = 100.0 * np.exp(np.linspace(0, 0.9, n))
+    dates, tickers, adj, raw, dv = grid({"AAA.US": a, "BBB.US": b})
+    dv[-40:-30, tickers.index("BBB.US")] = 0.0            # a two-week halt
+
+    assert cc.rank_at(n - 1, adj, raw, dv, risk_adjusted=False) == \
+           cc.rank_at(n - 1, adj, raw, dv, risk_adjusted=False, min_participation=None)
+    assert len(cc.rank_at(n - 1, adj, raw, dv, risk_adjusted=False)) == 2, (
+        "the halted name stays eligible when no participation floor is declared")
+
+
 def test_the_clock_sets_the_trade_count_the_day_job_allows():
     """The whole point of the slow clock: a dozen names changed twice a year is a dozen-odd
     decisions a year, not a full-time job."""
@@ -225,6 +273,10 @@ PARENT = {
        if f"b5_{x}_{e}" not in ("b5_8_5", "b5_8_1")},
     "b5_8_5": "b5_8_3",
     "b5_5_5": "b5_8_5",
+    # WO-A16's participation ladder. Each rung is the gate ALONE off the chosen cell, at its own
+    # threshold — the same shape as WO-A10 §2's bracket, and for the same reason: the rungs are
+    # alternatives to be compared with each other, not a chain where each inherits the last.
+    **{f"b5_12_3_p{p}": "b5_12_3" for p in (100, 99, 98, 95, 90)},
 }
 
 # An arm whose clock, exit rule, entry rule AND fill convention all differ from everything before

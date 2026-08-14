@@ -806,6 +806,27 @@ CELLS = {
                            exit_rank=x, entry_rank=e)
        for x in (8, 10, 12, 14, 16) for e in (1, 2, 3, 4, 5)
        if f"b5_{x}_{e}" not in ("b5_8_1", "b5_8_3", "b5_8_5", "b5_10_3", "b5_12_3")},
+
+    # WO-A16: the session-participation ladder, on Zak's chosen cell and nothing else.
+    #
+    # The universe carries foreign securities under `.US` tickers — `PLZL.US` is Polyus quoted in
+    # roubles on MOEX — and no vendor field admits it: EODHD's own General block calls that ticker
+    # NYSE / USD / USA. So the gate cannot be metadata. It has to be the one thing a foreign line
+    # cannot fake, which is trading when the NYSE is open and its own market is shut.
+    #
+    # This is a LIQUIDITY rule, not a nationality rule, and that is deliberate. It says a name must
+    # actually trade on the sessions this book would have to fill on. It ejects foreign lines and
+    # genuinely untradeable ones by the same test, and it needs no list of countries to maintain.
+    #
+    # The ladder is the honest shape here because the threshold is a ruling, not a measurement. The
+    # traded names of run 484 sit at exactly 0.00% non-participation if US-listed and 3.46%-18.27%
+    # if foreign, so anything from 0.99 down to 0.97 separates them — but 1.00 also ejects a real
+    # name for a single halt, and that cost is what the rungs price.
+    **{f"b5_12_3_p{p}": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                             trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                             displace=True, base_door=False, rider=False,
+                             exit_rank=12, entry_rank=3, min_participation=p / 100.0)
+       for p in (100, 99, 98, 95, 90)},
 }
 
 
@@ -908,7 +929,7 @@ def rebalance_dates(dates, months, warmup, offset=0):
     return out
 
 
-def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None):
+def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None, min_participation=None):
     """12-1 momentum over the liquid universe at session i. Uses bars <= i only.
 
     `top_by_addv` narrows the pool to the K most-traded names BEFORE ranking. This is the
@@ -928,6 +949,30 @@ def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None):
     with np.errstate(invalid="ignore"):
         eligible = (live & (bars >= L0_MIN_BARS) & (raw[i] >= L0_MIN_RAW)
                     & (addv >= L0_MIN_ADDV))
+    if min_participation:
+        # A US-listed name trades on every US session. A foreign line does not — it rests on ITS
+        # OWN market's holidays, and those fall on days the NYSE is open.
+        #
+        # This exists because the vendor serves foreign series under the `.US` suffix and its
+        # metadata does not admit it. `PLZL.US` is Polyus on MOEX, quoted in ROUBLES, and EODHD's
+        # own General block reports Exchange NYSE, CurrencyCode USD, CountryName USA — every field
+        # wrong. Polyus has never been NYSE-listed. Its rouble price times its MOEX volume read as
+        # $426m of daily dollar volume, so it cleared the $10m liquidity gate on nothing but an FX
+        # rate. The same is true of NVTK.US (Novatek), MGROS.US (Migros Türk, lira), IVL.US
+        # (Indorama, baht), KSL.US and KKP.US (Thai), VJC.US (VietJet, dong).
+        #
+        # `bars >= L0_MIN_BARS` cannot see this, for two reasons. It admits 210 of 252, so missing
+        # 4% of sessions passes with room to spare; and it counts FINITE bars, while the vendor
+        # pads some foreign series flat rather than omitting them — IVL.US carries 271 zero-volume
+        # bars in 1,483, every one of them finite. So the count has to be of sessions the name
+        # actually TRADED, which is what dollar volume above zero means.
+        #
+        # Measured on the traded names of run 484: US names sit at exactly 0.00% non-participation,
+        # the confirmed foreign lines at 3.46%-18.27%.
+        win = dv[max(0, i - FORMATION + 1):i + 1]
+        with np.errstate(invalid="ignore"):
+            traded = (np.isfinite(win) & (win > 0)).sum(axis=0)
+        eligible = eligible & (traded >= min_participation * win.shape[0])
     idx = np.where(eligible)[0]
     if not len(idx):
         return []
@@ -1352,7 +1397,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              rider_calendar=False, base_gate=False,
              latch=None, gate_rising=False,
              entry_rank=None, displace=False, base_door=True, fill_at_open=False,
-             swap_gap=False):
+             swap_gap=False, min_participation=None):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -1595,7 +1640,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             # Only the OBSERVATION moves; sizing and fills stay at i.
             obs_i = max(warmup, i - int(rank_lag))
             ranked = rank_at(obs_i, adj, raw, dv, risk_adjusted=risk_adjusted,
-                             top_by_addv=top_by_addv)
+                             top_by_addv=top_by_addv, min_participation=min_participation)
             # ---- WO-A6 §5's B-arm. With `tranches` > 1 the book is split into equal sub-books
             # that rebalance on ALTERNATING dates, so at any moment half the book was chosen two
             # months ago and half four. That is the same phase-averaging the six-cell phase test
@@ -1734,7 +1779,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         if entry_rule == "banded" and i >= warmup and np.isfinite(park_px[i]):
             obs = max(warmup, i - int(rank_lag))
             order = rank_at(obs, adj, raw, dv, risk_adjusted=risk_adjusted,
-                            top_by_addv=top_by_addv)
+                            top_by_addv=top_by_addv, min_participation=min_participation)
             rank_of = {j: r for r, j in enumerate(order, start=1)}
             # exit gate 2: the rank band. The trail below is gate 1 and runs unchanged.
             band = A6_EXIT_RANK if exit_rank is None else int(exit_rank)
@@ -1855,7 +1900,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         # and it costs no invented constant.
         if entry_rule == "new_high" and len(held) < n and np.isfinite(park_px[i]) and i >= warmup:
             ranked = [j for j in rank_at(i, adj, raw, dv, risk_adjusted=risk_adjusted,
-                                         top_by_addv=top_by_addv) if j not in held]
+                                         top_by_addv=top_by_addv,
+                                         min_participation=min_participation) if j not in held]
             door = [j for j in ranked if at_new_high(i, j, adj)]
             if door:
                 held_sec = {}
