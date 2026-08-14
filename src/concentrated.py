@@ -932,7 +932,10 @@ def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None):
     if not len(idx):
         return []
     if top_by_addv and len(idx) > top_by_addv:
-        idx = idx[np.argsort(-addv[idx])[:top_by_addv]]
+        # Stable here for the same reason the score sort is: this one decides WHO IS IN THE POOL,
+        # so a tie at the 500th place silently swaps one company for another and the whole book can
+        # differ downstream. Fixing the score sort and leaving this one unstable was half a fix.
+        idx = idx[np.argsort(-addv[idx], kind="stable")[:top_by_addv]]
     score = recent[idx] / past[idx] - 1.0
     if risk_adjusted:
         window = adj[max(0, i - VOL_WINDOW):i + 1, idx]
