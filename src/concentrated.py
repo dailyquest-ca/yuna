@@ -558,6 +558,37 @@ CELLS = {
                        trail_cfg=dict(TRAIL_DEFAULTS, euphoria=TRAIL_DEFAULTS["wide"])),
     "w10_pool250": dict(n=10, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=250,
                         trail=True, next_open=True, every_sessions=1, tranches=5),
+    # ---- WO-A8. `w10_n5` topped the §10 grid at 37.76% and is the arm Zak asked to chase. The
+    # forensics on run 340 found four things, and each cell below answers exactly one of them.
+    # Nothing here is a guess: every axis traces to a measured number in
+    # `docs/wo-a8-2026-08-14.md` §1. The centre is `w10_n5` itself — five names, one per weekly
+    # tranche — already stored as run 340, so it is not re-run.
+    #
+    # 1. The euphoria tighten fires constantly on a book whose names run 60% realized vol, and
+    #    removing it already bought +1.68 points on the ten-name version.
+    "w5_noeuph": dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, every_sessions=1, tranches=5,
+                      trail_cfg=dict(TRAIL_DEFAULTS, euphoria=TRAIL_DEFAULTS["wide"])),
+    # 2. §3.2's valid-base clause, never implemented on a calendar book. 78.6% of stop exits are
+    #    re-bought inside 21 days, average 6.4 days out; one name round-tripped 29 times.
+    "w5_door":  dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=1, tranches=5, base_gate=True),
+    # 3. Realized volatility runs 19% in 2017 and 69% in 2026 and the annual Sharpe tracks it
+    #    inversely. Barroso–Santa-Clara was rejected on A6 — a slow twelve-name book where the
+    #    trail already did the job. This is the opposite book, and the governor is worth re-asking.
+    "w5_vt40":  dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=1, tranches=5, vol_target=0.40),
+    "w5_vt55":  dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=1, tranches=5, vol_target=0.55),
+    # 4. The "8%" initial stop delivers −14.55% on the 261 trades it closes below −10%, because
+    #    these names gap straight through it. It is not protecting at its stated level, and every
+    #    stop manufactures a re-entry. Two ends of that axis: no trail at all, so the weekly
+    #    rebalance is the only exit; and an initial wide enough to sit outside the noise.
+    "w5_notrail": dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5),
+    "w5_init15":  dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=True, next_open=True, every_sessions=1, tranches=5,
+                       trail_cfg=dict(TRAIL_DEFAULTS, initial=0.15)),
 }
 
 
@@ -1039,7 +1070,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              sectors=None, sector_cap=None, offset=0, entry_rule=None,
              start_offset=0, every_sessions=None, rank_lag=0, rider_bets=None,
              rider=True, exit_rank=None, path_quality_gate=False, tranches=1,
-             rider_calendar=False):
+             rider_calendar=False, base_gate=False):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -1229,6 +1260,23 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             theirs = {j for j, t in tranche_of.items() if t != turn}
             slots = max(1, n // tranches)
             pool = [j for j in ranked if j not in theirs]
+            # ---- WO-A8: §3.2's re-entry clause, which the calendar path has never implemented.
+            #
+            #   "A stop-out carries no cooldown — re-entry requires a valid base and all gates,
+            #    nothing more."
+            #
+            # A calendar book has no concept of a base: it re-buys whatever ranks, including the
+            # name it stopped out of four sessions ago. Measured on run 340, **78.6% of trail-stop
+            # exits are re-bought within 21 days**, average 6.4 days out — one name round-tripped
+            # 29 times in ten months. This is not a cooldown (the plan forbids one) and it is not
+            # a new rule; it is the valid-base half of the clause the plan already carries, using
+            # WO-A6's `base_state` as the base test. A name that stopped out and has not climbed
+            # back to a valid base is refused; a name that has is bought with no delay at all.
+            if base_gate:
+                gated = [j for j in pool if base_state(i, j, adj)]
+                rider_blocks["no valid base"] = (rider_blocks.get("no valid base", 0)
+                                                 + len(pool) - len(gated))
+                pool = gated
             if rider_calendar:
                 # §5 attaches §2's rider to the B-arm. Kept behind its OWN flag rather than the
                 # banded `rider`: every A4 and A5 calendar cell in the ledger ran without it, and

@@ -201,6 +201,9 @@ PARENT = {
     # WO-A7 §10's grid, mirroring WO-A6 §3 — four axes, one move each, all off the centre.
     "w10_n5": "w10_t5", "w10_n15": "w10_t5", "w10_t10": "w10_t5",
     "w10_atr": "w10_t5", "w10_noeuph": "w10_t5", "w10_pool250": "w10_t5",
+    # WO-A8's stabilisers, one axis each off the five-name centre.
+    "w5_noeuph": "w10_n5", "w5_door": "w10_n5", "w5_vt40": "w10_n5",
+    "w5_vt55": "w10_n5", "w5_notrail": "w10_n5", "w5_init15": "w10_n5",
 }
 
 
@@ -1413,3 +1416,28 @@ def test_a_tranched_book_does_not_round_trip_the_whole_park_every_session():
     assert split < solo / 10, (
         f"a tranched daily book at half sleeve cost {split:,.0f} against the un-tranched "
         f"{solo:,.0f} — anything close to the latter means it is round-tripping the whole park")
+
+
+def test_the_base_gate_is_wired_and_refuses_names_without_a_valid_base():
+    """WO-A8 implements §3.2's re-entry clause on the calendar path: 'a stop-out carries no
+    cooldown — re-entry requires a valid base and all gates, nothing more.' A calendar book had
+    no concept of a base and re-bought whatever ranked, including the name it stopped out of four
+    sessions ago. This is the valid-base half, not a cooldown."""
+    n = N_DAYS
+    # two names that rank but are BROKEN — far under their own 252-day high and falling — against
+    # one that is making highs. Only the last has a valid base.
+    hi = 100.0 * np.exp(np.linspace(0, 1.2, n))
+    broken = np.concatenate([100.0 * np.exp(np.linspace(0, 1.4, n - 120)),
+                             100.0 * np.exp(1.4) * np.linspace(1.0, 0.55, 120)])
+    paths = {"GOOD.US": hi, "BRK1.US": broken, "BRK2.US": broken * 1.01}
+    dates, tickers, adj, raw, dv = grid(paths)
+    park = np.full(n, 50.0)
+    kw = dict(n=2, months=1, risk_adjusted=False, sleeve=1.0, start_nav=200_000.0,
+              trail=True, every_sessions=5)
+    open_door = cc.simulate(dates, tickers, adj, raw, dv, park, base_gate=False, **kw)
+    gated = cc.simulate(dates, tickers, adj, raw, dv, park, base_gate=True, **kw)
+    assert gated[3]["rider_blocks"].get("no valid base", 0) > 0, (
+        "two of three names are 45% below their own high and falling — the gate must refuse them")
+    assert "no valid base" not in open_door[3]["rider_blocks"], "base_gate=False must not consult it"
+    bought_gated = {t["ticker"] for t in gated[1] if "entry_date" in t}
+    assert "GOOD.US" in bought_gated, "the name making new highs has a valid base and must pass"
