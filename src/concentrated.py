@@ -533,6 +533,31 @@ CELLS = {
                    trail=True, next_open=True, every_sessions=1),
     "w10_t5": dict(n=10, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                    trail=True, next_open=True, every_sessions=1, tranches=5),
+    # ---- WO-A7 §10: the weekly arm's sensitivity grid, deliberately mirroring WO-A6 §3 cell for
+    # cell so the two arms are compared on equal footing. A6's headline fell 2.59 points the moment
+    # its grid ran; comparing a GRIDDED A6 against an UNGRIDDED weekly arm would hand the weekly
+    # arm the same unearned advantage A6 briefly had, which is the error this grid exists to avoid.
+    #
+    # Four axes, one move each, all off `w10_t5`. The exit band has no analogue here — a staggered
+    # calendar book has no rank hysteresis; names leave at their tranche's refresh or on the trail
+    # — so the pool takes its slot, and §4.1 makes that the single biggest lever in the programme
+    # and one never perturbed on this clock.
+    "w10_n5":   dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=1, tranches=5),
+    "w10_n15":  dict(n=15, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=1, tranches=5),
+    # the tranche count itself. `d10_p0` above is the tranches=1 end of this axis and is already
+    # declared; ten tranches refreshes each single-name sub-book fortnightly instead of weekly.
+    "w10_t10":  dict(n=10, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=1, tranches=10),
+    "w10_atr":  dict(n=10, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=1, tranches=5,
+                     trail_cfg=TRAIL_ATR),
+    "w10_noeuph": dict(n=10, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=True, next_open=True, every_sessions=1, tranches=5,
+                       trail_cfg=dict(TRAIL_DEFAULTS, euphoria=TRAIL_DEFAULTS["wide"])),
+    "w10_pool250": dict(n=10, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=250,
+                        trail=True, next_open=True, every_sessions=1, tranches=5),
 }
 
 

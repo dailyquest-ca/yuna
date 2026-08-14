@@ -198,6 +198,9 @@ PARENT = {
     "w10_p0": "fq_w1",
     **{f"w10_p{p}": "w10_p0" for p in (1, 2, 3, 4)},
     "d10_p0": "w10_p0", "w10_t5": "d10_p0",
+    # WO-A7 §10's grid, mirroring WO-A6 §3 — four axes, one move each, all off the centre.
+    "w10_n5": "w10_t5", "w10_n15": "w10_t5", "w10_t10": "w10_t5",
+    "w10_atr": "w10_t5", "w10_noeuph": "w10_t5", "w10_pool250": "w10_t5",
 }
 
 
