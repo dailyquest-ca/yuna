@@ -772,6 +772,16 @@ CELLS = {
                       trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
                       displace=True, base_door=False, rider=False,
                       exit_rank=30, entry_rank=3),
+    # ---- the swap gap, found by accident and kept on purpose. Zak ruled the swap happens in ONE
+    # morning: sell the displaced name and buy its replacement at the same open, funded by the
+    # proceeds. This cell is the conservative alternative he raised and I dismissed too quickly —
+    # sell tomorrow, buy the morning after, because the cash has not settled. It costs a session
+    # out of the market on a fifth of the account and it was worth +2.69 CAGR points over twenty
+    # years when a stale snapshot introduced it unintentionally. Measured rather than argued.
+    "b5_12_gap": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=12, entry_rank=3, swap_gap=True),
 }
 
 
@@ -1314,7 +1324,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              rider=True, exit_rank=None, path_quality_gate=False, tranches=1,
              rider_calendar=False, base_gate=False,
              latch=None, gate_rising=False,
-             entry_rank=None, displace=False, base_door=True, fill_at_open=False):
+             entry_rank=None, displace=False, base_door=True, fill_at_open=False,
+             swap_gap=False):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -1729,9 +1740,18 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             # Found by diagnostic rather than by reading: `b5_close` came back averaging 5.25
             # positions on a five-name book and 87% exposure against every other cell's 98%, which
             # made it useless as the control for the execution comparison it exists to provide.
-            freed = set(queued) if fill_at_open else set()
-            if displace and len([j for j in held if j not in freed]) >= n:
-                live = [j for j in held if j not in freed]
+            #
+            # It must be evaluated LAZILY. A snapshot taken here is stale by the time the entry
+            # gate runs, because the displacement block below appends to `queued` in between — so
+            # the freshly-displaced name still counts as held, the gate sees a full book, and the
+            # slot sits empty until the next session. That is a real strategy (sell today, buy
+            # tomorrow) but it is not the one Zak ruled, and it arrived by accident: 494 sessions
+            # under five positions against the correct path's 1, worth +2.69 CAGR points over
+            # twenty years. It is now `b5_12_gap`, measured on purpose instead of by mistake.
+            def slot_free(j):
+                return fill_at_open and not swap_gap and j in queued
+            if displace and len([j for j in held if not slot_free(j)]) >= n:
+                live = [j for j in held if not slot_free(j)]
                 worst = max(live, key=lambda j: rank_of.get(j, 10 ** 9))
                 worst_rank = rank_of.get(worst, 10 ** 9)
                 for j in order[:entry_band]:
@@ -1751,7 +1771,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             # The exit band already states what "good enough to hold" means, so it is the right
             # pool for an empty slot and it costs no new constant.
             fill_band = max(band, n)
-            committed = len([j for j in held if j not in freed]) + len(pending_buys)
+            committed = len([j for j in held if not slot_free(j)]) + len(pending_buys)
             if committed < n:
                 nav_now = mark(i)
                 eff = sleeve * (vol_scalar(navs, float(vol_target)) if vol_target else 1.0)

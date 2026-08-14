@@ -217,6 +217,7 @@ PARENT = {
     **{c: "b5_8_3" for c in ("b5_6_3", "b5_10_3", "b5_12_3", "b5_8_1", "b5_8_5",
                              "b5_nodisp", "b5_close", "b5_door",
                              "b5_15_3", "b5_20_3", "b5_25_3", "b5_30_3")},
+    "b5_12_gap": "b5_12_3",
     "b5_5_5": "b5_8_5",
 }
 
@@ -1714,3 +1715,28 @@ def test_the_book_never_holds_more_names_than_its_slot_count():
                          next_open=opens, fill_at_open=deferred, **BAND)[0]
         worst = max(row[4] for row in eq)
         assert worst <= 5, f"fill_at_open={deferred} held {worst} names in a five-slot book"
+
+
+def test_a_displaced_slot_refills_the_same_morning_unless_a_gap_is_asked_for():
+    """Zak ruled the swap happens in ONE morning — sell the displaced name and buy its replacement
+    at the same open, funded by the proceeds. That requires the freed-slot test to be evaluated
+    LAZILY: the displacement block appends to `queued`, and a snapshot taken before it leaves the
+    entry gate seeing a full book, so the slot sits empty for a session.
+
+    That is a real strategy — it is the settled-cash variant — but it is not the ruled one, and it
+    arrived by accident. Both are pinned here so neither can turn into the other silently.
+    """
+    d, t, adj, raw, dv, park = _ladder_world()
+    rng = np.random.default_rng(5)
+    adj = adj * np.exp(np.cumsum(rng.normal(0, 0.02, adj.shape), axis=0))
+    raw, opens = adj.copy(), adj * 1.01
+    same = cc.simulate(d, t, adj, raw, dv, park, exit_rank=8, entry_rank=3, displace=True,
+                       next_open=opens, fill_at_open=True, swap_gap=False, **BAND)[0]
+    gap = cc.simulate(d, t, adj, raw, dv, park, exit_rank=8, entry_rank=3, displace=True,
+                      next_open=opens, fill_at_open=True, swap_gap=True, **BAND)[0]
+    under_same = sum(1 for row in same if 0 < row[4] < 5)
+    under_gap = sum(1 for row in gap if 0 < row[4] < 5)
+    assert under_gap > under_same * 3, (
+        f"the gap variant must sit under-invested far more often ({under_gap} vs {under_same})")
+    assert under_same <= len(same) * 0.05, (
+        f"the ruled path refills the same morning, so it is rarely short ({under_same} sessions)")
