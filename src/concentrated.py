@@ -470,6 +470,41 @@ CELLS = {
     "a6f0_path": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                       trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
                       path_quality_gate=True),
+    # ---- WO-A6 §5, the B-arm. Two tranches on alternating bi-monthly dates, so half the book is
+    # always two months old and half four. It is the phase test moved INSIDE one run: you cannot
+    # own six phases of the same account, but you can own two, and if phase luck is what the
+    # 15.1-point bi-monthly spread was made of then holding both halves should collect its mean
+    # rather than a draw from it. `b0` is the centre; `b_ph1..b_ph5` are the same rule started one
+    # to five months later, and the SPREAD across those six is the arm's real number.
+    # The clock is the 42-SESSION one the §1 table measured, not a two-calendar-month one: a
+    # `months=2` calendar has only two distinct phases (offset 2 repeats offset 0), so the
+    # six-phase spread Zak is comparing against can only be built on the session clock.
+    #
+    # Three steps get from the existing `s42_p0` to the B centre, and each is a real cell rather
+    # than a bookkeeping stop on the way: n 8 -> 12, then §2's rider as SPECIFIED (floor 5, which
+    # a6_floor4 showed cripples a banded book — worth knowing whether it does the same here), then
+    # the floor off so only the cluster cap binds, which is how A6 actually runs.
+    "s42n12_p0": dict(n=12, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, every_sessions=42),
+    "s1cap_p0":  dict(n=12, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, every_sessions=42, rider_calendar=True),
+    "s1_p0":     dict(n=12, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, every_sessions=42, rider_calendar=True,
+                      rider_bets=0.0),
+    "b_p0":      dict(n=12, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, every_sessions=42, rider_calendar=True,
+                      rider_bets=0.0, tranches=2),
+    # the remaining five phases of each, which is §5's second clause. Each `b_p*` shares every
+    # parameter with its `s1_p*` twin except the tranche count, so the pair prices TRANCHING
+    # rather than tranching plus a rider plus a phase.
+    **{f"s1_p{p}": dict(n=12, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                        trail=True, next_open=True, every_sessions=42, rider_calendar=True,
+                        rider_bets=0.0, offset=p)
+       for p in (7, 14, 21, 28, 35)},
+    **{f"b_p{p}": dict(n=12, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=True, next_open=True, every_sessions=42, rider_calendar=True,
+                       rider_bets=0.0, tranches=2, offset=p)
+       for p in (7, 14, 21, 28, 35)},
 }
 
 
@@ -950,7 +985,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              vol_target=None, trail_cfg=None, intraday=None, next_open=None, bars=None,
              sectors=None, sector_cap=None, offset=0, entry_rule=None,
              start_offset=0, every_sessions=None, rank_lag=0, rider_bets=None,
-             rider=True, exit_rank=None, path_quality_gate=False):
+             rider=True, exit_rank=None, path_quality_gate=False, tranches=1,
+             rider_calendar=False):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -970,11 +1006,17 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     warmup = FORMATION + 1
     warmup = warmup + int(start_offset * 21)      # WO-A6: shift when trading begins, in months
     if entry_rule:
-        rebals = set()          # no calendar exists in either event mode
+        rebal_list = []         # no calendar exists in either event mode
     elif every_sessions:
-        rebals = set(session_rebalances(dates, int(every_sessions), warmup, offset))
+        rebal_list = session_rebalances(dates, int(every_sessions), warmup, offset)
     else:
-        rebals = set(rebalance_dates(dates, months, warmup, offset))
+        rebal_list = rebalance_dates(dates, months, warmup, offset)
+    rebals = set(rebal_list)
+    # WO-A6 §5's B-arm needs to know WHICH rebalance this is, not merely that one is due: with
+    # two tranches only one of them is refreshed per date, and which one alternates.
+    rebal_ord = {i: k for k, i in enumerate(sorted(rebal_list))}
+    tranches = max(1, int(tranches))
+    tranche_of = {}                 # ticker index -> which tranche is carrying it
     held = {}                       # ticker index -> shares
     state = {}                      # ticker index -> {entry, hi, stop, armed} for the §3.2 trail
     last_px = {}                    # ticker index -> the most recent price it actually printed
@@ -1120,12 +1162,46 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             queued.clear()
             ranked = rank_at(i, adj, raw, dv, risk_adjusted=risk_adjusted,
                              top_by_addv=top_by_addv)
-            want = pick_book(ranked, n, sectors, sector_cap)
+            # ---- WO-A6 §5's B-arm. With `tranches` > 1 the book is split into equal sub-books
+            # that rebalance on ALTERNATING dates, so at any moment half the book was chosen two
+            # months ago and half four. That is the same phase-averaging the six-cell phase test
+            # does ACROSS runs, moved INSIDE one run — which is the only version of it a person
+            # can actually hold, since you cannot own six phases of the same account. The rest of
+            # the block below is unchanged; only the slot count, the capital share and the sell
+            # list are scoped to the tranche whose turn it is.
+            turn = rebal_ord.get(i, 0) % tranches
+            for j in [j for j in tranche_of if j not in held]:
+                tranche_of.pop(j)       # the trail took it; its slot returns to its tranche
+            mine = {j for j, t in tranche_of.items() if t == turn}
+            theirs = {j for j, t in tranche_of.items() if t != turn}
+            slots = max(1, n // tranches)
+            pool = [j for j in ranked if j not in theirs]
+            if rider_calendar:
+                # §5 attaches §2's rider to the B-arm. Kept behind its OWN flag rather than the
+                # banded `rider`: every A4 and A5 calendar cell in the ledger ran without it, and
+                # a default that reached back into this path would silently re-price all of them.
+                want, carried = [], list(theirs)
+                for j in pool:
+                    if len(want) >= slots:
+                        break
+                    ok, why = rider_ok(i, carried + want + [j], adj, floor=rider_bets)
+                    if not ok:
+                        rider_blocks[why] = rider_blocks.get(why, 0) + 1
+                        continue
+                    want.append(j)
+                want = pick_book(want, slots, sectors, sector_cap)
+            else:
+                want = pick_book(pool, slots, sectors, sector_cap)
             wanted = set(want)
-            # sell what fell out of the book, and the park, then buy the new book
+            for j in want:
+                tranche_of[j] = turn
+            # sell what fell out of THIS tranche, and the park, then buy its new book. A name the
+            # other tranche is carrying is never sold here and never re-bought here — it belongs
+            # to a book that is not being rebalanced today.
             for j in list(held):
-                if j not in wanted:
+                if j not in wanted and (tranches == 1 or j in mine):
                     sell(i, j, held[j], "rebalance")
+                    tranche_of.pop(j, None)
             if park_qty > 0:
                 gross = park_qty * park_px[i]
                 cash += gross * (1 - spread_frac(1e9))
@@ -1141,7 +1217,10 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             # was therefore running about 0.77, and its drawdown is an understatement.
             nav = cash + sum(q * (price(i, j) or 0.0) for j, q in held.items())
             eff_sleeve = sleeve * (vol_scalar(navs, float(vol_target)) if vol_target else 1.0)
-            per_name = nav * eff_sleeve / max(len(want), 1) if want else 0.0
+            # ... and the active tranche funds its OWN share of the account, not the whole of it.
+            # At tranches=2, n=12 this is nav/2 across 6 slots — the same per-name weight the
+            # single-tranche twelve-name book carries, which is what makes the two comparable.
+            per_name = nav * eff_sleeve / (tranches * max(len(want), 1)) if want else 0.0
             funded = 0
             for j in want:
                 if not np.isfinite(adj[i, j]):

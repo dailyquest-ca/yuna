@@ -188,6 +188,11 @@ PARENT = {
     "a6f0_n10": "a6_floor0", "a6f0_n15": "a6_floor0",
     "a6f0_atr": "a6_floor0", "a6f0_noeuph": "a6_floor0",
     "a6f0_path": "a6_floor0",
+    # WO-A6 §5's B-arm, reached from the existing 42-session bi-monthly one axis at a time:
+    # n, then the rider as specified, then the floor off, then the second tranche.
+    "s42n12_p0": "s42_p0", "s1cap_p0": "s42n12_p0", "s1_p0": "s1cap_p0", "b_p0": "s1_p0",
+    **{f"s1_p{p}": "s1_p0" for p in (7, 14, 21, 28, 35)},
+    **{f"b_p{p}": "b_p0" for p in (7, 14, 21, 28, 35)},
 }
 
 
@@ -1308,3 +1313,59 @@ def test_the_path_quality_gate_is_wired_to_something():
     assert "path quality" not in open_door["rider_blocks"]
     assert gated["rider_blocks"].get("path quality", 0) > 0, (
         "half the pool sits below its own median by construction — the gate must refuse someone")
+
+
+# ---------------------------------------------------------------------------------------------
+# WO-A6 §5's B-arm: two tranches on alternating bi-monthly dates.
+
+
+def _calendar_world(n=N_DAYS, k=24, seed=11):
+    rng = np.random.default_rng(seed)
+    mkt = np.cumsum(rng.normal(0.0004, 0.009, n))
+    paths = {f"C{i:02d}.US": 100.0 * np.exp(mkt + np.cumsum(rng.normal(0.00006 * i, 0.007, n)))
+             for i in range(k)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    return dates, tickers, adj, raw, dv, np.full(n, 50.0)
+
+
+CAL = dict(n=12, months=2, risk_adjusted=True, sleeve=1.0, start_nav=200_000.0)
+
+
+def test_two_tranches_turn_over_half_the_book_per_rebalance():
+    """§5: the point of tranching is that at any moment half the book was chosen two months ago
+    and half four. If a rebalance replaced everything, there would be no tranche."""
+    d, t, adj, raw, dv, park = _calendar_world()
+    one = cc.simulate(d, t, adj, raw, dv, park, tranches=1, **CAL)[1]
+    two = cc.simulate(d, t, adj, raw, dv, park, tranches=2, **CAL)[1]
+    sold_one = len([x for x in one if x.get("reason") == "rebalance"])
+    sold_two = len([x for x in two if x.get("reason") == "rebalance"])
+    assert sold_two < sold_one, (
+        f"two tranches must replace fewer names per date, got {sold_two} vs {sold_one}")
+
+
+def test_two_tranches_hold_the_same_number_of_names_as_one():
+    """A tranche splits the book; it does not shrink it. Twelve names in two sixes is still
+    twelve names, and the per-name weight has to match or the arms are not comparable."""
+    d, t, adj, raw, dv, park = _calendar_world()
+    for tr in (1, 2):
+        eq = cc.simulate(d, t, adj, raw, dv, park, tranches=tr, **CAL)[0]
+        settled = [row for row in eq[len(eq) // 2:]]
+        counts = [npos for _, _, _, _, npos in settled]
+        assert max(counts) <= CAL["n"], f"tranches={tr} overfilled the book to {max(counts)}"
+        assert np.median(counts) >= CAL["n"] - 2, (
+            f"tranches={tr} held a median of {np.median(counts)} names, not ~{CAL['n']}")
+
+
+def test_a_tranche_never_sells_what_the_other_tranche_is_holding():
+    """The failure mode this guards is a name bought by tranche A being sold by tranche B's
+    rebalance because it no longer ranks — which would collapse the two books back into one."""
+    d, t, adj, raw, dv, park = _calendar_world()
+    trades = cc.simulate(d, t, adj, raw, dv, park, tranches=2, **CAL)[1]
+    by_date = {}
+    for x in trades:
+        if x.get("reason") == "rebalance":
+            by_date.setdefault(x["exit_date"], []).append(x["ticker"])
+    assert by_date, "nothing was ever rebalanced out"
+    worst = max(len(v) for v in by_date.values())
+    assert worst <= CAL["n"] // 2, (
+        f"one date sold {worst} names — a tranche can only ever sell its own {CAL['n'] // 2}")
