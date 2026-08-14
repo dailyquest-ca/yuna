@@ -204,6 +204,8 @@ PARENT = {
     # WO-A8's stabilisers, one axis each off the five-name centre.
     "w5_noeuph": "w10_n5", "w5_door": "w10_n5", "w5_vt40": "w10_n5",
     "w5_vt55": "w10_n5", "w5_notrail": "w10_n5", "w5_init15": "w10_n5",
+    # WO-A8 §4's execution-lag falsifier, the one the calendar path never had.
+    "w5_nt_lag1": "w5_notrail", "w5_nt_lag2": "w5_notrail", "w5_c_lag1": "w10_n5",
 }
 
 
@@ -1441,3 +1443,20 @@ def test_the_base_gate_is_wired_and_refuses_names_without_a_valid_base():
     assert "no valid base" not in open_door[3]["rider_blocks"], "base_gate=False must not consult it"
     bought_gated = {t["ticker"] for t in gated[1] if "entry_date" in t}
     assert "GOOD.US" in bought_gated, "the name making new highs has a valid base and must pass"
+
+
+def test_rank_lag_reaches_the_calendar_path_and_actually_lags_it():
+    """`rank_lag` was wired to the banded door ONLY, so no calendar cell in the ledger had ever
+    been asked whether its result survives being read a session late — and the calendar path is
+    where it matters most, because it ranks on bar i and trades at bar i's close.
+
+    A knob that silently did nothing on this path would have reported every calendar arm as
+    lag-robust while never lagging anything."""
+    d, t, adj, raw, dv, park = _calendar_world()
+    kw = dict(CAL, every_sessions=5)
+    base = cc.simulate(d, t, adj, raw, dv, park, rank_lag=0, **kw)
+    lagged = cc.simulate(d, t, adj, raw, dv, park, rank_lag=3, **kw)
+    same = [(x["ticker"], x["entry_date"]) for x in base[1] if "entry_date" in x]
+    moved = [(x["ticker"], x["entry_date"]) for x in lagged[1] if "entry_date" in x]
+    assert same != moved, "rank_lag changed nothing on the calendar path — it is not wired"
+    assert abs(base[0][-1][1] - lagged[0][-1][1]) > 1.0, "the equity path must differ too"

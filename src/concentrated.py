@@ -589,6 +589,22 @@ CELLS = {
     "w5_init15":  dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                        trail=True, next_open=True, every_sessions=1, tranches=5,
                        trail_cfg=dict(TRAIL_DEFAULTS, initial=0.15)),
+    # ---- WO-A8 §4. `w5_notrail` returned 43.91% and Zak asked, correctly, what might be
+    # inflating it. Two asymmetries were found and both are tested here.
+    #
+    # The rank is computed from bars <= i and the book trades at `adj[i]` — the SAME close. That is
+    # a one-bar advantage no one can take, and it scales with clock speed. Worse, it is not applied
+    # evenly: 47% of the CENTRE's exits are trail stops filled at the next OPEN, genuinely lagged,
+    # while 100% of `w5_notrail`'s exits are rebalances at the deciding close. **Removing the stop
+    # removed the only conservatively-filled exits in the model**, so part of its margin may be
+    # execution rather than strategy. The lag pairs below price exactly that.
+    "w5_nt_lag1": dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, rank_lag=1),
+    "w5_nt_lag2": dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, rank_lag=2),
+    # the centre carried through the same lag, so the COMPARISON stays honest even if both fall.
+    "w5_c_lag1":  dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=True, next_open=True, every_sessions=1, tranches=5, rank_lag=1),
 }
 
 
@@ -1244,7 +1260,21 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                     park_all(i)
         if i in rebals and np.isfinite(park_px[i]) and not gated_off:
             queued.clear()
-            ranked = rank_at(i, adj, raw, dv, risk_adjusted=risk_adjusted,
+            # WO-A8 §4: the rank-lag falsifier, which the CALENDAR path has never had — `rank_lag`
+            # was wired to the banded door only, so no calendar cell in the ledger has ever been
+            # asked this question.
+            #
+            # It matters most exactly here. `rank_at(i)` reads bar i (the volatility denominator,
+            # the ADDV filter and the price floor all include today) and the book then trades at
+            # `adj[i]`, the same session's close. You cannot do that: you need the close to compute
+            # the rank, so the earliest you can act is the next session. Every calendar arm carries
+            # that one-bar advantage, and it compounds with clock speed — twice a year for the
+            # semi-annual book, 252 times a year for this one.
+            #
+            # `rank_lag=1` is the honest version: decide on data through i-1, execute at i's close.
+            # Only the OBSERVATION moves; sizing and fills stay at i.
+            obs_i = max(warmup, i - int(rank_lag))
+            ranked = rank_at(obs_i, adj, raw, dv, risk_adjusted=risk_adjusted,
                              top_by_addv=top_by_addv)
             # ---- WO-A6 §5's B-arm. With `tranches` > 1 the book is split into equal sub-books
             # that rebalance on ALTERNATING dates, so at any moment half the book was chosen two
@@ -1273,7 +1303,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             # WO-A6's `base_state` as the base test. A name that stopped out and has not climbed
             # back to a valid base is refused; a name that has is bought with no delay at all.
             if base_gate:
-                gated = [j for j in pool if base_state(i, j, adj)]
+                gated = [j for j in pool if base_state(obs_i, j, adj)]
                 rider_blocks["no valid base"] = (rider_blocks.get("no valid base", 0)
                                                  + len(pool) - len(gated))
                 pool = gated
