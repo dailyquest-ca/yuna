@@ -336,6 +336,33 @@ CELLS = {
                     trail=True, next_open=True, every_sessions=42, offset=28),
     "s42_p35": dict(n=8, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                     trail=True, next_open=True, every_sessions=42, offset=35),
+    # ---- the same test on the monthly clock, because the bi-monthly one failed and the earlier
+    # "monthly is stable" reading rests on the SAME mistake: `start_offset` drops early
+    # rebalances while leaving the calendar phase untouched, so it measured start-date
+    # sensitivity and was reported as phase stability. A 21-session clock carries 21 real phases.
+    "s21_p0":  dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, every_sessions=21),
+    "s21_p3":  dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, every_sessions=21, offset=3),
+    "s21_p7":  dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, every_sessions=21, offset=7),
+    "s21_p10": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, every_sessions=21, offset=10),
+    "s21_p14": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, every_sessions=21, offset=14),
+    "s21_p17": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, every_sessions=21, offset=17),
+    # and weekly, where FIVE offsets exhaust the phase space entirely
+    "s5_p0": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                  trail=True, next_open=True, every_sessions=5),
+    "s5_p1": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                  trail=True, next_open=True, every_sessions=5, offset=1),
+    "s5_p2": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                  trail=True, next_open=True, every_sessions=5, offset=2),
+    "s5_p3": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                  trail=True, next_open=True, every_sessions=5, offset=3),
+    "s5_p4": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                  trail=True, next_open=True, every_sessions=5, offset=4),
 }
 
 
