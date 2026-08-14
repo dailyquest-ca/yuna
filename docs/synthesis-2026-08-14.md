@@ -554,7 +554,28 @@ standing should exist without being priced. It gets run if A6 is abandoned, or o
 
 ## 12 · Where this leaves a V1
 
-**Standing recommendation: hold SPMO — with the best candidate this programme has produced sitting
+### Zak's rulings, 2026-08-14 — these override what follows
+
+Four decisions were taken on the questions this document raised, and they change the frame rather
+than the measurements. Full text in [`docs/wo-a7-2026-08-14.md`](wo-a7-2026-08-14.md) §0.
+
+1. **Sleeve is 100%.** The park is a residual — unutilised cash — not an allocation. The §2
+   effective-bets floor is **withdrawn**: it was measured unreachable at any N, and the
+   concentration it was meant to prevent is now an accepted, explicit position.
+2. **The 2-trades-per-week flag is cleared** at 2.03. Turnover is a reporting line, not a bar.
+3. **Deployment goes ahead on the `unproven` verdict** — a start-low slice, with
+   `docs/yuna_plan.md` amended first. **This retires the deflated Sharpe as a gate.** It cannot be
+   met on 2017–2026 at any trial count and the backfill that would move it is declined. The DSR is
+   still computed and still reported; it no longer decides. **No arm below is "proven" — a bar was
+   removed, which is not the same as a bar being cleared.**
+4. **Only work that could confirm or find a 30%+ return gets run.** That retired the bi-monthly
+   B-arm — its own phase mean is 20.58%, below the ETF, and tranching collects a mean rather than a
+   maximum — and opened WO-A7 on the weekly clock instead.
+
+The recommendation below stands as the research conclusion. Ruling 3 is a decision to act ahead of
+it, taken with the gap stated.
+
+**Research conclusion: hold SPMO — with the best candidate this programme has produced sitting
 behind it, and known to be weaker than its headline.**
 
 SPMO returned 21.12% on this window with a −31.0% expected drawdown and a Sharpe of 0.987, and
