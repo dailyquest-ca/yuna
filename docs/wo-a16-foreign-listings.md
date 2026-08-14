@@ -153,13 +153,85 @@ Anything from 0.99 down to 0.97 separates the two populations cleanly. The rungs
 1.00 also ejects a real name for a single trading halt, and that cost is exactly what needs pricing
 before a threshold becomes law.
 
-*Results appended when the run lands.*
+### 5.1 Results — runs 485–490
 
-## 6. What is still open
+| cell | floor | CAGR | max DD | end NAV | trades | foreign trades | `BMNR.US` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `b5_12_3` | — | 15.4948% | −80.59% | $1,683,440 | 974 | 21 | 14 |
+| `b5_12_3_p90` | 0.90 | 16.1828% | −80.98% | $1,891,281 | 1,004 | **23** | 12 |
+| `b5_12_3_p95` | 0.95 | 16.6215% | −79.21% | $2,036,308 | 995 | **12** | 0 |
+| `b5_12_3_p98` | 0.98 | 16.7206% | −78.30% | $2,070,515 | 986 | **0** | 0 |
+| `b5_12_3_p99` | 0.99 | 17.6285% | −77.64% | $2,410,154 | 977 | **0** | 0 |
+| `b5_12_3_p100` | 1.00 | 18.8985% | −77.35% | $2,974,836 | 961 | **0** | 0 |
+
+The control reproduced run 484 exactly — 15.4948%, −80.5949%, $1,683,440, 974 trades — on a third
+dispatch with the new code in the file. The gate is inert when unset on the real tape, not merely
+on a fixture.
+
+**Only p98 and above do the job.** p95 still trades foreign lines twelve times, and p90 trades them
+**twenty-three** times, three more than the ungated book: a partial gate reroutes the book into them
+rather than out of them. A threshold that half-separates the populations is not a half-fix.
+
+### 5.2 The performance gain is two episodes, and must not be quoted as the benefit
+
+CAGR rises monotonically as the gate tightens, and drawdown falls. That surface is clean enough to
+distrust on sight, and this repository's own rule is that **a backtest improving sharply after a
+change to data handling is a look-ahead bug until proven otherwise.**
+
+It is not look-ahead — the gate reads `dv` over the window ending at the observation bar, the same
+window the existing `bars` count uses, and nothing after it. But the gain is not general either.
+Splitting the twenty years at the two points where the curves separate, ungated against p100:
+
+| period | years | ungated | p100 | delta |
+| --- | ---: | ---: | ---: | ---: |
+| 2007-01-05 → 2008-12-31 | 1.99 | −47.0% | −35.7% | **+11.32** |
+| 2008-12-31 → 2024-12-31 | **16.00** | 20.6% | 20.8% | **+0.27** |
+| 2024-12-31 → 2026-08-13 | 1.62 | 96.7% | 115.7% | **+18.92** |
+| full record | 19.60 | 15.5% | 18.9% | +3.40 |
+
+**Over the sixteen-year middle of the record the gate is worth a quarter of a CAGR point.** The
+entire +3.40 comes from the crash at one end and the last eighteen months at the other.
+
+The recent episode is one stock. `BMNR.US` — BitMine Immersion, an OTC shell that uplisted in 2025
+— was bought fourteen times between 2025-10 and 2026-02 for **−$139,850**, momentum repeatedly
+buying a falling knife. Those trades are genuine: real prices, real volume, a real collapse. The
+gate excludes the name because it had not traded on most of the sessions in its formation window,
+which is a defensible statement about tradeability and an accidental one about that P&L.
+
+Direct removal accounts for about $120k. The run ends $1.29m higher, so most of the difference is
+capital freed early and compounded — which is exactly why a two-episode edge can look like a
+twenty-year one in a single CAGR number.
+
+## 6. Recommendation
+
+**Adopt the gate for correctness. Do not adopt it for performance, and do not quote the +3.40.**
+
+The reason to exclude `PLZL.US` is that it is a rouble-denominated MOEX line that cannot be bought
+in a US brokerage account in dollars — the strategy could never have made these trades. That
+argument stands whether the gate helps or hurts the backtest. The performance number is two
+episodes and will not repeat on demand.
+
+**Recommended threshold: 0.98.** It is the *loosest* rung that removes every foreign trade, which
+means it does the correctness job while tolerating five halted sessions in a formation year. p100
+scores best and is the wrong choice for that reason: it is the extreme end of a monotone surface,
+it ejects a real name for a single halt, and picking the maximum of a noisy grid is the error this
+programme has already made three times.
+
+What adopting it changes, honestly stated: the headline for V1 moves from **15.49% to 16.72%**, the
+drawdown from −80.59% to −78.30%, and every number in `wo-a15-v1-synthesis.md` becomes stale.
+
+## 7. What is still open
 
 - **The universe-wide count is unknown.** 372 names sit at a no-trade rate of 3%+ among those
   liquid enough to matter, but that set mixes foreign lines with thin ones and has not been
   resolved name by name. The gate does not require resolving it; an accurate census would.
+- **The gate has been priced on one cell only.** `b5_12_3` at 0.98 is what §6 recommends; whether
+  the band grid's chosen region survives the gate is not known, and the fifty-cell grid would have
+  to be re-run under it to say. A gate that changes the eligible universe can move which bands win.
+- **`BMNR.US` deserves its own look.** 2,662 bars back to 2005 with 1,049 at zero volume, a low
+  close of $0.0001 against a high of $135, under a company that uplisted in 2025. That is the
+  signature of a recycled ticker, and if the series splices two securities then its formation-window
+  momentum is wrong on both sides of this gate.
 - **`CNGL.US` is a separate defect.** It trades with real volume on US holidays, and its price
   jumps from 20.5 to 204.6 across the 2018 new year — a series with more than one security in it.
   Ticker recycling is not what this gate is for.
