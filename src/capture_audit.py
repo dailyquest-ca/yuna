@@ -114,6 +114,12 @@ def load_tape(cur, *, with_range=False, since=None, until=None):
     changes no result and cuts the query to the span actually read. Both default to None, which is
     the whole tape and the behaviour every existing caller gets.
     """
+    # WO-A10: the 2005 backfill took `prices` from 8.9M rows to 11.6M and the UNBOUNDED read no
+    # longer fits inside the server's 120s `statement_timeout` — run 400 died here on the routine
+    # ten-year regime, which passes no window at all. The timeout is a runaway guard, not a
+    # correctness one, and a full-tape read that legitimately needs four minutes is not a runaway.
+    # Raised for this statement only; `set local` reverts when the transaction ends.
+    cur.execute("set local statement_timeout = '600s'")
     extra = ", p.high, p.low, p.open" if with_range else ""
     bounds, args = "", []
     if since:
