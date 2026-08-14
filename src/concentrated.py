@@ -85,8 +85,12 @@ import finding
 # own bars, and BENCH is VOO, whose first stored bar is **2016-08-12**. Left alone, a 2006 window
 # would silently produce an empty grid. SPY reaches 2003-08-18 and satisfies the same predicate the
 # original comment names: an index ETF prints on every real session and on no holiday.
-PARK_TICKER = os.environ.get("PARK", "SPMO.US")
-CALENDAR_TICKER = os.environ.get("CALENDAR", BENCH)
+# `or`, not the get() default: a workflow_dispatch input left blank arrives as PARK="" — set, and
+# empty — so the default never fires. That cost four dispatches. It failed loudly, which is the
+# only reason it cost dispatches and not a wrong number: the window guard below caught the empty
+# calendar. Every blank-means-default env read on this path takes the same shape.
+PARK_TICKER = os.environ.get("PARK", "").strip() or "SPMO.US"
+CALENDAR_TICKER = os.environ.get("CALENDAR", "").strip() or BENCH
 WINDOW_START = os.environ.get("START_DATE", "").strip()
 WINDOW_END = os.environ.get("END_DATE", "").strip()
 FORMATION = 252          # the twelve months the rank is measured over
@@ -649,6 +653,34 @@ CELLS = {
     "w5_g_5_40r": dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                        trail=False, next_open=True, every_sessions=1, tranches=5, gated=True,
                        latch=(5, 40), gate_rising=True),
+    # ---- WO-A10 §2, the bracket. The five cells above rank (1,10) first, and (1,10) sits at the
+    # SHORT end of the confirm_in ladder that was tested — 1, 10, 20, 20, 40 — so "best" and "the
+    # smallest asymmetry anyone tried" are the same cell. That is the peak-pick this programme has
+    # already been burned by twice: A6's centre scored best on seven rungs and turned out to be a
+    # spike, and the weekly centre only earned its adoption because four of seven neighbours beat
+    # it. A parameter is worth adopting when its NEIGHBOURS are also good. This ladder fills in
+    # 3, 5, 7, 14 and 20 around it at confirm_out=1, so the shape is visible rather than inferred.
+    "w5_g_1_3":   dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, gated=True,
+                       latch=(1, 3)),
+    "w5_g_1_5":   dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, gated=True,
+                       latch=(1, 5)),
+    "w5_g_1_7":   dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, gated=True,
+                       latch=(1, 7)),
+    "w5_g_1_14":  dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, gated=True,
+                       latch=(1, 14)),
+    "w5_g_1_20":  dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, gated=True,
+                       latch=(1, 20)),
+    # and `rising` at the short-out setting: (3,20) said the recovery proof was worth +1.03 points
+    # on its own. Whether it still pays when re-entry is already fast is a separate question, and
+    # it is the one that answers Zak's "proof of recovery" directly.
+    "w5_g_1_10r": dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, gated=True,
+                       latch=(1, 10), gate_rising=True),
 }
 
 

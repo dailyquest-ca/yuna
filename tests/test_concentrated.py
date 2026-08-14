@@ -209,6 +209,10 @@ PARENT = {
     # WO-A10's regime latch, one axis at a time off the no-trail arm.
     "w5_g_plain": "w5_notrail", "w5_g_1_10": "w5_g_plain",
     "w5_g_3_20": "w5_g_1_10", "w5_g_3_20r": "w5_g_3_20", "w5_g_5_40r": "w5_g_3_20r",
+    # WO-A10 §2's bracket: each rung is the latch alone off the ungated gate, so the ladder is
+    # comparable rung to rung; `rising` is its own axis off the rung it modifies.
+    **{f"w5_g_1_{c}": "w5_g_plain" for c in (3, 5, 7, 14, 20)},
+    "w5_g_1_10r": "w5_g_1_10",
 }
 
 
@@ -1472,6 +1476,30 @@ def test_the_window_and_park_defaults_reproduce_the_ten_year_regime():
     assert cc.PARK_TICKER == "SPMO.US"
     assert cc.CALENDAR_TICKER == cc.BENCH
     assert cc.WINDOW_START == "" and cc.WINDOW_END == ""
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_park_or_calendar_input_falls_back_to_the_default(monkeypatch, blank):
+    """`workflow_dispatch` inputs left blank arrive as the EMPTY STRING, not as unset, so
+    `os.environ.get("PARK", "SPMO.US")` returns "" and the documented default never fires. Four
+    dispatches died on `contains no session of ,` before this was caught. It failed loudly — the
+    window guard saw the empty calendar — which is the only reason it cost runs rather than a
+    silently mis-parked equity curve. The workflow's own help text says blank means the default;
+    this is the test that makes that true."""
+    import importlib
+    monkeypatch.setenv("PARK", blank)
+    monkeypatch.setenv("CALENDAR", blank)
+    monkeypatch.setenv("START_DATE", blank)
+    monkeypatch.setenv("END_DATE", blank)
+    try:
+        reloaded = importlib.reload(cc)
+        assert reloaded.PARK_TICKER == "SPMO.US"
+        assert reloaded.CALENDAR_TICKER == reloaded.BENCH
+        assert reloaded.WINDOW_START == "" and reloaded.WINDOW_END == ""
+    finally:
+        for k in ("PARK", "CALENDAR", "START_DATE", "END_DATE"):
+            monkeypatch.delenv(k, raising=False)
+        importlib.reload(cc)
 
 
 def test_an_empty_window_raises_rather_than_producing_an_empty_grid():
