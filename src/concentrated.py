@@ -295,6 +295,27 @@ CELLS = {
                   trail=True, next_open=True, start_offset=2),
     "bi_s3": dict(n=8, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                   trail=True, next_open=True, start_offset=3),
+    # ---- WO-A7 extension: past monthly. Calendar months bottom out at 21 sessions, so the
+    # frequency axis continues in SESSIONS. Zak: *"can you test... even more often? Like...
+    # daily?"* The curve has already turned once — bi-monthly (33.37% mean) edges monthly
+    # (32.79%) — so this is measuring where cost and whipsaw overtake the sampling benefit, not
+    # extrapolating a trend. At every=1 there is no date left to be lucky about.
+    "fq_d1":    dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=1),
+    "fq_d1_s1": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=1, start_offset=1),
+    "fq_w1":    dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=5),
+    "fq_w1_s1": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=5, start_offset=1),
+    "fq_w1_s2": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=5, start_offset=2),
+    "fq_f2":    dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=10),
+    "fq_f2_s1": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=10, start_offset=1),
+    "fq_f2_s2": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, every_sessions=10, start_offset=2),
 }
 
 
@@ -352,6 +373,19 @@ def build_grid(tape, calendar):
             op[i, j] = float(row[7]) * f if row[7] is not None else np.nan
             lo[i, j] = float(row[6]) * f if row[6] is not None else np.nan
     return dates, tickers, adj, raw, dv, op, lo
+
+
+def session_rebalances(dates, every, warmup, offset=0):
+    """Rebalance every `every` SESSIONS rather than on a month boundary.
+
+    Calendar months bottom out at monthly; this is how the frequency axis is pushed past it to
+    fortnightly, weekly and daily. `offset` shifts the starting session so the same
+    spread-across-arbitrary-choices test applies — at `every=1` there is nothing left to shift,
+    which is itself the point: a daily book has no date luck available to it at all.
+    """
+    if every < 1:
+        raise ValueError(f"a rebalance interval of {every} sessions is not a schedule")
+    return [i for i in range(warmup + offset, len(dates)) if (i - warmup - offset) % every == 0]
 
 
 def rebalance_dates(dates, months, warmup, offset=0):
@@ -555,7 +589,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              start_nav, top_by_addv=None, index_px=None, gate_every=21, trail=False,
              vol_target=None, trail_cfg=None, intraday=None, next_open=None,
              sectors=None, sector_cap=None, offset=0, entry_rule=None,
-             start_offset=0):
+             start_offset=0, every_sessions=None):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -574,7 +608,12 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     """
     warmup = FORMATION + 1
     warmup = warmup + int(start_offset * 21)      # WO-A6: shift when trading begins, in months
-    rebals = set() if entry_rule else set(rebalance_dates(dates, months, warmup, offset))
+    if entry_rule:
+        rebals = set()
+    elif every_sessions:
+        rebals = set(session_rebalances(dates, int(every_sessions), warmup, offset))
+    else:
+        rebals = set(rebalance_dates(dates, months, warmup, offset))
     held = {}                       # ticker index -> shares
     state = {}                      # ticker index -> {entry, hi, stop, armed} for the §3.2 trail
     last_px = {}                    # ticker index -> the most recent price it actually printed

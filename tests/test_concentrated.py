@@ -167,6 +167,9 @@ PARENT = {
     "mo_s1": "clk_monthly", "mo_s2": "clk_monthly", "mo_s3": "clk_monthly",
     "mo_s4": "clk_monthly",
     "bi_s1": "clk_bimonthly", "bi_s2": "clk_bimonthly", "bi_s3": "clk_bimonthly",
+    "fq_d1": "clk_monthly", "fq_d1_s1": "fq_d1",
+    "fq_w1": "fq_d1", "fq_w1_s1": "fq_w1", "fq_w1_s2": "fq_w1",
+    "fq_f2": "fq_d1", "fq_f2_s1": "fq_f2", "fq_f2_s2": "fq_f2",
 }
 
 
@@ -869,3 +872,47 @@ def test_the_sector_cap_counts_names_already_held():
         secs[k] = v
     take = cc.pick_book(ranked, 2, secs, 0.70, held_sectors={"Tech": 5})
     assert all(secs[j] != "Tech" for j in take), "Tech is already full and must be skipped"
+
+
+# ------------------------------------------------- the frequency axis, past calendar months
+
+def test_a_session_schedule_hits_every_nth_session():
+    dates = sessions(60)
+    assert cc.session_rebalances(dates, 1, 0) == list(range(60)), "daily is every session"
+    assert cc.session_rebalances(dates, 5, 0)[:4] == [0, 5, 10, 15]
+    assert cc.session_rebalances(dates, 10, 10)[:3] == [10, 20, 30], "nothing before the warmup"
+
+
+def test_the_session_offset_shifts_the_whole_schedule():
+    dates = sessions(60)
+    assert cc.session_rebalances(dates, 5, 0, offset=2)[:3] == [2, 7, 12]
+
+
+def test_a_daily_schedule_has_no_offset_left_to_shift():
+    """At every=1 every session is a rebalance, so the only thing an offset can do is start a day
+    later. A daily book has no date luck available to it — that is the point of measuring it."""
+    dates = sessions(60)
+    a = cc.session_rebalances(dates, 1, 0, offset=0)
+    b = cc.session_rebalances(dates, 1, 0, offset=1)
+    assert a[1:] == b, "shifting a daily schedule can only drop its first session"
+
+
+def test_a_zero_interval_is_not_a_schedule():
+    with pytest.raises(ValueError, match="not a schedule"):
+        cc.session_rebalances(sessions(10), 0, 0)
+
+
+def test_daily_rebalancing_costs_more_than_monthly_on_the_same_tape():
+    """The mechanism that decides this axis: turnover. Whatever daily does to return, it cannot
+    do it for free, and a run where it did would mean the spread curve was not being charged."""
+    n = N_DAYS
+    rng = np.random.default_rng(11)
+    paths = {f"N{i:02d}.US": 100.0 * np.exp(np.cumsum(rng.normal(0.0005, 0.02, n)))
+             for i in range(12)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    kw = dict(n=3, months=1, risk_adjusted=False, sleeve=1.0, start_nav=200_000.0, trail=True)
+    daily = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0),
+                        every_sessions=1, **kw)[2]
+    monthly = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0),
+                          every_sessions=21, **kw)[2]
+    assert daily > monthly, f"daily costs ${daily:,.0f} against monthly's ${monthly:,.0f}"
