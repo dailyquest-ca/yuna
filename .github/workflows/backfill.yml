@@ -27,6 +27,12 @@ on:
       wal_ceiling_mb:
         description: 'pause when pg_wal passes this; the 2026-08-03 outage was a WAL burst'
         default: '2000'
+      probe_from:
+        description: 'WO-A9: screen the delisted census to names ever liquid in this window, via quarterly bulk-EOD probes. Blank = fetch all 32,611 and screen each from its own history.'
+        default: ''
+      probe_to:
+        description: 'WO-A9: the other end of the liquidity probe window.'
+        default: ''
       delisted_only:
         description: 'target the delisted census instead of L0 — the fundamentals half of the survivorship fix'
         default: 'false'
@@ -65,6 +71,8 @@ jobs:
           WAL_CEILING_MB: ${{ inputs.wal_ceiling_mb || '2000' }}
           RESWEEP: ${{ inputs.resweep || 'false' }}
           DELISTED_ONLY: ${{ inputs.delisted_only || 'false' }}
+          PROBE_FROM: ${{ inputs.probe_from }}
+          PROBE_TO: ${{ inputs.probe_to }}
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py backfill /tmp/job.out

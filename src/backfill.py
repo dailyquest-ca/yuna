@@ -49,6 +49,10 @@ WAL_CEILING = int(os.environ.get("WAL_CEILING_MB", "1500")) * 1024 * 1024
 WAL_MAX_WAIT = int(os.environ.get("WAL_MAX_WAIT_S", "180"))
 RESWEEP = os.environ.get("RESWEEP", "false").lower() in ("1", "true", "yes")
 DELISTED_ONLY = os.environ.get("DELISTED_ONLY", "false").lower() in ("1", "true", "yes")
+# WO-A9: the window the delisted census is screened FOR, quarterly-probed. Blank keeps the original
+# behaviour — fetch every name in the census and screen it from its own history.
+PROBE_FROM = os.environ.get("PROBE_FROM", "").strip()
+PROBE_TO = os.environ.get("PROBE_TO", "").strip()
 
 
 def targets(cur, since=None):
@@ -172,6 +176,76 @@ def census_delisted(conn, hb, exchange="US"):
     return out
 
 
+def probe_dates(lo, hi, every_days=89):
+    """Roughly-quarterly probes across the window, snapped off weekends.
+
+    `every_days` is deliberately NOT a multiple of seven. At 91 — the obvious "13 weeks" — every
+    probe lands on the same weekday as the start, and 2006-01-01 is a Sunday: all 34 probes would
+    have queried a day the market was shut and the union would have come back empty, silently.
+    89 drifts the weekday, and the weekend snap catches the rest. A probe that still lands on a
+    holiday returns nothing and is visible as a zero in the heartbeat's `probe` map.
+    """
+    a, b = dt.date.fromisoformat(lo), dt.date.fromisoformat(hi)
+    out, d = [], a
+    while d <= b:
+        s = d + dt.timedelta(days=(7 - d.weekday()) if d.weekday() >= 5 else 0)
+        if s <= b and (not out or s != out[-1]):
+            out.append(s)
+        d += dt.timedelta(days=every_days)
+    if out and out[-1] != b:
+        last = b - dt.timedelta(days=max(0, b.weekday() - 4))
+        if last != out[-1]:
+            out.append(last)
+    return out
+
+
+def liquid_in_window(hb, lo, hi, min_dollar=10_000_000.0, min_price=5.0):
+    """Which tickers were ever liquid enough for L0 between `lo` and `hi` — from BULK bars.
+
+    The delisted census is the whole graveyard — **32,611 US common stocks**, most of them dead
+    penny listings from decades before this window. Fetching each one's history to discard 97% of
+    them costs the better part of a day, and because only the KEPT names are written to `universe`
+    a re-run repeats nearly all of it: the pass is not meaningfully resumable at that scale. Run
+    388 proved it, managing 88 names in three minutes before the WAL guard stopped it.
+
+    The bulk endpoint answers the same question one date at a time instead of one name at a time.
+    `eod-bulk-last-day` returns every US ticker's close and volume for a single session — delisted
+    names included, because on that date they were still trading — so a quarterly probe across the
+    window costs ~33 calls and returns the union of everything that ever cleared the floor.
+
+    **The approximation is stated rather than hidden:** a name liquid only BETWEEN two probes is
+    missed. At a $10M floor that is a name whose entire liquid life was under a quarter, which the
+    210-bar minimum would have excluded from L0 anyway. Erring the other way — a name liquid on one
+    probe date and nowhere else — is harmless, since it is only admitted to the fetch list and its
+    own history is still screened by the caller.
+    """
+    keep = set()
+    for d in probe_dates(lo, hi):
+        try:
+            rows = get("eod-bulk-last-day/US", hb.calls, tries=2, timeout=240,
+                       date=d.isoformat())
+        except Exception as e:
+            hb.detail.setdefault("probe_errors", {})[d.isoformat()] = f"{type(e).__name__}: {e}"
+            continue
+        n = 0
+        for r in rows if isinstance(rows, list) else []:
+            code, close, vol = r.get("code"), r.get("close"), r.get("volume")
+            if not code or close is None or vol is None:
+                continue
+            try:
+                c, v = float(close), float(vol)
+            except (TypeError, ValueError):
+                continue
+            if c >= min_price and c * v >= min_dollar:
+                keep.add(f"{code}.US")
+                n += 1
+        hb.detail.setdefault("probe", {})[d.isoformat()] = n
+    hb.detail["probe_union"] = len(keep)
+    print(f"  probe {lo}..{hi}: {len(keep)} names ever cleared "
+          f"${min_dollar:,.0f}/day at a probe date")
+    return keep
+
+
 def backfill_delisted(conn, hb, since, min_addv=10_000_000.0, min_price=5.0, min_bars=210):
     """Bars for the dead — but only for the dead that could ever have been L0.
 
@@ -191,6 +265,16 @@ def backfill_delisted(conn, hb, since, min_addv=10_000_000.0, min_price=5.0, min
         cur.execute("select ticker from universe")
         known = {r[0] for r in cur.fetchall()}
     todo = [(t, n, c) for t, n, c in census if t not in known]
+    # WO-A9: screen the graveyard to the window BEFORE spending a call per name. Without this the
+    # pass is 32,611 fetches to keep a few thousand, and since only the keepers are recorded a
+    # re-run repeats it. With it the fetch list is what could actually have been bought.
+    if PROBE_FROM and PROBE_TO:
+        liquid = liquid_in_window(hb, PROBE_FROM, PROBE_TO, min_addv, min_price)
+        before = len(todo)
+        todo = [e for e in todo if e[0] in liquid]
+        hb.detail.update(probe_window=f"{PROBE_FROM}..{PROBE_TO}",
+                         census_before_probe=before, census_after_probe=len(todo))
+        print(f"  census {before} -> {len(todo)} after the liquidity probe")
     afford = budget(hb, 1)
     if len(todo) > afford:
         hb.amber(f"quota allows {afford} of {len(todo)} delisted names today — re-run to continue")

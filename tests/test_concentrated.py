@@ -1477,3 +1477,20 @@ def test_an_empty_window_raises_rather_than_producing_an_empty_grid():
     calendar is exactly the class of defect that cost this repo runs 95-164. It must throw."""
     with pytest.raises(RuntimeError, match="no market calendar"):
         cc.build_grid([("REAL.US", dt.date(2024, 1, 2), 10.0, 10.0, 1e6)], set())
+
+
+def test_probe_dates_never_land_on_a_weekend_and_spread_across_weekdays():
+    """WO-A9's liquidity probe queries a bulk end-of-day endpoint one DATE at a time. The obvious
+    quarterly step — 91 days — is exactly thirteen weeks, so every probe lands on the same weekday
+    as the start. 2006-01-01 is a Sunday: all 34 probes would have asked for a session the market
+    was shut, the union would have come back empty, and the census screen would have silently
+    dropped every delisted name instead of screening them."""
+    import importlib.util, datetime as _dt
+    src = open("src/backfill.py").read()
+    ns = {"dt": _dt}
+    exec(src[src.index("def probe_dates"):src.index("def liquid_in_window")], ns)
+    got = ns["probe_dates"]("2006-01-01", "2013-12-31")
+    assert len(got) > 20, "a quarterly probe over eight years needs enough samples to be a screen"
+    assert not [d for d in got if d.weekday() >= 5], "no probe may land on a weekend"
+    assert len({d.weekday() for d in got}) >= 3, "probes must not cluster on one weekday"
+    assert got == sorted(set(got)), "probes must be ordered and distinct"
