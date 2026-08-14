@@ -101,6 +101,18 @@ VOL_TARGET_WINDOW = 126
 # above a pivot; this is that with the base detection removed, and the same window A2 used.
 ENTRY_HIGH = 252
 
+# ---- WO-A6, the banded continuous book. Every constant here is the work order's own.
+A6_ENTRY_RANK = 15          # §1: a slot takes the highest-ranked name at rank <= 15
+A6_EXIT_RANK = 40           # §1: held until rank > 40 — between 15 and 40 flicker costs nothing
+A6_HIGH_WINDOW = 252        # §1 valid-base state: within 10% of the 252-session high close
+A6_HIGH_PROX = 0.10
+A6_SMA = 50                 # ... close > 50-day SMA, and that SMA rising over ten sessions
+A6_SMA_SLOPE = 10
+A6_RIDER_WINDOW = 126       # §2: §2.2's own correlation window
+A6_RIDER_BETS = 5.0         # §2: effective-bets floor at formation
+A6_RIDER_RHO = 0.70         # §2: pairwise correlation defining a cluster
+A6_RIDER_PER_CLUSTER = 2    # §2: at most two names from one cluster
+
 # The announced grid (WO-A4). One axis moves per cell against the centre `n12_semi`.
 CELLS = {
     # centre: twelve names, changed twice a year, risk-adjusted rank, whole account in the sleeve
@@ -361,6 +373,31 @@ CELLS = {
                   trail=True, next_open=True, every_sessions=5, offset=3),
     "s5_p4": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                   trail=True, next_open=True, every_sessions=5, offset=4),
+    # ================= WO-A6 (Zak, 2026-08-14) — the banded continuous book =================
+    # Observe every session; transact only on gates. No calendar anywhere in the rule.
+    "a6":       dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, entry_rule="banded"),
+    # §4 falsifier 1: five simulation-start offsets. Kill at a spread above 6 CAGR points.
+    "a6_s10":   dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, entry_rule="banded", start_offset=10 / 21),
+    "a6_s21":   dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, entry_rule="banded", start_offset=1),
+    "a6_s42":   dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, entry_rule="banded", start_offset=2),
+    "a6_s63":   dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, entry_rule="banded", start_offset=3),
+    # §4 falsifier 2 (added at Zak's approval, 2026-08-14): read the rank and the base state one
+    # session late while executing on the same day. A start offset only changes where the walk
+    # begins; this changes WHICH observation the rule acts on, every single session. A state-door
+    # that responds to a slow condition should barely notice. One that moves materially was
+    # riding a specific-day effect, which is the failure the start-offset test cannot see — and
+    # is exactly the axis mistaken for a phase test on the bi-monthly book.
+    "a6_lag1":  dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, entry_rule="banded", rank_lag=1),
+    "a6_lag2":  dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, entry_rule="banded", rank_lag=2),
+    "a6_lag5":  dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                     trail=True, next_open=True, entry_rule="banded", rank_lag=5),
 }
 
 
@@ -494,6 +531,114 @@ def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None):
     ok = np.isfinite(score)
     idx, score = idx[ok], score[ok]
     return [int(j) for j in idx[np.argsort(-score)]]
+
+
+def base_state(i, j, adj):
+    """WO-A6 §1's valid-base STATE — evaluable on any session, unlike a breakout event.
+
+    Three conditions, all the work order's: the close sits within 10% of the name's own
+    252-session high close, the close is above its 50-day SMA, and that SMA is higher than it was
+    ten sessions ago. Together they say "this name is near its highs and its trend is still
+    rising", which is a condition a nightly review can check — not a one-day aperture that admits
+    whoever happened to break out today. That aperture is what produced WO-A6(event-door)'s 1.54%.
+
+    All windows read bars <= i. Unknown is False: a door that cannot be evaluated stays shut.
+    """
+    if i < A6_HIGH_WINDOW or not np.isfinite(adj[i, j]):
+        return False
+    px = float(adj[i, j])
+    hi_w = adj[i - A6_HIGH_WINDOW + 1:i + 1, j]
+    hi_w = hi_w[np.isfinite(hi_w)]
+    if not len(hi_w) or px < hi_w.max() * (1.0 - A6_HIGH_PROX):
+        return False
+    sma_w = adj[i - A6_SMA + 1:i + 1, j]
+    sma_w = sma_w[np.isfinite(sma_w)]
+    if len(sma_w) < A6_SMA or px <= sma_w.mean():
+        return False
+    prev = adj[i - A6_SMA + 1 - A6_SMA_SLOPE:i + 1 - A6_SMA_SLOPE, j]
+    prev = prev[np.isfinite(prev)]
+    return bool(len(prev) >= A6_SMA and sma_w.mean() > prev.mean())
+
+
+def return_corr(i, idx, adj, window=A6_RIDER_WINDOW):
+    """Pairwise correlation of daily returns over the trailing window, for the names in `idx`.
+
+    Sessions where any name in the set did not print are dropped, so every pair is measured on
+    the same rows — a pairwise-complete matrix can fail to be positive semi-definite and would
+    make the effective-bets denominator meaningless.
+    """
+    w = adj[max(0, i - window):i + 1, idx]
+    if w.shape[0] < 3 or w.shape[1] == 0:
+        return None
+    rets = np.diff(w, axis=0) / w[:-1]
+    keep = np.isfinite(rets).all(axis=1)
+    rets = rets[keep]
+    if rets.shape[0] < 20 or (rets.std(axis=0) == 0).any():
+        return None
+    return np.corrcoef(rets, rowvar=False).reshape(len(idx), len(idx))
+
+
+def effective_bets(corr):
+    """§2.2's own formula, 1 / sum(wi wj rho_ij), equal weights."""
+    k = corr.shape[0]
+    w = np.full(k, 1.0 / k)
+    denom = float(w @ corr @ w)
+    return float("inf") if denom <= 0 else 1.0 / denom
+
+
+def clusters_at(corr, rho=A6_RIDER_RHO):
+    """Single-linkage clusters: a name joins if it correlates above `rho` with ANY member.
+
+    **The clustering method, pre-registered here because WO-A6 §2 requires one to be named.**
+    Single-linkage is the conservative choice for this purpose — it merges readily, so it CAPS
+    more aggressively than complete-linkage would, and a rider meant to prevent a 1.84-effective-
+    bet book should err toward calling things related rather than unrelated.
+    """
+    k = corr.shape[0]
+    parent = list(range(k))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for a in range(k):
+        for b in range(a + 1, k):
+            if corr[a, b] > rho:
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[rb] = ra
+    sizes = {}
+    for a in range(k):
+        r = find(a)
+        sizes[r] = sizes.get(r, 0) + 1
+    return sizes
+
+
+def rider_ok(i, book, adj):
+    """WO-A6 §2, checked at FORMATION only — it never forces an exit.
+
+    Two interpretation calls, both stated rather than buried:
+
+    * **The effective-bets floor binds only once the book could satisfy it.** A book of three
+      names cannot have five effective bets under any correlation structure, so a literal reading
+      would refuse every entry and the book would never fill at all. The floor applies from the
+      fifth name onward; below that only the cluster cap binds.
+    * **Unmeasurable correlation admits the name.** Too few shared sessions to compute a matrix
+      means the rider abstains rather than blocking, because the alternative is a liquidity-and-
+      history filter masquerading as a diversification rule. It is logged, not silent.
+    """
+    if len(book) <= 1:
+        return True, "single name"
+    corr = return_corr(i, list(book), adj)
+    if corr is None:
+        return True, "correlation unmeasurable — rider abstained"
+    if max(clusters_at(corr).values()) > A6_RIDER_PER_CLUSTER:
+        return False, "cluster cap"
+    if len(book) >= int(A6_RIDER_BETS) and effective_bets(corr) < A6_RIDER_BETS:
+        return False, "effective bets below floor"
+    return True, "ok"
 
 
 def at_new_high(i, j, adj, window=ENTRY_HIGH):
@@ -634,7 +779,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              start_nav, top_by_addv=None, index_px=None, gate_every=21, trail=False,
              vol_target=None, trail_cfg=None, intraday=None, next_open=None,
              sectors=None, sector_cap=None, offset=0, entry_rule=None,
-             start_offset=0, every_sessions=None):
+             start_offset=0, every_sessions=None, rank_lag=0):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -654,7 +799,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     warmup = FORMATION + 1
     warmup = warmup + int(start_offset * 21)      # WO-A6: shift when trading begins, in months
     if entry_rule:
-        rebals = set()
+        rebals = set()          # no calendar exists in either event mode
     elif every_sessions:
         rebals = set(session_rebalances(dates, int(every_sessions), warmup, offset))
     else:
@@ -665,7 +810,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     park_qty, cash = 0.0, start_nav
     equity, trades, costs = [], [], 0.0
     navs = []                       # the NAV path alone, for the volatility governor
-    stale_skips, empty_rebals = 0, []
+    stale_skips, empty_rebals, rider_blocks = 0, [], {}
 
     def price(i, j):
         """What the position is worth today: today's print, or the last one it made.
@@ -862,11 +1007,58 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             if not held:
                 empty_rebals.append(dates[i])
             park_all(i)
+        # ---- WO-A6 (banded): observe every session, transact only on gates. `rank_lag` is the
+        # second falsifier — it evaluates the rank and the base state on session i-lag while
+        # execution stays at i. The work order's §0 claims timing luck "dies by construction"
+        # here; a rule that genuinely responds to a slow state should barely notice being read a
+        # day late, and one that moves materially was riding a specific-day effect after all.
+        if entry_rule == "banded" and i >= warmup and np.isfinite(park_px[i]):
+            obs = max(warmup, i - int(rank_lag))
+            order = rank_at(obs, adj, raw, dv, risk_adjusted=risk_adjusted,
+                            top_by_addv=top_by_addv)
+            rank_of = {j: r for r, j in enumerate(order, start=1)}
+            # exit gate 2: the rank band. The trail below is gate 1 and runs unchanged.
+            for j in list(held):
+                if rank_of.get(j, 10 ** 9) > A6_EXIT_RANK and j not in queued:
+                    queued.append(j)
+            # entry gate: the state-door, highest qualifying rank first, rider on the RESULT
+            if len(held) < n:
+                nav_now = mark(i)
+                eff = sleeve * (vol_scalar(navs, float(vol_target)) if vol_target else 1.0)
+                per_name = nav_now * eff / n
+                for j in order[:A6_ENTRY_RANK]:
+                    if len(held) >= n:
+                        break
+                    if j in held or j in queued or not np.isfinite(adj[i, j]):
+                        continue
+                    if not base_state(obs, j, adj):
+                        continue
+                    ok, why = rider_ok(obs, list(held) + [j], adj)
+                    if not ok:
+                        rider_blocks[why] = rider_blocks.get(why, 0) + 1
+                        continue            # step DOWN the rank to the next qualifier
+                    px = float(adj[i, j])
+                    fee_frac = spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
+                    if cash < per_name * (1 + fee_frac):
+                        unpark(i, per_name * (1 + fee_frac) - cash)
+                    spend = min(per_name, cash / (1 + fee_frac))
+                    if spend <= 0:
+                        continue
+                    qty = spend / (px * (1 + fee_frac))
+                    held[j] = held.get(j, 0.0) + qty
+                    cash -= spend
+                    costs += spend * fee_frac / (1 + fee_frac)
+                    state[j] = dict(entry=px, hi=px, armed=False, entered=i,
+                                    stop=px * (1 - (trail_cfg or TRAIL_DEFAULTS)["initial"]))
+                    trades.append(dict(ticker=tickers[j], entry_date=dates[i], spend=spend,
+                                       price=px, qty=qty))
+                park_all(i)
+
         # ---- WO-A6: the door, checked every session. No calendar exists in this mode; a free
         # slot is filled by the highest-ranked name printing a new 252-session high, and a name
         # that stopped out cannot return until it has climbed back to one. That is the churn fix
         # and it costs no invented constant.
-        if entry_rule and len(held) < n and np.isfinite(park_px[i]) and i >= warmup:
+        if entry_rule == "new_high" and len(held) < n and np.isfinite(park_px[i]) and i >= warmup:
             ranked = [j for j in rank_at(i, adj, raw, dv, risk_adjusted=risk_adjusted,
                                          top_by_addv=top_by_addv) if j not in held]
             door = [j for j in ranked if at_new_high(i, j, adj)]
@@ -956,7 +1148,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             trades.append(dict(ticker=tickers[j], exit_date=dates[last], price=px_j,
                                qty=held[j], reason="open_at_end"))
     return equity, trades, costs, dict(stale_skips=stale_skips,
-                                       empty_rebalances=[d.isoformat() for d in empty_rebals])
+                                       empty_rebalances=[d.isoformat() for d in empty_rebals],
+                                       rider_blocks=rider_blocks)
 
 
 def pair_trades(trades, dates):

@@ -176,6 +176,8 @@ PARENT = {
     "s21_p0": "clk_monthly", "s21_p3": "s21_p0", "s21_p7": "s21_p0", "s21_p10": "s21_p0",
     "s21_p14": "s21_p0", "s21_p17": "s21_p0",
     "s5_p1": "fq_w1", "s5_p2": "fq_w1", "s5_p3": "fq_w1", "s5_p4": "fq_w1",
+    "a6": "lg12_trail_nextopen", "a6_s10": "a6", "a6_s21": "a6", "a6_s42": "a6", "a6_s63": "a6",
+    "a6_lag1": "a6", "a6_lag2": "a6", "a6_lag5": "a6",
 }
 
 
@@ -975,3 +977,118 @@ def test_a_fully_parked_book_reports_zero_deployed():
     eq = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), n=2, months=6,
                      risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)[0]
     assert all(row[3] == 0.0 and row[4] == 0 for row in eq)
+
+
+# ============================ WO-A6: the banded continuous book ============================
+
+def test_the_base_state_needs_all_three_conditions():
+    """Near its highs AND above its 50-day AND that 50-day rising. Any one alone is not a state."""
+    n = 400
+    rising = np.linspace(100.0, 200.0, n).reshape(-1, 1)
+    assert cc.base_state(n - 1, 0, rising)
+    # 25% off the high fails the proximity clause even though the trend is up
+    faded = np.concatenate([np.linspace(100.0, 200.0, n - 30),
+                            np.linspace(200.0, 150.0, 30)]).reshape(-1, 1)
+    assert not cc.base_state(n - 1, 0, faded)
+    # right at the highs but the 50-day is rolling over
+    rolling = np.concatenate([np.linspace(100.0, 200.0, n - 60),
+                              np.full(60, 199.0)]).reshape(-1, 1)
+    assert not cc.base_state(n - 1, 0, rolling), "a flat 50-day is not a rising one"
+
+
+def test_the_base_state_reads_no_future_bar():
+    n = 400
+    adj = np.linspace(100.0, 200.0, n).reshape(-1, 1)
+    a2 = adj.copy()
+    a2[300:] = 1.0
+    assert cc.base_state(280, 0, adj) == cc.base_state(280, 0, a2)
+
+
+def test_effective_bets_matches_the_plans_worked_example():
+    """§2.2 states it: four equal names at 0.85 correlation give 1.1 bets."""
+    c = np.full((4, 4), 0.85)
+    np.fill_diagonal(c, 1.0)
+    assert cc.effective_bets(c) == pytest.approx(1.1, abs=0.05)
+    assert cc.effective_bets(np.eye(6)) == pytest.approx(6.0), "independent names are n bets"
+
+
+def test_single_linkage_merges_through_a_chain():
+    """Pre-registered as single-linkage precisely because it merges readily — a rider meant to
+    stop a 1.84-bet book should err toward calling names related."""
+    c = np.eye(3)
+    c[0, 1] = c[1, 0] = 0.8
+    c[1, 2] = c[2, 1] = 0.8      # 0 and 2 are uncorrelated but chained through 1
+    assert max(cc.clusters_at(c).values()) == 3
+
+
+def test_the_rider_blocks_a_third_name_from_one_cluster():
+    n = 300
+    rng = np.random.default_rng(5)
+    base = rng.normal(0, 0.02, n)
+    adj = np.column_stack([100 * np.exp(np.cumsum(base + rng.normal(0, 0.002, n)))
+                           for _ in range(3)]                       # three near-identical names
+                          + [100 * np.exp(np.cumsum(rng.normal(0, 0.02, n)))])
+    ok, why = cc.rider_ok(n - 1, [0, 1], adj)
+    assert ok, "two from a cluster is allowed"
+    ok, why = cc.rider_ok(n - 1, [0, 1, 2], adj)
+    assert not ok and why == "cluster cap", f"three should be blocked, got {why}"
+
+
+def test_the_effective_bets_floor_only_binds_once_it_could_be_met():
+    """Stated interpretation: a three-name book cannot have five effective bets under any
+    correlation structure, so a literal floor would refuse every entry and the book would never
+    fill. Below five names only the cluster cap binds."""
+    n = 300
+    rng = np.random.default_rng(9)
+    adj = np.column_stack([100 * np.exp(np.cumsum(rng.normal(0, 0.02, n))) for _ in range(4)])
+    ok, _ = cc.rider_ok(n - 1, [0, 1, 2], adj)
+    assert ok, "four-name-or-fewer books are not held to a five-bet floor"
+
+
+def test_the_rider_abstains_rather_than_blocking_when_it_cannot_measure():
+    n = 300
+    adj = np.full((n, 2), np.nan)
+    adj[:, 0] = np.linspace(100, 200, n)
+    ok, why = cc.rider_ok(n - 1, [0, 1], adj)
+    assert ok and "unmeasurable" in why
+
+
+def test_the_rank_band_holds_through_flicker_and_sells_on_travel():
+    """The whole point of 15/40: a name drifting between them generates no trades at all."""
+    n = N_DAYS
+    # twelve climbers; one decays hard enough late to fall past rank 40 in a wide pool
+    paths = {f"N{i:02d}.US": 100.0 * np.exp(np.linspace(0, 0.9 - 0.01 * i, n)) for i in range(60)}
+    paths["FALLER.US"] = np.concatenate([100.0 * np.exp(np.linspace(0, 1.2, n - 260)),
+                                         100.0 * np.exp(1.2) * np.linspace(1.0, 0.45, 260)])
+    dates, tickers, adj, raw, dv = grid(paths)
+    trades = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), n=12, months=6,
+                         risk_adjusted=False, sleeve=1.0, start_nav=200_000.0,
+                         trail=True, entry_rule="banded")[1]
+    assert [t for t in trades if "entry_date" in t], "the door must open at all"
+    entries = {t["ticker"] for t in trades if "entry_date" in t}
+    assert "FALLER.US" in entries, "it was the strongest name for most of the window"
+
+
+def test_the_banded_book_never_exceeds_its_slot_count():
+    n = N_DAYS
+    paths = {f"N{i:02d}.US": 100.0 * np.exp(np.linspace(0, 0.9 - 0.005 * i, n)) for i in range(40)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    eq = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), n=12, months=6,
+                     risk_adjusted=False, sleeve=1.0, start_nav=200_000.0,
+                     trail=True, entry_rule="banded")[0]
+    assert max(row[4] for row in eq) <= 12
+
+
+def test_the_rank_lag_changes_which_observation_the_rule_acts_on():
+    """The second falsifier. A start offset only moves where the walk begins; this moves the
+    observation the rule reads, every session."""
+    n = N_DAYS
+    rng = np.random.default_rng(21)
+    paths = {f"N{i:02d}.US": 100.0 * np.exp(np.cumsum(rng.normal(0.0006, 0.02, n)))
+             for i in range(40)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    kw = dict(n=12, months=6, risk_adjusted=False, sleeve=1.0, start_nav=200_000.0,
+              trail=True, entry_rule="banded")
+    a = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), **kw)[0]
+    b = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), rank_lag=5, **kw)[0]
+    assert a[-1][1] != b[-1][1], "a five-session lag must produce a different book"
