@@ -215,7 +215,8 @@ PARENT = {
     "w5_g_1_10r": "w5_g_1_10",
     # WO-A13's band arm, all one hop off its own root.
     **{c: "b5_8_3" for c in ("b5_6_3", "b5_10_3", "b5_12_3", "b5_8_1", "b5_8_5",
-                             "b5_nodisp", "b5_close", "b5_door")},
+                             "b5_nodisp", "b5_close", "b5_door",
+                             "b5_15_3", "b5_20_3", "b5_25_3", "b5_30_3")},
     "b5_5_5": "b5_8_5",
 }
 
@@ -1691,3 +1692,25 @@ def test_an_order_that_finds_no_print_is_cancelled_rather_than_carried():
                                  displace=True, next_open=opens, fill_at_open=True, **BAND)
     assert not [x for x in trades if "entry_date" in x], "no print means no fill, ever"
     assert max(row[4] for row in eq) == 0, "and the book stays empty rather than half-filled"
+
+
+def test_the_book_never_holds_more_names_than_its_slot_count():
+    """A queued name's slot is free only when the BUY is deferred too.
+
+    With `fill_at_open` the sells drain immediately before the buys at tomorrow's open, so a
+    queued slot really is available to the same batch. With an immediate fill the sale has not
+    happened yet, and treating the slot as free buys a sixth position tonight out of whatever cash
+    was idle, then sells the fifth tomorrow. Found by diagnostic: `b5_close` came back averaging
+    5.25 positions on a five-name book and 87% exposure against every other cell's 98%.
+    """
+    d, t, adj, raw, dv, park = _ladder_world()
+    # a churning ladder so names really do cross the band and get queued
+    rng = np.random.default_rng(11)
+    adj = adj * np.exp(np.cumsum(rng.normal(0, 0.02, adj.shape), axis=0))
+    raw = adj.copy()
+    opens = adj * 1.01
+    for deferred in (False, True):
+        eq = cc.simulate(d, t, adj, raw, dv, park, exit_rank=8, entry_rank=3, displace=True,
+                         next_open=opens, fill_at_open=deferred, **BAND)[0]
+        worst = max(row[4] for row in eq)
+        assert worst <= 5, f"fill_at_open={deferred} held {worst} names in a five-slot book"

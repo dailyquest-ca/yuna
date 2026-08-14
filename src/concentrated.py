@@ -750,6 +750,28 @@ CELLS = {
                       trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
                       displace=True, base_door=True, rider=False,
                       exit_rank=8, entry_rank=3),
+    # ---- WO-A13 §2, the bracket. `b5_12_3` topped BOTH windows and 12 is the loosest band the
+    # first ladder tried, so "best" and "the widest setting anyone tested" are again the same cell.
+    # That is the peak-pick this programme has now been caught by three times — A6's centre, the
+    # regime latch's confirm_in, and this. The axis has a natural end: as the band widens the rule
+    # converges on WO-A6's original book, which held until rank 40. These four say whether 12 sits
+    # on a ridge or on a slope.
+    "b5_15_3":   dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=15, entry_rank=3),
+    "b5_20_3":   dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=20, entry_rank=3),
+    "b5_25_3":   dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=25, entry_rank=3),
+    "b5_30_3":   dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=30, entry_rank=3),
 }
 
 
@@ -1698,8 +1720,18 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             # rotate most of the book, which is the daily-rebalance behaviour the band exists to
             # avoid. The strict test means a book already holding the top `n` names never trades.
             entry_band = A6_ENTRY_RANK if entry_rank is None else int(entry_rank)
-            if displace and len([j for j in held if j not in queued]) >= n:
-                live = [j for j in held if j not in queued]
+            # A queued name's slot counts as FREE only when the buy is deferred too. With
+            # `fill_at_open` the sells drain immediately before the buys at tomorrow's open, so the
+            # slot really is available to the same batch. With an immediate fill the sale has not
+            # happened yet — treating the slot as free buys a SIXTH position tonight out of
+            # whatever cash happened to be idle, and sells the fifth tomorrow morning.
+            #
+            # Found by diagnostic rather than by reading: `b5_close` came back averaging 5.25
+            # positions on a five-name book and 87% exposure against every other cell's 98%, which
+            # made it useless as the control for the execution comparison it exists to provide.
+            freed = set(queued) if fill_at_open else set()
+            if displace and len([j for j in held if j not in freed]) >= n:
+                live = [j for j in held if j not in freed]
                 worst = max(live, key=lambda j: rank_of.get(j, 10 ** 9))
                 worst_rank = rank_of.get(worst, 10 ** 9)
                 for j in order[:entry_band]:
@@ -1719,7 +1751,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             # The exit band already states what "good enough to hold" means, so it is the right
             # pool for an empty slot and it costs no new constant.
             fill_band = max(band, n)
-            committed = len([j for j in held if j not in queued]) + len(pending_buys)
+            committed = len([j for j in held if j not in freed]) + len(pending_buys)
             if committed < n:
                 nav_now = mark(i)
                 eff = sleeve * (vol_scalar(navs, float(vol_target)) if vol_target else 1.0)
