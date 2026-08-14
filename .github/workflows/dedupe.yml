@@ -1,0 +1,43 @@
+name: dedupe
+# Dispatch-only tooling (§4.2): the duplicate-listing scan.
+#
+# This is a job rather than a migration because three migrations have now attacked this defect and
+# each one baked its evidence in at the moment it was written — sampled dates from 2018-2025, a
+# threshold calibrated against the tape as it then stood. Both went stale the moment the backfill
+# extended the census to 2005 and re-fetched the series the thresholds had been read from.
+#
+# It reports by default and writes only when `apply` is true, because an exclusion removes a name
+# from every consumer of the universe and the run that proposes one should be readable first.
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'write the exclusions (default: report only)'
+        default: 'false'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dedupe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/dedupe_scan.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SCAN_APPLY: ${{ inputs.apply || 'false' }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py dedupe /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
