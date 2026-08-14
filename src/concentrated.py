@@ -934,7 +934,13 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                     queued.append(j)
         v = mark(i)
         navs.append(v)
-        equity.append((dates[i], v, float(park_px[i]) if np.isfinite(park_px[i]) else None))
+        # WO-A6 Q1: the DEPLOYED fraction and the live position count, not the cell's declared
+        # sleeve and N. Writing the spec's constants into these columns made "how much of this
+        # return is the park's" unanswerable, and it is the first question any headline has to
+        # survive — a book that is mostly in SPMO is mostly reporting SPMO.
+        held_v = sum(q * (price(i, j) or 0.0) for j, q in held.items())
+        equity.append((dates[i], v, float(park_px[i]) if np.isfinite(park_px[i]) else None,
+                       (held_v / v) if v > 0 else 0.0, len(held)))
 
     # Close the surviving book on paper at the last session's mark. No fee, no cash movement, no
     # effect on the equity path above — this is bookkeeping, and `reason` says so. It exists
@@ -1047,7 +1053,12 @@ def main():
                 for t in trades:
                     if "exit_date" in t:
                         exits[t["reason"]] = exits.get(t["reason"], 0) + 1
-                eq = [(d, v, bench_rows.get(d)) for d, v, _ in eq
+                # WO-A6 §0/Q3: SPMO is the benchmark on every cell. `finding.py` cuts against
+                # whatever sits in this column, and it was VOO — so every §2.5 verdict this arm
+                # ever produced was measured against +262.7% when the arm's own park returned
+                # +453.9%. The sleeve's whole justification (§2.4.1) is beating the park; scoring
+                # it against a different, lower index was answering a question nobody asked.
+                eq = [(d, v, park_rows.get(d), dep, npos) for d, v, _, dep, npos in eq
                       if d >= dates[first]]
                 nav = np.array([e[1] for e in eq])
                 years = max((eq[-1][0] - eq[0][0]).days / 365.25, 1e-9)
@@ -1056,7 +1067,7 @@ def main():
                 dd = float((nav / np.maximum.accumulate(nav) - 1).min())
                 entries = [t for t in trades if "entry_date" in t]
                 per_year = len(entries) / years
-                rows = [(d, float(v), float(b)) for d, v, b in eq if b is not None]
+                rows = [(d, float(v), float(b)) for d, v, b, _, _ in eq if b is not None]
                 full = finding.score_cut(finding.cut(rows, []))
                 try:
                     oos = finding.score_cut(finding.cut(rows, [], since=finding.OOS_START))
@@ -1067,7 +1078,8 @@ def main():
                 if dry():
                     continue
                 params = dict(variant=name, hypothesis="a4", code_stamp=code, currency="USD",
-                              benchmark=BENCH, start_nav=start_nav, park=PARK_TICKER,
+                              benchmark=PARK_TICKER, start_nav=start_nav, park=PARK_TICKER,
+                              regime_source=BENCH,
                               spec=dict(CELLS[name]), formation=FORMATION, skip=SKIP)
                 # P1's digest, on this arm's own surface. Without it these cells carry no
                 # param_hash, `finding.trial_sharpes` cannot see them, and a grid of twenty-odd
@@ -1095,7 +1107,7 @@ def main():
                     rid = cur.fetchone()[0]
                     cur.executemany("""insert into backtest_equity(run_id,d,nav,exposure,
                                          positions,gate,benchmark) values (%s,%s,%s,%s,%s,%s,%s)""",
-                        [(rid, d, v, spec["sleeve"], spec["n"], None, b) for d, v, b in eq])
+                        [(rid, d, v, dep, npos, None, b) for d, v, b, dep, npos in eq])
                     # the book itself, so "did it hold MRVL" is a query rather than a belief
                     cur.executemany("""insert into backtest_trades(run_id,ticker,entry_date,
                           entry_price,qty,exit_date,exit_price,pnl_cad,pnl_pct,bars_held,

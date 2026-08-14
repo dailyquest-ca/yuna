@@ -112,7 +112,7 @@ def test_the_book_is_the_top_n_and_the_rest_is_parked():
     # the strongest climbers are the highest-numbered by construction
     assert bought == {"N09.US", "N08.US", "N07.US"}
     assert costs > 0, "trading is not free"
-    assert all(v > 0 for _, v, _ in eq)
+    assert all(v > 0 for _, v, *_ in eq)
 
 
 def test_a_half_sleeve_leaves_half_the_account_in_the_park():
@@ -219,7 +219,7 @@ def test_a_name_that_goes_dark_does_not_zero_the_account():
     park = np.full(n, 50.0)
     eq, _, _, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
                            risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)
-    nav = np.array([v for _, v, _ in eq])
+    nav = np.array([v for _, v, *_ in eq])
     worst = float((nav / np.maximum.accumulate(nav) - 1).min())
     assert worst > -0.5, f"a single dark holding collapsed the account: max drawdown {worst:.1%}"
     assert all(v > 0 for v in nav)
@@ -429,7 +429,7 @@ def test_the_rebalance_sizes_from_the_whole_account_not_the_cash_it_freed():
     park = np.full(n, 100.0)                      # a flat park: idle money earns nothing
     eq, trades, _, _ = cc.simulate(dates, tickers, adj, raw, dv, park, n=3, months=6,
                                 risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)
-    nav_on = {d: v for d, v, _ in eq}
+    nav_on = {d: v for d, v, *_ in eq}
     ti, di = {t: j for j, t in enumerate(tickers)}, {d: i for i, d in enumerate(dates)}
     rebals = sorted({t.get("entry_date") or t["exit_date"] for t in trades
                      if t.get("reason") != "open_at_end"})
@@ -942,3 +942,36 @@ def test_a_forty_two_session_clock_carries_forty_two_phases():
     dates = sessions(600)
     seen = {tuple(cc.session_rebalances(dates, 42, 0, offset=o)[:3]) for o in range(42)}
     assert len(seen) == 42, "every session offset must give a distinct schedule"
+
+
+# ------------------------------------- WO-A6 Q1: the deployed fraction must be measured
+
+def test_the_equity_row_reports_the_real_deployed_fraction_not_the_declared_sleeve():
+    """Writing the cell's declared `sleeve` and `n` into these columns made "how much of this
+    return belongs to the park" unanswerable — and a book that is mostly in SPMO is mostly
+    reporting SPMO. The columns now carry what was actually held."""
+    n = N_DAYS
+    # a name that stops out early and is never replaced: the book must show itself emptying
+    crash = np.concatenate([np.linspace(100.0, 300.0, n - 300), np.linspace(300.0, 40.0, 300)])
+    paths = {"CRASH.US": crash}
+    for i in range(3):
+        paths[f"N{i:02d}.US"] = np.linspace(100.0, 105.0 + i, n)
+    dates, tickers, adj, raw, dv = grid(paths)
+    eq = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), n=2, months=6,
+                     risk_adjusted=False, sleeve=1.0, start_nav=200_000.0, trail=True)[0]
+    deployed = [row[3] for row in eq]
+    counts = [row[4] for row in eq]
+    assert len(eq[0]) == 5, "each row carries date, nav, park mark, deployed fraction, positions"
+    assert all(0.0 <= d <= 1.0001 for d in deployed), "a fraction of NAV, not a spec constant"
+    assert max(counts) <= 2, "never more positions than the book allows"
+    assert min(counts) < max(counts), "the count must move — it is a measurement, not a label"
+
+
+def test_a_fully_parked_book_reports_zero_deployed():
+    n = N_DAYS
+    # nothing clears the $5 floor, so no name is ever bought and everything sits in the park
+    paths = {f"N{i:02d}.US": np.full(n, 1.0 + 0.01 * i) for i in range(4)}
+    dates, tickers, adj, raw, dv = grid(paths)
+    eq = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), n=2, months=6,
+                     risk_adjusted=False, sleeve=1.0, start_nav=200_000.0)[0]
+    assert all(row[3] == 0.0 and row[4] == 0 for row in eq)
