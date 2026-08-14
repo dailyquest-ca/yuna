@@ -316,6 +316,26 @@ CELLS = {
                      trail=True, next_open=True, every_sessions=10, start_offset=1),
     "fq_f2_s2": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                      trail=True, next_open=True, every_sessions=10, start_offset=2),
+    # ---- the phase test on the recommended clock. Two shapes, because the calendar version
+    # cannot carry a real one: a TWO-month bucket has only TWO month-phases (offset 2 lands back
+    # on offset 0), so `bi_ph1` exhausts the calendar test in a single extra cell. The honest
+    # version uses a 42-SESSION clock — the same ~2-month cadence with 42 distinct phases — and
+    # samples six of them a week apart. That is the direct analogue of the six semi-annual phases
+    # that spread 17.6 points and destroyed the previous champion.
+    "bi_ph1":  dict(n=8, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, offset=1),
+    "s42_p0":  dict(n=8, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, every_sessions=42),
+    "s42_p7":  dict(n=8, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, every_sessions=42, offset=7),
+    "s42_p14": dict(n=8, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, every_sessions=42, offset=14),
+    "s42_p21": dict(n=8, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, every_sessions=42, offset=21),
+    "s42_p28": dict(n=8, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, every_sessions=42, offset=28),
+    "s42_p35": dict(n=8, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                    trail=True, next_open=True, every_sessions=42, offset=35),
 }
 
 

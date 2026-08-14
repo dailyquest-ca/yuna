@@ -170,6 +170,9 @@ PARENT = {
     "fq_d1": "clk_monthly", "fq_d1_s1": "fq_d1",
     "fq_w1": "fq_d1", "fq_w1_s1": "fq_w1", "fq_w1_s2": "fq_w1",
     "fq_f2": "fq_d1", "fq_f2_s1": "fq_f2", "fq_f2_s2": "fq_f2",
+    "bi_ph1": "clk_bimonthly", "s42_p0": "clk_bimonthly",
+    "s42_p7": "s42_p0", "s42_p14": "s42_p0", "s42_p21": "s42_p0",
+    "s42_p28": "s42_p0", "s42_p35": "s42_p0",
 }
 
 
@@ -916,3 +919,23 @@ def test_daily_rebalancing_costs_more_than_monthly_on_the_same_tape():
     monthly = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0),
                           every_sessions=21, **kw)[2]
     assert daily > monthly, f"daily costs ${daily:,.0f} against monthly's ${monthly:,.0f}"
+
+
+def test_a_two_month_bucket_has_exactly_two_month_phases():
+    """Why the calendar phase test on bi-monthly is thin, and why the 42-session clock exists.
+    Shifting a two-month bucket by two months lands back where it started."""
+    dates = sessions(1300, start=dt.date(2020, 1, 1))
+    phases = {}
+    for off in range(4):
+        idx = cc.rebalance_dates(dates, 2, 0, offset=off)[1:]
+        phases[off] = tuple(dates[i].month for i in idx[:6])
+    assert phases[0] == phases[2], "offset 2 is offset 0 on a two-month clock"
+    assert phases[1] == phases[3]
+    assert phases[0] != phases[1], "and there are exactly two distinct phases"
+
+
+def test_a_forty_two_session_clock_carries_forty_two_phases():
+    """The honest phase test for a ~2-month cadence: same interval, every distinct start."""
+    dates = sessions(600)
+    seen = {tuple(cc.session_rebalances(dates, 42, 0, offset=o)[:3]) for o in range(42)}
+    assert len(seen) == 42, "every session offset must give a distinct schedule"
