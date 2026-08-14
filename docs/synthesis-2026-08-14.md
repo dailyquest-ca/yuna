@@ -17,11 +17,16 @@ risk-adjusted.
 
 **The word "calendar" is doing real work in that sentence, and it was added on 2026-08-14.** The
 arm in §11 removes the calendar entirely — continuous observation, conditional transaction — and
-returns **26.73% at Sharpe 0.980** against SPMO's 21.38% / 0.989 on the identical window, moving
-only **2.4 points** across start offsets and **5.0** across rank lags where the calendar moves 17.6.
-It is still `unproven` under the deflated-Sharpe bar (0.774 against 0.95) and its work order is not
-finished. So: a real candidate exists, the default has not moved, and neither of those statements
-should be collapsed into the other.
+its centre returns **26.73% at Sharpe 0.980** against SPMO's 21.38% / 0.989 on the identical window,
+moving only **2.4 points** across start offsets and **5.0** across rank lags where the calendar
+moves 17.6.
+
+**But the centre is not the number to carry.** A6's sensitivity grid, run after the falsifiers,
+found the centre is the best cell in its own neighbourhood on *every* axis tested — exit band
+either way, N either way, all below it. The family mean is **24.14% at Sharpe 0.917**: still ahead
+of the ETF on return, still behind it risk-adjusted. Every cell is `unproven` on the deflated
+Sharpe (best 0.788 against a 0.95 bar). So: the best-supported arm this programme has produced,
+above the ETF on return, below it on Sharpe, and formally unproven. The default has not moved.
 
 | clock | phases tested | mean CAGR | **spread across phases** | **mean Sharpe** | mean bootstrap DD | names/yr |
 |---|---:|---:|---:|---:|---:|---:|
@@ -71,8 +76,12 @@ called what it is, and it costs 247 trades a year and $273k in spreads to synthe
 | Raw return rises with sampling frequency | **holds** |
 | Any *clock* beats the ETF risk-adjusted | **no — all four are below SPMO's Sharpe** |
 | Separating the observation clock from the transaction clock removes the date sensitivity | **holds — 17.6 pts → 2.4 (§11)** |
+| §3.2's percentage trail beats an ATR trail of the same intent | **holds — 26.7% vs 15.6% (§11)** |
+| The euphoria tighten earns its place | **holds — worth 2.55 pts (§11)** |
+| A concentrated momentum book can be diversified to 5 effective bets | **no — the ceiling is ~3.7 at any N (§11)** |
 | Semi-annual beats monthly · bi-monthly is stable · the calendar arm beats the ETF | **all withdrawn** |
 | The 12-1 rank is a weak signal amplified by luck | **withdrawn — see §10's amendment** |
+| A6's centre is a plateau | **no — it is a peak on every axis tested (§11)** |
 
 ---
 
@@ -406,10 +415,11 @@ the result still swings 17 points on an arbitrary starting choice, it is not.
 
 ---
 
-## 11 · The banded continuous book (WO-A6) — the first arm to survive its own falsifiers
+## 11 · The banded continuous book (WO-A6) — passes its falsifiers, fails its sensitivity grid
 
 Full pre-registration and results: [`docs/wo-a6-banded-2026-08-14.md`](wo-a6-banded-2026-08-14.md).
-Centre is **run 318** (`a6_floor0`), same window and same $200k as everything above.
+Centre is **run 324** (`a6_floor0`), same window and same $200k as everything above; run 318 is the
+identical earlier stamp, reproduced to the digit across a refactor.
 
 ### What changed in the design
 
@@ -430,8 +440,11 @@ phase-sensitive (17.6 points) and what made the daily cell churn. A6 separates t
 
 | | CAGR | Sharpe | max DD | total return | names/yr |
 |---|---:|---:|---:|---:|---:|
-| **A6 centre (run 318)** | **26.73%** | **0.980** | −33.4% | **+741.5%** | 105.6 |
+| A6 centre (run 324) | 26.73% | 0.980 | −33.4% | +741.5% | 105.6 |
+| **A6 family mean (6 cells)** | **24.14%** | **0.917** | ~−36% | — | 93–133 |
 | SPMO, identical window | 21.38% | 0.989 | −30.9% | +456.2% | 0 |
+
+The family row is the one to read, for the reason in "Where it fails" below.
 
 **And it holds still when you shake it.** The two falsifiers the WO pre-registered:
 
@@ -445,21 +458,71 @@ SPMO, mean excess ≈ +4.5 points. The rank-lag test is the sharper of the two a
 amendment precisely because a start offset cannot see a specific-day effect: a door reading a slow
 state should barely notice being read a week late, and this one barely does.
 
-### Where it still fails
+### Where it fails
 
-**The deflated Sharpe is 0.774 against a 0.95 bar.** At 173 logged trials, the deflation asks the
-observed Sharpe to clear what the best of 173 random searches would produce, and it clears it by
-z = 0.75 — a 77th-percentile result where the bar wants the 95th. Stated without softening: *having
-searched this hard, a Sharpe this good would turn up by chance about one time in four.*
+**The centre is a peak on every axis the sensitivity grid moved.** WO-A6 §3 varied one parameter at
+a time off the centre: exit band to 25 and to 60, N to 10 and to 15, the euphoria tighten off, an
+ATR trail, a path-quality gate. **All seven land below the centre; not one lands above.** On the
+four genuine small perturbations it is four out of four, a one-in-sixteen result under a coin flip.
 
-**The trial count is mine, not the strategy's**, and that cuts both ways. Every falsifier cell in
-the table above also enters the ledger and raises the bar — correct behaviour, since a
-falsification run is still a look at the data, but it means **this number cannot be improved by
-running more cells.** Only out-of-sample evidence moves it, which makes the 2003–2016 backfill the
-instrument that decides A6 rather than another grid.
+| axis moved | CAGR | Sharpe | Δ |
+|---|---:|---:|---:|
+| — (centre) | 26.73% | 0.980 | — |
+| euphoria tighten off | 24.18% | 0.910 | −2.55 |
+| exit band 40 → 25 | 24.15% | 0.915 | −2.58 |
+| exit band 40 → 60 | 23.68% | 0.915 | −3.05 |
+| N 12 → 15 | 23.53% | 0.929 | −3.20 |
+| N 12 → 10 | 22.55% | 0.852 | −4.18 |
+| path-quality gate on | 20.18% | 0.839 | −6.55 |
+| ATR trail | 15.58% | 0.603 | −11.15 |
+
+The falsifiers asked **when** the rule looks and A6 barely noticed. The sensitivity grid asks
+**what** it looks for, and the answer moves on every axis with the centre on top. That is the
+signature of a value fitted to the sample whether or not it was fitted deliberately — and §1's spec
+was written after the A4 results were on the table, so it was not independent of them. **The number
+to carry forward is the family's 24.14% at Sharpe 0.917, not the centre's 26.73% at 0.980.** Read
+that way, A6 is ahead of the ETF on return and behind it risk-adjusted, which is the same shape as
+every other arm here — at a smaller magnitude, and without the phase sensitivity.
+
+**The deflated Sharpe is 0.788 against a 0.95 bar** — and every cell in the grid is `unproven`, the
+best of them at 0.788. At 187 logged trials the deflation asks the observed Sharpe to clear what
+the best of 187 random searches would produce, and it clears it by z = 0.75: a 77th-percentile
+result where the bar wants the 95th. Stated without softening: *having searched this hard, a Sharpe
+this good would turn up by chance about one time in four.*
+
+**The trial count is mine, not the strategy's**, and that cuts both ways. Every falsifier and
+sensitivity cell also enters the ledger and raises the bar — correct behaviour, since any run is
+still a look at the data, but it means **this number cannot be improved by running more cells.**
+Only out-of-sample evidence moves it, which makes the 2003–2016 backfill the instrument that
+decides A6 rather than another grid.
 
 **And it trips the livability flag**: 105.6 names/yr is 2.03 trades a week, just over the WO's
 2-per-week line. That is a ruling for Zak, not a number to tune.
+
+### The rider works — and cannot fix what it was commissioned for
+
+Turning §2's correlation rider off (one axis, run 325) costs 1.64 CAGR points and 0.054 Sharpe, and
+lets the held book's worst correlation cluster grow from four names to eight. **A constraint that
+improves the return is worth noting: stepping down the rank to the next uncorrelated name beats
+taking the top name twice.**
+
+But the continuous effective-bets read — §2's own reporting clause, now measured — says the rider
+did not move the thing it was built for. p5 effective bets is **1.841 with the rider and 1.849
+without**: the same number, and the same 1.84 that motivated §2 in the first place. Across the
+centre's 2,213 measured sessions the book runs a mean of 2.90 effective bets, and **98.2% of
+sessions sit below 5**.
+
+Reading that back through §2.2's formula under an equicorrelation approximation, the implied average
+pairwise correlation is ≈0.27 in a typical session and ≈0.49 in the worst 5%. Since
+`k / (1 + (k−1)ρ̄)` tends to `1/ρ̄`, **the effective-bets ceiling is ≈3.7 in calm conditions and
+≈2.0 in stress, at any book size.** Five effective bets needs ρ̄ ≤ 0.20 sustained, which a
+large-cap momentum book does not have; adding names cannot help, because the ceiling is set by the
+average correlation and not by the count.
+
+**A concentrated momentum book is structurally a levered bet on one factor.** That is not a
+parameter to tune, it is what the strategy is, and Q2's tail — nine of the twenty worst trades on
+six macro dates — is the same fact seen from the other end. The honest response is a sizing
+decision, which is Zak's.
 
 ### What the tail is actually made of
 
@@ -470,55 +533,79 @@ correlation*, not single-name event risk, which is the risk the §2 rider is aim
 earnings filter would not have touched. No earnings gate is legislated; the measurement is in the
 WO under Q2.
 
+### Two findings from the grid that stand on their own
+
+1. **§3.2's percentage trail beats an ATR trail decisively** — 26.73% against 15.58%, and −33.4%
+   drawdown against −53.3%. The 3×ATR(20) / +1R / 8×ATR(22) Chandelier holds positions roughly half
+   as often and gives back far more of each move. The plan's stop is not an arbitrary set of
+   percentages, and this is the first time it has been tested against a different *shape* rather
+   than different levels.
+2. **The euphoria tighten is worth 2.55 CAGR points and 0.070 Sharpe.** The 5% leash on a name 2σ
+   above its own 50-day pays for itself, and had never been priced alone before.
+
 ### What has not been run yet
 
-The WO's decision line is **not reached**. Outstanding: rider verification, the seven sensitivity
-cells (exit band, N, ATR trail, no-euphoria, path-quality), and the B-arm with its six month-phases.
-A6's standing is "best-supported arm, formally unproven" and it should not be described as more
-than that until those land.
+The WO's decision line is **not reached**. Outstanding: the B-arm — two tranches on alternating
+bi-monthly dates, across six phases. It is built and tested but deliberately not run: every cell
+enters the trial ledger and lowers A6's deflated Sharpe, so a fallback for an arm that is still
+standing should exist without being priced. It gets run if A6 is abandoned, or on Zak's call.
 
 ---
 
 ## 12 · Where this leaves a V1
 
-**Standing recommendation: hold SPMO — with a genuine candidate now on the table behind it.**
+**Standing recommendation: hold SPMO — with the best candidate this programme has produced sitting
+behind it, and known to be weaker than its headline.**
 
 SPMO returned 21.12% on this window with a −31.0% expected drawdown and a Sharpe of 0.987, and
 requires no decisions, no infrastructure and no spreads. It remains the default because **nothing
 here has cleared §2.5 in full**, and a default should not move on an `unproven` verdict.
 
-What has changed is that the sentence this document carried two revisions ago — *every active
-variant is below the ETF risk-adjusted once the phase test is applied* — **is no longer true.** A6
-is level on Sharpe (0.980 vs 0.989), ahead by 5.4 points of CAGR, and is the first arm whose
-advantage does not evaporate when you perturb the arbitrary choices. That is a different situation
-from "the research found nothing", and it should not be filed under the same heading.
+Two things changed, in opposite directions, and both belong in the same paragraph.
 
-The honest position: **A6 is a candidate for a start-low live slice, and the size is Zak's ruling.**
-The three things a decision needs, all outstanding, are in §11's last subsection.
+**A6 broke the phase problem.** The sentence this document carried two revisions ago — *every active
+variant is below the ETF risk-adjusted once the phase test is applied* — no longer describes the
+whole picture. A6 moves 2.4 points across start offsets where the calendar moves 17.6, and every
+one of its cells beats SPMO on return. Separating the observation clock from the transaction clock
+was the right diagnosis.
 
-### If an active book is wanted before A6 finishes
+**And A6's own sensitivity grid took most of the win back.** The centre is the best cell in its
+neighbourhood on every axis tested, so the number that survives is the family's **24.14% at Sharpe
+0.917** — ahead of the ETF on return, behind it risk-adjusted. That is a real result and a smaller
+one than the 26.73%/0.980 the falsifiers alone suggested. I ran the falsifiers first and reported
+them first; the grid is what a pre-registered §3 is for, and it is the reason the headline moved
+down rather than up.
 
-A6 itself is the better answer than the weekly clock this document used to point at here. For the
+The honest position: **A6 is a candidate for a start-low live slice at family-mean expectations,
+and the size is Zak's ruling — made knowing it is a ~2 to 3-effective-bet position, not a
+twelve-name diversified book.**
+
+### If an active book is wanted now
+
+A6 is still the better answer than the weekly clock this document used to point at here. For the
 record, the weekly clock returns **36.25% mean across all five phases against 21.12%**, but at
 Sharpe 0.970, a −51% expected drawdown, 247 trades a year and $273k of spreads on $200k — that is
-leverage, not edge. A6 gets 26.73% at 105.6 trades a year, a −36.6% bootstrap-median drawdown, and
-$107k of costs. **Less return, materially better mechanics, and it survives the phase test the
-weekly clock does not.**
+leverage, not edge. A6's family gets 24.14% at ~105 trades a year, a −36.6% bootstrap-median
+drawdown and $107k of costs, and it survives the phase test the weekly clock does not. **Less
+return, materially better mechanics, and the advantage does not depend on a start date.**
 
 ### What would actually change the picture
 
 1. **The 2003–2016 backfill.** Every drawdown estimate here is resampled from a window with no
    momentum crash in it, and it is now also the *only* instrument that can move A6's deflated
-   Sharpe. This was already the largest single gap; A6 makes it the deciding one.
-2. **Finishing WO-A6.** Rider verification, the sensitivity cells, the B-arm. A centre that
-   survives two falsifiers but has not been perturbed on N or on the exit band is a partial result.
+   Sharpe — more cells can only lower it. This was already the largest single gap; A6 makes it the
+   deciding one.
+2. **A ruling on sizing, not on the floor.** §2's effective-bets floor of 5 was found to be
+   unreachable at *any* book size, not merely at five names: the measured ceiling is ≈3.7 effective
+   bets in calm conditions and ≈2.0 in stress. There is no version of this strategy that is five
+   independent bets. What is left is a decision about how much capital belongs in a one-factor
+   position, which is Zak's and not a parameter.
 3. **A different signal — downgraded, not withdrawn.** The claim that 12-1 momentum is "weak and
-   fast-decaying, and its strength came from *when* it was sampled" was written before A6. A6 keeps
-   the same rank, changes only the door, and holds its number across every perturbation. The signal
-   was not the problem; two door designs were. Ranking on something else is still worth doing, but
-   it is no longer the only route left.
-4. **A correlation control** — now built and running as A6's rider (cluster cap fired 447 times in
-   run 318), but not yet verified against the 1.84-effective-bet finding that motivated it.
+   fast-decaying, and its strength came from *when* it was sampled" was written before A6, and the
+   *when* half is now refuted: A6 keeps the same rank, changes only the door, and holds its number
+   across every timing perturbation. The signal was not the problem; two door designs were. Ranking
+   on something else is still worth doing, and it is no longer the only route left.
+4. **The B-arm**, if A6 is abandoned. Built and tested, deliberately not run — see §11.
 
 ### What was tried and did not work
 
@@ -529,7 +616,14 @@ weekly clock does not.**
 - **The Barroso–Santa-Clara volatility governor** — the trail does the same job faster, *on
   2017–2026*; re-test at backfill.
 - **An effective-bets floor of 5 at formation** — arithmetically unreachable as specified; it capped
-  the book at 3.81 names and 32.6% deployed. Needs a ruling before it can be re-enabled.
+  the book at 3.81 names and 32.6% deployed. Now known to be unreachable at *any* book size: the
+  measured ceiling is ≈3.7 bets calm, ≈2.0 in stress. Not a number to fix.
+- **An ATR trail** (3×ATR(20) / +1R / 8×ATR(22) Chandelier) in place of §3.2's percentages —
+  15.58% against 26.73%, at a −53.3% drawdown against −33.4%.
+- **A path-quality entry gate** (%-positive-days over formation, against the pool median) — blocked
+  3,168 entries and cost 6.55 points. Momentum's payoff includes the names that gapped there.
+- **An earnings-gap exit filter** — never built, because the measurement refused it: zero of the
+  twenty worst trades exited on an earnings gap, against a 6.0% base rate.
 
 None of this repo places, modifies, or cancels an order. Every trade is placed by hand.
 
@@ -538,8 +632,9 @@ None of this repo places, modifies, or cancels an order. Every trade is placed b
 ### Reproducing any number here
 
 Runs are stored in `backtest_runs` with `params`, `stats` and full equity and trade ledgers. Key
-run IDs: **318** (A6 centre, `a6_floor0`), **319–323** (A6 falsifiers: start offsets and rank lags),
-**317** (`a6_floor4`, the crippled book — kept as the record of the unreachable floor),
+run IDs: **324** (A6 centre, `a6_floor0`; **318** is the identical earlier stamp), **319–323** (A6
+falsifiers: start offsets and rank lags), **325** (rider off), **326–332** (the §3 sensitivity
+grid), **317** (`a6_floor4`, the crippled book — kept as the record of the unreachable floor),
 **309–316** (the first A6 pass, before the floor was diagnosed), **255** (calendar champion,
 next-open), **229** (close-based), **230** (intraday), **256** (sector cap), **258–263** (phase
 test), **251** (monthly), **87** (SPMO alone), **83** (VOO alone).
