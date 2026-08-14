@@ -10,9 +10,18 @@ genuinely unknown. Every number is a measurement from a stored run, not a recoll
 
 ## 1 · The headline, stated honestly
 
-**No version of this strategy beats holding SPMO once it is tested properly.** Every rebalance
-clock tested — weekly, monthly, bi-monthly, semi-annual — is heavily sensitive to *which dates*
-it rebalances on, and averaged across those dates none of them beats the ETF risk-adjusted.
+**No calendar-clocked version of this strategy beats holding SPMO once it is tested properly.**
+Every rebalance clock tested — weekly, monthly, bi-monthly, semi-annual — is heavily sensitive to
+*which dates* it rebalances on, and averaged across those dates none of them beats the ETF
+risk-adjusted.
+
+**The word "calendar" is doing real work in that sentence, and it was added on 2026-08-14.** The
+arm in §11 removes the calendar entirely — continuous observation, conditional transaction — and
+returns **26.73% at Sharpe 0.980** against SPMO's 21.38% / 0.989 on the identical window, moving
+only **2.4 points** across start offsets and **5.0** across rank lags where the calendar moves 17.6.
+It is still `unproven` under the deflated-Sharpe bar (0.774 against 0.95) and its work order is not
+finished. So: a real candidate exists, the default has not moved, and neither of those statements
+should be collapsed into the other.
 
 | clock | phases tested | mean CAGR | **spread across phases** | **mean Sharpe** | mean bootstrap DD | names/yr |
 |---|---:|---:|---:|---:|---:|---:|
@@ -56,12 +65,14 @@ called what it is, and it costs 247 trades a year and $273k in spreads to synthe
 | Restricting to large caps is worth ~10 points of CAGR | **holds** |
 | A per-name trailing stop cuts expected drawdown from ~50% to ~31% | **holds across all phases** |
 | Volatility-adjusting the momentum rank is worth ~12 points | **holds** |
-| A market-regime gate is a bad trade | **holds** |
-| The Barroso–Santa-Clara volatility governor adds nothing once a trail exists | **holds** |
+| A market-regime gate is a bad trade | **holds on 2017–2026 — re-test at backfill** |
+| The Barroso–Santa-Clara volatility governor adds nothing once a trail exists | **holds on 2017–2026 — re-test at backfill** |
 | A market-observed re-entry door replaces the calendar's date luck | **holds — and returns 1.5%** |
 | Raw return rises with sampling frequency | **holds** |
-| Any clock beats the ETF risk-adjusted | **no — all four are below SPMO's Sharpe** |
-| Semi-annual beats monthly · bi-monthly is stable · the arm beats the ETF | **all withdrawn** |
+| Any *clock* beats the ETF risk-adjusted | **no — all four are below SPMO's Sharpe** |
+| Separating the observation clock from the transaction clock removes the date sensitivity | **holds — 17.6 pts → 2.4 (§11)** |
+| Semi-annual beats monthly · bi-monthly is stable · the calendar arm beats the ETF | **all withdrawn** |
+| The 12-1 rank is a weak signal amplified by luck | **withdrawn — see §10's amendment** |
 
 ---
 
@@ -139,16 +150,22 @@ is what separates it from the clock result below.
 Twelve points, larger than the effect of concentration, the clock, or any risk overlay. It is also
 exactly what SPMO's published methodology does.
 
-### 4.4 Risk overlays that do not earn their place — **holds**
+### 4.4 Risk overlays that do not earn their place — **rejected on 2017–2026; re-test at backfill**
 
-| overlay | effect |
-|---|---|
-| market regime gate (index below its 200-day → go to park) | −6.2 CAGR points to save 2.3 points of drawdown |
-| Barroso–Santa-Clara volatility governor | −6.2 points for 1 point of drawdown, at 2× turnover |
+| overlay | effect | status |
+|---|---|---|
+| market regime gate (index below its 200-day → go to park) | −6.2 CAGR points to save 2.3 points of drawdown | rejected on 2017–2026; re-test at backfill |
+| Barroso–Santa-Clara volatility governor | −6.2 points for 1 point of drawdown, at 2× turnover | rejected on 2017–2026; re-test at backfill |
 
 The governor was a genuine hypothesis — momentum crashes *are* forecastable from the strategy's
 own realized volatility — but the per-name trail collects the same information and acts faster.
-Tested, rejected.
+
+**The label matters.** Both overlays are crash insurance, and they are being priced on a window
+that contains no momentum crash — no 2009, no 2001. An insurance policy tested only in years the
+house did not burn down will always look like a waste of premium. What is established is that
+**neither overlay pays for itself on 2017–2026**; what is *not* established is that they are
+worthless. Both come back to the bench when the 2003–2016 backfill lands, and neither should be
+described as "tested, rejected" without the window attached.
 
 ### 4.5 The clock — **withdrawn**
 
@@ -351,8 +368,20 @@ never held the 4-6x names at all.
   top-ranked names**, which the door prevents.
 
 Both point the same way: **the 12-1 rank has value that decays fast and unevenly.** Sampled at the
-right moment on the right phase it produces a spectacular number; sampled any other way it
-produces the index or worse. That is a weak signal amplified by luck, not a robust edge.
+right moment on the right phase it produces a spectacular number; sampled the wrong way it
+produces the index or worse.
+
+**Amended 2026-08-14.** An earlier revision of this document closed the paragraph "that is a weak
+signal amplified by luck, not a robust edge." **The frequency table already refuted that sentence
+and I did not read it that way.** Raw return rose monotonically as the clock got faster, all the
+way to daily. A signal that was only luck would do the opposite — acting on it more often would
+average the luck out toward the index, not amplify it. Rising return under rising frequency is the
+signature of information that is real and decays quickly; the Sharpe peak at bi-monthly is where
+turnover cost overtakes what the freshness earns.
+
+The supported reading is therefore **real signal, fast decay, one door design refuted** — the door
+being the calendar, and the event-door replacement being the second design to fail. Not the signal.
+§12 is what happened when the door was rebuilt a third time and the signal was left alone.
 
 ---
 
@@ -377,46 +406,130 @@ the result still swings 17 points on an arbitrary starting choice, it is not.
 
 ---
 
-## 11 · Where this leaves a V1
+## 11 · The banded continuous book (WO-A6) — the first arm to survive its own falsifiers
 
-**Recommendation: hold SPMO.**
+Full pre-registration and results: [`docs/wo-a6-banded-2026-08-14.md`](wo-a6-banded-2026-08-14.md).
+Centre is **run 318** (`a6_floor0`), same window and same $200k as everything above.
 
-It returned 21.12% on this window with a −31.0% expected drawdown and a Sharpe of 0.987, requires
-no decisions, no infrastructure and no spreads. Every active variant built here is below it
-risk-adjusted once the phase test is applied, and the two that came closest did so by taking
-substantially more drawdown.
+### What changed in the design
 
-That is a real conclusion rather than a failure. The research produced findings that are true
-independent of the clock — the large-cap pool, the trailing stop, the volatility-adjusted rank,
-and two risk overlays now known not to work — plus a test harness that found seven defects in its
-own simulator and a statistical discipline that killed three of its own champions, including one
-this document recommended two revisions ago.
+Every previous arm welded the **observation clock** to the **transaction clock**: the date the rank
+was sampled was also the date the book was forced to match it. That is what made the calendar
+phase-sensitive (17.6 points) and what made the daily cell churn. A6 separates them:
 
-### If an active book is wanted anyway
+- **Observation is continuous.** The rank is computed every session.
+- **Transaction is conditional.** A name enters only when a slot is free *and* it passes a **state
+  door** — within 10% of its own 252-day high, above its 50-day average, and that average rising
+  over the last 10 sessions. A name leaves only when the trail takes it or its rank falls out of a
+  **hysteresis band** at rank 40. Between rank 12 and rank 40 nothing happens: the book does not
+  re-trade rank flicker.
+- **A correlation rider** caps the book at two names per correlation cluster (single-linkage,
+  ρ > 0.70, trailing 126 sessions), at formation only. It never forces an exit.
 
-The weekly clock is the only variant returning materially more than the ETF: **36.25% mean across
-all five of its phases, against 21.12%**. It is not better risk-adjusted — Sharpe 0.970 against
-0.987 — so it is leverage rather than edge, and it costs a −51% expected drawdown, 247 trades a
-year and $273k of spreads over nine years on $200k. Whether that trade is worth making is a
-risk-posture call, and it should be made knowing it is a leverage decision.
+### The result
+
+| | CAGR | Sharpe | max DD | total return | names/yr |
+|---|---:|---:|---:|---:|---:|
+| **A6 centre (run 318)** | **26.73%** | **0.980** | −33.4% | **+741.5%** | 105.6 |
+| SPMO, identical window | 21.38% | 0.989 | −30.9% | +456.2% | 0 |
+
+**And it holds still when you shake it.** The two falsifiers the WO pre-registered:
+
+| falsifier | what it perturbs | spread | bar | |
+|---|---|---:|---:|---|
+| start offset {0, +21, +42, +63} | which date the run begins | **2.39 pts** | ≤ 6 | **pass** |
+| rank lag {0, +1, +5} | reading the rank *k* sessions stale | **5.00 pts** | ≤ 6 | **pass** |
+
+Against the calendar's **17.6 points** on the same class of arbitrary choice. All six cells beat
+SPMO, mean excess ≈ +4.5 points. The rank-lag test is the sharper of the two and was added by
+amendment precisely because a start offset cannot see a specific-day effect: a door reading a slow
+state should barely notice being read a week late, and this one barely does.
+
+### Where it still fails
+
+**The deflated Sharpe is 0.774 against a 0.95 bar.** At 173 logged trials, the deflation asks the
+observed Sharpe to clear what the best of 173 random searches would produce, and it clears it by
+z = 0.75 — a 77th-percentile result where the bar wants the 95th. Stated without softening: *having
+searched this hard, a Sharpe this good would turn up by chance about one time in four.*
+
+**The trial count is mine, not the strategy's**, and that cuts both ways. Every falsifier cell in
+the table above also enters the ledger and raises the bar — correct behaviour, since a
+falsification run is still a look at the data, but it means **this number cannot be improved by
+running more cells.** Only out-of-sample evidence moves it, which makes the 2003–2016 backfill the
+instrument that decides A6 rather than another grid.
+
+**And it trips the livability flag**: 105.6 names/yr is 2.03 trades a week, just over the WO's
+2-per-week line. That is a ruling for Zak, not a number to tune.
+
+### What the tail is actually made of
+
+Nine of the twenty worst trades fall on **six dates** — the vaccine Monday, the Feb-2021 crypto/EV
+unwind, the China-ADR leg, the tariff crash. **Zero of the twenty exited on an earnings gap**,
+against a 6.0% base rate across all 949 trades. The risk this book carries is *thematic
+correlation*, not single-name event risk, which is the risk the §2 rider is aimed at and the one an
+earnings filter would not have touched. No earnings gate is legislated; the measurement is in the
+WO under Q2.
+
+### What has not been run yet
+
+The WO's decision line is **not reached**. Outstanding: rider verification, the seven sensitivity
+cells (exit band, N, ATR trail, no-euphoria, path-quality), and the B-arm with its six month-phases.
+A6's standing is "best-supported arm, formally unproven" and it should not be described as more
+than that until those land.
+
+---
+
+## 12 · Where this leaves a V1
+
+**Standing recommendation: hold SPMO — with a genuine candidate now on the table behind it.**
+
+SPMO returned 21.12% on this window with a −31.0% expected drawdown and a Sharpe of 0.987, and
+requires no decisions, no infrastructure and no spreads. It remains the default because **nothing
+here has cleared §2.5 in full**, and a default should not move on an `unproven` verdict.
+
+What has changed is that the sentence this document carried two revisions ago — *every active
+variant is below the ETF risk-adjusted once the phase test is applied* — **is no longer true.** A6
+is level on Sharpe (0.980 vs 0.989), ahead by 5.4 points of CAGR, and is the first arm whose
+advantage does not evaporate when you perturb the arbitrary choices. That is a different situation
+from "the research found nothing", and it should not be filed under the same heading.
+
+The honest position: **A6 is a candidate for a start-low live slice, and the size is Zak's ruling.**
+The three things a decision needs, all outstanding, are in §11's last subsection.
+
+### If an active book is wanted before A6 finishes
+
+A6 itself is the better answer than the weekly clock this document used to point at here. For the
+record, the weekly clock returns **36.25% mean across all five phases against 21.12%**, but at
+Sharpe 0.970, a −51% expected drawdown, 247 trades a year and $273k of spreads on $200k — that is
+leverage, not edge. A6 gets 26.73% at 105.6 trades a year, a −36.6% bootstrap-median drawdown, and
+$107k of costs. **Less return, materially better mechanics, and it survives the phase test the
+weekly clock does not.**
 
 ### What would actually change the picture
 
 1. **The 2003–2016 backfill.** Every drawdown estimate here is resampled from a window with no
-   momentum crash in it. This is the largest single gap and it is a data problem, not an analysis
-   problem.
-2. **A different signal.** Nine years of testing says 12-1 momentum over a large-cap pool is a
-   weak, fast-decaying signal whose apparent strength has repeatedly come from *when* it was
-   sampled. Improving the clock has now been exhausted; the next real gain has to come from
-   ranking on something else.
-3. **A correlation control**, since the book is frequently a 1.84-effective-bet position.
+   momentum crash in it, and it is now also the *only* instrument that can move A6's deflated
+   Sharpe. This was already the largest single gap; A6 makes it the deciding one.
+2. **Finishing WO-A6.** Rider verification, the sensitivity cells, the B-arm. A centre that
+   survives two falsifiers but has not been perturbed on N or on the exit band is a partial result.
+3. **A different signal — downgraded, not withdrawn.** The claim that 12-1 momentum is "weak and
+   fast-decaying, and its strength came from *when* it was sampled" was written before A6. A6 keeps
+   the same rank, changes only the door, and holds its number across every perturbation. The signal
+   was not the problem; two door designs were. Ranking on something else is still worth doing, but
+   it is no longer the only route left.
+4. **A correlation control** — now built and running as A6's rider (cluster cap fired 447 times in
+   run 318), but not yet verified against the 1.84-effective-bet finding that motivated it.
 
 ### What was tried and did not work
 
 - **Every rebalance clock** from weekly to annual — all phase-sensitive, all below SPMO's Sharpe.
-- **A market-observed re-entry door** replacing the calendar — robust, and returned 1.5%.
-- **A market regime gate** — costs 6.2 points to save 2.3.
-- **The Barroso–Santa-Clara volatility governor** — the trail already does its job, faster.
+- **A market-observed re-entry door** (WO-A6e) replacing the calendar — robust, and returned 1.5%:
+  it filled the book with "whatever broke out today" instead of the strongest names.
+- **A market regime gate** — costs 6.2 points to save 2.3, *on 2017–2026*; re-test at backfill.
+- **The Barroso–Santa-Clara volatility governor** — the trail does the same job faster, *on
+  2017–2026*; re-test at backfill.
+- **An effective-bets floor of 5 at formation** — arithmetically unreachable as specified; it capped
+  the book at 3.81 names and 32.6% deployed. Needs a ruling before it can be re-enabled.
 
 None of this repo places, modifies, or cancels an order. Every trade is placed by hand.
 
@@ -425,8 +538,16 @@ None of this repo places, modifies, or cancels an order. Every trade is placed b
 ### Reproducing any number here
 
 Runs are stored in `backtest_runs` with `params`, `stats` and full equity and trade ledgers. Key
-run IDs: **255** (champion, next-open), **229** (close-based), **230** (intraday), **256** (sector
-cap), **258–263** (phase test), **251** (monthly), **87** (SPMO alone), **83** (VOO alone).
+run IDs: **318** (A6 centre, `a6_floor0`), **319–323** (A6 falsifiers: start offsets and rank lags),
+**317** (`a6_floor4`, the crippled book — kept as the record of the unreachable floor),
+**309–316** (the first A6 pass, before the floor was diagnosed), **255** (calendar champion,
+next-open), **229** (close-based), **230** (intraday), **256** (sector cap), **258–263** (phase
+test), **251** (monthly), **87** (SPMO alone), **83** (VOO alone).
+
+The cell name is in `params->>'variant'`. `stats->'bars_25'` carries the full §2.5 scoring —
+bootstrap, jackknife, OOS cut, deflated Sharpe and the trial ledger it was deflated against.
 
 The strategy code is `src/concentrated.py`; the §2.5 scorer is `src/finding.py`; the statistics
-are `src/bars.py`. Work orders `docs/wo-a4-*` and `docs/wo-a5-*` carry the pre-registrations.
+are `src/bars.py`. Work orders `docs/wo-a4-*`, `docs/wo-a5-*` and `docs/wo-a6-*` carry the
+pre-registrations — `docs/wo-a6-banded-2026-08-14.md` is the current one and holds the Q-query
+answers in full.
