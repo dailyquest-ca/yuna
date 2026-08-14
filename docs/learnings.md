@@ -183,3 +183,38 @@ is `roadmap-2026-07-31.md`.
     while `law_stamp` stayed at 2026-08-09; with the stamp broken, no two runs can be cleanly
     differenced, so a residual will always remain unattributable. Fix the stamp before trusting
     any delta.
+35. **A guard that ran and wrote rows is not a guard that worked.** Three migrations have now
+    attacked duplicate listings — 045 by hand, 047 on sampled closes, 048 on sampled daily
+    returns — and each one completed, inserted a plausible number of exclusions, and left behind
+    the case its own header named as the motivating example. 047 compared closes with exact float
+    equality at a 99% bar; BBBY_old against BBBY agrees on 2,245 of 2,274 shared closes — 98.72%,
+    short by 0.28 points on sub-cent vendor rounding. Its byte-exact sibling BYON was excluded, so
+    the migration looked like it had handled the group. 048 moved to daily returns, which is the
+    right invariant, and then kept a 1e-9 tolerance that splits the duplicate population in half:
+    on the current tape SPWR_old/SPWRQ scores 0.467 exact and 0.952 at 1e-4, BALL/BLL scores
+    0.0015 and 0.994, and both are one company.
+    **Two general lessons.** A tolerance has to be looser than the noise it must survive: two
+    vendor copies of one series, quoted in cents, differ in the fifth decimal of a daily return
+    from rounding alone, so any test tighter than that measures the vendor's rounding rather than
+    the securities. And **evidence baked into a migration goes stale the moment the data moves** —
+    both files sampled eight dates in 2018-2025, so when the backfill extended the census to 2005
+    every pair that died before 2018 (ANR/ANRZ, WLT/WLTGQ, TBSI/TBSIQ) became invisible to both,
+    and the series the thresholds had been calibrated against were re-fetched underneath them.
+    048 had recorded BBBY as unfixable residue — "plainly below any threshold this file could
+    defend" — which was true of its tape and false of the tape three days later.
+    The remedy is that the scan is now a job (`src/dedupe_scan.py`), takes its probe anchors from
+    the benchmark's own session list rather than hard-coded dates, and **reports the census
+    distribution before proposing a threshold**. Measured across the co-held pairs, duplicates
+    score 0.85-1.00 on daily-return agreement and genuinely different securities score 0.006-0.033
+    — a 25x gap with nothing in it. The cut is the geometric midpoint of the widest gap the scan
+    actually finds, and it proposes nothing when no gap is there. A threshold read off a bimodal
+    distribution is a rule; the same number written into a file is a guess with a good history.
+36. **A blank `workflow_dispatch` input is set, not unset, so `os.environ.get(k, default)` never
+    fires.** The park, calendar and window became env-level for WO-A9's deep test, and the
+    workflow passes `PARK: ${{ inputs.park }}` — which for a blank input is the empty string. Four
+    dispatches died on `contains no session of ,` before the cause was obvious, and the workflow's
+    own help text said blank meant the default. Use `os.environ.get(k, "").strip() or default`.
+    It failed loudly, which is the only reason this cost runs instead of a silently mis-parked
+    equity curve — the window guard added alongside those inputs caught the empty calendar. The
+    general form: **a default that only fires on `KeyError` is not a default in a CI environment**,
+    because CI sets everything it mentions.
