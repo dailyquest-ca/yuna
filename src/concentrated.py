@@ -398,6 +398,17 @@ CELLS = {
                      trail=True, next_open=True, entry_rule="banded", rank_lag=2),
     "a6_lag5":  dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                      trail=True, next_open=True, entry_rule="banded", rank_lag=5),
+    # ---- DIAGNOSTICS, not candidates. The §2 floor of 5 effective bets is unreachable for a
+    # 12-name equity book: with the measured mean pairwise correlation of 0.191 among the 40
+    # most-traded names, k/(1+(k-1)rho) tops out at 3.87 at k=12, and a momentum book runs hotter
+    # still (July 2026 was 0.477 -> 1.92). The centre above therefore capped at 3.81 names and
+    # 32.6% deployed and reported two-thirds of SPMO's return as its own. These two cells measure
+    # what the arm does when the floor is set to something an equity book can actually reach, so
+    # the ruling has numbers under it. Neither is a candidate until Zak rules on the floor.
+    "a6_floor4": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=4.0),
+    "a6_floor0": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=0.0),
 }
 
 
@@ -616,7 +627,7 @@ def clusters_at(corr, rho=A6_RIDER_RHO):
     return sizes
 
 
-def rider_ok(i, book, adj):
+def rider_ok(i, book, adj, floor=None):
     """WO-A6 §2, checked at FORMATION only — it never forces an exit.
 
     Two interpretation calls, both stated rather than buried:
@@ -636,7 +647,8 @@ def rider_ok(i, book, adj):
         return True, "correlation unmeasurable — rider abstained"
     if max(clusters_at(corr).values()) > A6_RIDER_PER_CLUSTER:
         return False, "cluster cap"
-    if len(book) >= int(A6_RIDER_BETS) and effective_bets(corr) < A6_RIDER_BETS:
+    bar = A6_RIDER_BETS if floor is None else float(floor)
+    if bar > 0 and len(book) >= int(bar) and effective_bets(corr) < bar:
         return False, "effective bets below floor"
     return True, "ok"
 
@@ -779,7 +791,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              start_nav, top_by_addv=None, index_px=None, gate_every=21, trail=False,
              vol_target=None, trail_cfg=None, intraday=None, next_open=None,
              sectors=None, sector_cap=None, offset=0, entry_rule=None,
-             start_offset=0, every_sessions=None, rank_lag=0):
+             start_offset=0, every_sessions=None, rank_lag=0, rider_bets=None):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -1033,7 +1045,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                         continue
                     if not base_state(obs, j, adj):
                         continue
-                    ok, why = rider_ok(obs, list(held) + [j], adj)
+                    ok, why = rider_ok(obs, list(held) + [j], adj, floor=rider_bets)
                     if not ok:
                         rider_blocks[why] = rider_blocks.get(why, 0) + 1
                         continue            # step DOWN the rank to the next qualifier

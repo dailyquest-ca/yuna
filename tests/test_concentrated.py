@@ -178,6 +178,7 @@ PARENT = {
     "s5_p1": "fq_w1", "s5_p2": "fq_w1", "s5_p3": "fq_w1", "s5_p4": "fq_w1",
     "a6": "lg12_trail_nextopen", "a6_s10": "a6", "a6_s21": "a6", "a6_s42": "a6", "a6_s63": "a6",
     "a6_lag1": "a6", "a6_lag2": "a6", "a6_lag5": "a6",
+    "a6_floor4": "a6", "a6_floor0": "a6",
 }
 
 
@@ -1092,3 +1093,29 @@ def test_the_rank_lag_changes_which_observation_the_rule_acts_on():
     a = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), **kw)[0]
     b = cc.simulate(dates, tickers, adj, raw, dv, np.full(n, 100.0), rank_lag=5, **kw)[0]
     assert a[-1][1] != b[-1][1], "a five-session lag must produce a different book"
+
+
+def test_a_five_bet_floor_makes_the_fifth_name_arithmetically_impossible():
+    """The defect this diagnostic exists for. Effective bets on k equal-weight names cannot
+    exceed k, so requiring 5 from a 5-name book demands ZERO correlation between all of them —
+    unreachable in equities, which share a market factor. The book caps at four names forever."""
+    assert cc.effective_bets(np.eye(5)) == pytest.approx(5.0), "5 is the ceiling at k=5"
+    c = np.eye(5)
+    c[c == 0] = 0.05                              # a whisper of correlation
+    np.fill_diagonal(c, 1.0)
+    assert cc.effective_bets(c) < 5.0, "any positive correlation puts a 5-name book under 5"
+
+
+def test_the_floor_is_overridable_so_the_ruling_can_rest_on_measurements():
+    n = 300
+    rng = np.random.default_rng(4)
+    # a shared market factor, which is what makes the floor unreachable in real equities
+    mkt = rng.normal(0, 0.012, n)
+    adj = np.column_stack([100 * np.exp(np.cumsum(mkt + rng.normal(0, 0.016, n)))
+                           for _ in range(5)])
+    bets = cc.effective_bets(cc.return_corr(n - 1, [0, 1, 2, 3, 4], adj))
+    assert bets < 5.0, f"a book with a market factor cannot reach 5 bets at k=5 (got {bets:.2f})"
+    blocked, why = cc.rider_ok(n - 1, [0, 1, 2, 3, 4], adj, floor=5.0)
+    allowed, _ = cc.rider_ok(n - 1, [0, 1, 2, 3, 4], adj, floor=0.0)
+    assert not blocked and why == "effective bets below floor"
+    assert allowed, "floor 0 disables the clause and leaves the cluster cap in charge"
