@@ -804,8 +804,8 @@ CELLS = {
                            trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
                            displace=True, base_door=False, rider=False,
                            exit_rank=x, entry_rank=e)
-       for x in (8, 10, 12, 14, 16) for e in (2, 3, 4, 5)
-       if f"b5_{x}_{e}" not in ("b5_8_3", "b5_8_5", "b5_10_3", "b5_12_3")},
+       for x in (8, 10, 12, 14, 16) for e in (1, 2, 3, 4, 5)
+       if f"b5_{x}_{e}" not in ("b5_8_1", "b5_8_3", "b5_8_5", "b5_10_3", "b5_12_3")},
 }
 
 
