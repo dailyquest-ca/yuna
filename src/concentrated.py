@@ -622,6 +622,33 @@ CELLS = {
     # the centre carried through the same lag, so the COMPARISON stays honest even if both fall.
     "w5_c_lag1":  dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                        trail=True, next_open=True, every_sessions=1, tranches=5, rank_lag=1),
+    # ---- WO-A10, Zak's ruling of 2026-08-14: "when there are bear market or crash indicators we
+    # can change our strategy at that time to be defensive until the market has proof of recovery,
+    # and we would stay S&P or cash."
+    #
+    # The measurement that motivates every cell below, on the survivorship-corrected 2007-2013 run:
+    # while SPY was ABOVE its 200-day the arm returned **+272.4%**; while below it returned
+    # **-87.9%**. Those two compound to the -54.8% that killed it. The strategy is not broken —
+    # it is fully invested through the 30% of sessions in which it loses 80% annualised.
+    #
+    # The cost is whipsaw. SPY made 28 separate trips below its 200-day in 2006-2013 and 32 in
+    # 2014-2026: one true signal per era and roughly thirty false ones. A one-touch gate pays a
+    # round trip for each, which is the 6.2 points §4.4 charged it. Hence the latch — short
+    # confirmation out, long confirmation in, and `rising` as the recovery proof Zak asked for.
+    "w5_g_plain": dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, gated=True),
+    "w5_g_1_10":  dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, gated=True,
+                       latch=(1, 10)),
+    "w5_g_3_20":  dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, gated=True,
+                       latch=(3, 20)),
+    "w5_g_3_20r": dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, gated=True,
+                       latch=(3, 20), gate_rising=True),
+    "w5_g_5_40r": dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, every_sessions=1, tranches=5, gated=True,
+                       latch=(5, 40), gate_rising=True),
 }
 
 
@@ -962,6 +989,57 @@ def regime_ok(i, index_px, window=200):
     return bool(index_px[i] > np.nanmean(hist))
 
 
+def regime_rising(i, index_px, window=200, slope=21):
+    """Is the index's own long average HIGHER than it was `slope` sessions ago?
+
+    §3.3's gate asks only "above the average", which flips the moment a dead-cat bounce clears a
+    line that is still falling. A rising average is the cheapest thing that distinguishes a bounce
+    from a recovery, and it is the same construction A6's state door already uses on a single name.
+    """
+    if i < window + slope:
+        return False
+    now = index_px[i - window + 1:i + 1]
+    then = index_px[i - window + 1 - slope:i + 1 - slope]
+    if not np.isfinite(now).any() or not np.isfinite(then).any():
+        return False
+    return bool(np.nanmean(now) > np.nanmean(then))
+
+
+def regime_latch(i, index_px, state, *, confirm_out=1, confirm_in=1, require_rising=False):
+    """WO-A10's asymmetric regime latch: quick to leave, slow to return.
+
+    `state` is a dict carried across sessions holding the current verdict and the two streaks.
+    Returns True when the book may hold stocks.
+
+    **Why asymmetric.** Measured on SPY 2006-2013 there were 28 separate stretches below the
+    200-day covering 550 sessions — one of them was 2008 and the rest were noise. A symmetric
+    one-touch rule pays a full round trip for each of the 27 false ones, which is the 6.2 points
+    §4.4 charged the gate on 2017-2026. Requiring the signal to persist filters the noise; the true
+    signal lasts months and barely notices a few sessions of delay.
+
+    **Why the exit confirm is short and the entry confirm is long.** Getting out late costs money in
+    the one case that matters; getting in early costs money in every dead-cat bounce, and 2008-09
+    had several. `require_rising` adds the recovery proof: the average itself must be climbing, not
+    merely touched from below.
+    """
+    ok_now = regime_ok(i, index_px)
+    if require_rising and ok_now:
+        ok_now = regime_rising(i, index_px)
+    if ok_now:
+        state["up"] = state.get("up", 0) + 1
+        state["down"] = 0
+    else:
+        state["down"] = state.get("down", 0) + 1
+        state["up"] = 0
+    if state.get("on") is None:
+        state["on"] = ok_now                     # first evaluated session sets the latch
+    elif state["on"] and state["down"] >= confirm_out:
+        state["on"] = False
+    elif not state["on"] and state["up"] >= confirm_in:
+        state["on"] = True
+    return bool(state["on"])
+
+
 def vol_scalar(equity, target, window=VOL_TARGET_WINDOW):
     """Barroso-Santa-Clara's dial: min(1, target / realized), on the BOOK's own daily returns,
     annualized at 252. It only ever shrinks — the paper's symmetric version borrows and this
@@ -1103,7 +1181,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              sectors=None, sector_cap=None, offset=0, entry_rule=None,
              start_offset=0, every_sessions=None, rank_lag=0, rider_bets=None,
              rider=True, exit_rank=None, path_quality_gate=False, tranches=1,
-             rider_calendar=False, base_gate=False):
+             rider_calendar=False, base_gate=False,
+             latch=None, gate_rising=False):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -1212,6 +1291,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         park_qty -= qty
 
     gated_off = False
+    regime_state = {}               # WO-A10's latch: {on, up, down} carried across sessions
     queued = []                     # trail stops hit at yesterday's close, filled at today's
     for i in range(warmup, len(dates)):
         # ---- yesterday's stops, filled today. §3.2 acts on the session after the close that
@@ -1230,7 +1310,23 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         park_all(i)
         nav = mark(i)
         # ---- the regime check, on its own clock
-        if index_px is not None and i % gate_every == 0 and np.isfinite(park_px[i]):
+        # WO-A10: with any latch parameter set the gate is evaluated EVERY session and smoothed by
+        # the streaks instead of being sampled every `gate_every`. Sampling is a lag with no
+        # meaning — it can hold a book three weeks into a crash because the calendar said so.
+        # Unset, this is byte-identical to the sampled gate every stored cell ran.
+        latched = latch is not None or gate_rising
+        if index_px is not None and latched and np.isfinite(park_px[i]):
+            c_out, c_in = latch if latch else (1, 1)
+            on = regime_latch(i, index_px, regime_state,
+                              confirm_out=c_out, confirm_in=c_in,
+                              require_rising=gate_rising)
+            if not on and held:
+                for j in list(held):
+                    sell(i, j, held[j], "gate_off")
+                queued.clear()
+                park_all(i)
+            gated_off = not on
+        elif index_px is not None and i % gate_every == 0 and np.isfinite(park_px[i]):
             on = regime_ok(i, index_px)
             if not on and held:
                 for j in list(held):

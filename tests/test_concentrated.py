@@ -206,6 +206,9 @@ PARENT = {
     "w5_vt55": "w10_n5", "w5_notrail": "w10_n5", "w5_init15": "w10_n5",
     # WO-A8 §4's execution-lag falsifier, the one the calendar path never had.
     "w5_nt_lag1": "w5_notrail", "w5_nt_lag2": "w5_notrail", "w5_c_lag1": "w10_n5",
+    # WO-A10's regime latch, one axis at a time off the no-trail arm.
+    "w5_g_plain": "w5_notrail", "w5_g_1_10": "w5_g_plain",
+    "w5_g_3_20": "w5_g_1_10", "w5_g_3_20r": "w5_g_3_20", "w5_g_5_40r": "w5_g_3_20r",
 }
 
 
@@ -1494,3 +1497,41 @@ def test_probe_dates_never_land_on_a_weekend_and_spread_across_weekdays():
     assert not [d for d in got if d.weekday() >= 5], "no probe may land on a weekend"
     assert len({d.weekday() for d in got}) >= 3, "probes must not cluster on one weekday"
     assert got == sorted(set(got)), "probes must be ordered and distinct"
+
+
+def test_the_regime_latch_is_asymmetric_and_filters_whipsaw():
+    """WO-A10. A one-touch 200-day gate pays a full round trip for every false dip, and SPY made
+    28 separate trips below its 200-day in 2006-2013 — one of them was 2008 and 27 were noise.
+    The latch must ignore a short dip entirely and must NOT return on the first touch back."""
+    n = 400
+    px = np.concatenate([np.linspace(100.0, 200.0, 250),      # long uptrend, average well below
+                         np.full(3, 120.0),                   # three-session shock
+                         np.linspace(200.0, 205.0, 147)])     # straight back up
+    st = {}
+    verdicts = [cc.regime_latch(i, px, st, confirm_out=5, confirm_in=20) for i in range(n)]
+    assert all(verdicts[260:280]), (
+        "a three-session dip must not flip a latch that requires five consecutive sessions out")
+
+    # and the reverse: a real break must flip it, and one touch back must not flip it home
+    px2 = np.concatenate([np.linspace(100.0, 200.0, 250), np.full(60, 110.0), np.full(90, 205.0)])
+    st2 = {}
+    v2 = [cc.regime_latch(i, px2, st2, confirm_out=3, confirm_in=20) for i in range(400)]
+    assert not v2[300], "sixty sessions below the average must turn the latch off"
+    assert not v2[312], "twelve sessions back above must NOT satisfy a twenty-session confirm"
+    assert v2[335], "twenty-plus sessions back above must turn it on again"
+
+
+def test_the_rising_clause_refuses_a_bounce_off_a_falling_average():
+    """Zak's 'proof of recovery'. Being above a 200-day that is still falling is a dead-cat
+    bounce; 2008-09 had several. The average itself has to be climbing."""
+    n = 500
+    # a long decline, then a sharp bounce that clears a still-falling average
+    px = np.concatenate([np.linspace(300.0, 120.0, 400), np.linspace(120.0, 190.0, 100)])
+    i = 460
+    assert cc.regime_ok(i, px), "the fixture must actually clear the plain 200-day test"
+    assert not cc.regime_rising(i, px), (
+        "the 200-day is still falling after a long decline — this is a bounce, not a recovery")
+    # and a genuine recovery, where the average has turned up
+    up = np.concatenate([np.linspace(300.0, 120.0, 300), np.linspace(120.0, 400.0, 400)])
+    j = 690
+    assert cc.regime_ok(j, up) and cc.regime_rising(j, up), "a real recovery must pass both"
