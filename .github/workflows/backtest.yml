@@ -95,7 +95,12 @@ permissions:
 # `cells` is in the key for the same reason: two concentrated dispatches carrying different
 # halves of the grid are different work, and the second must not kill the first.
 concurrency:
-  group: backtest-${{ github.ref }}-${{ inputs.research || 'engine' }}-${{ inputs.hypotheses || inputs.hypothesis || 'law' }}-${{ inputs.cells }}
+  # `park` and the window join the key for the same reason `cells` did: the same cell against a
+  # different park over a different window is DIFFERENT WORK, and WO-A9 dispatches exactly that —
+  # three parks against one cell list. Without them the three deep runs share a group and
+  # `cancel-in-progress` kills the first two, leaving one park's numbers and no way to notice the
+  # other two never ran.
+  group: backtest-${{ github.ref }}-${{ inputs.research || 'engine' }}-${{ inputs.hypotheses || inputs.hypothesis || 'law' }}-${{ inputs.cells }}-${{ inputs.park }}-${{ inputs.start_date }}
   cancel-in-progress: true
 
 jobs:
