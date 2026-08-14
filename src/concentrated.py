@@ -353,8 +353,6 @@ CELLS = {
     "s21_p17": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                     trail=True, next_open=True, every_sessions=21, offset=17),
     # and weekly, where FIVE offsets exhaust the phase space entirely
-    "s5_p0": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
-                  trail=True, next_open=True, every_sessions=5),
     "s5_p1": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                   trail=True, next_open=True, every_sessions=5, offset=1),
     "s5_p2": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
