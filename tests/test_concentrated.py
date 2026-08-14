@@ -213,12 +213,22 @@ PARENT = {
     # comparable rung to rung; `rising` is its own axis off the rung it modifies.
     **{f"w5_g_1_{c}": "w5_g_plain" for c in (3, 5, 7, 14, 20)},
     "w5_g_1_10r": "w5_g_1_10",
+    # WO-A13's band arm, all one hop off its own root.
+    **{c: "b5_8_3" for c in ("b5_6_3", "b5_10_3", "b5_12_3", "b5_8_1", "b5_8_5",
+                             "b5_nodisp", "b5_close", "b5_door")},
+    "b5_5_5": "b5_8_5",
 }
+
+# An arm whose clock, exit rule, entry rule AND fill convention all differ from everything before
+# it is not a rung off anything — it is a new root, and saying so is the honest move. Calling
+# `b5_8_3` "one axis off w5_notrail" would be a fiction, and this guard exists to stop fictions.
+# A root earns its place here by being DECLARED, not by quietly failing the check.
+ROOTS = {"n12_semi", "b5_8_3"}
 
 
 def test_every_announced_cell_moves_one_axis_off_its_own_parent():
-    assert set(cc.CELLS) - {"n12_semi"} == set(PARENT), (
-        "every cell but the root declares the cell it varies — a new cell states its parent")
+    assert set(cc.CELLS) - ROOTS == set(PARENT), (
+        "every cell but a declared root states the cell it varies — a new cell states its parent")
     for name, parent in PARENT.items():
         base, spec = dict(cc.CELLS[parent]), cc.CELLS[name]
         merged = {**base, **spec}

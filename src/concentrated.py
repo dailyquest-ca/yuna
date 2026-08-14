@@ -681,6 +681,75 @@ CELLS = {
     "w5_g_1_10r": dict(n=5, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                        trail=False, next_open=True, every_sessions=1, tranches=5, gated=True,
                        latch=(1, 10), gate_rising=True),
+    # ================== WO-A13: the band arm, and its own root ==================
+    #
+    # Zak's rule of 2026-08-14, in his words: *"Just because #5 goes to #6 doesn't mean #6 is bad,
+    # and one is likely just as good as the other. It's more likely that we should only eject
+    # something when it is #8 or lower. Or in the case that an option went as high as #3 or
+    # higher, then we would displace #6 for it. But we shouldn't be swapping #4,5,6,7 back and
+    # forth. When the scale is top 500 lol. They are all great."*
+    #
+    # This is a NEW ARM, not a rung off the weekly book, and it is declared as its own root: it
+    # moves the clock (no tranches — every holding is observed every session), the exit rule (a
+    # rank band instead of a slot's turn), the entry rule (displacement), and the fill (tomorrow's
+    # open instead of tonight's close). Calling any of that "one axis off `w5_notrail`" would be a
+    # fiction, and the one-axis test exists to stop exactly that fiction.
+    #
+    # Every rung below moves ONE thing off `b5_8_3`. Ruled into all of them, so they are not axes:
+    # sleeve 1.00, no concentration cap (`rider=False` — the rider is a diversification floor and
+    # Zak ruled 80% in one sector is what momentum IS), no state door, no trail, no regime filter
+    # (advisory only), $100k start, next-open fills.
+    "b5_8_3":    dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=8, entry_rank=3),
+    # the exit band: how far a holding may slide before it is ejected. Zak's 8 is the centre.
+    "b5_6_3":    dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=6, entry_rank=3),
+    "b5_10_3":   dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=10, entry_rank=3),
+    "b5_12_3":   dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=12, entry_rank=3),
+    # the entry band: how good an outsider must be to take the worst holding's slot.
+    "b5_8_1":    dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=8, entry_rank=1),
+    "b5_8_5":    dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=8, entry_rank=5),
+    # ...and the no-hysteresis end of that axis: hold exactly the top five, swap the moment the
+    # rank says so. This is Zak's FIRST formulation — "we are going to review every one, every
+    # day" — before he added the band, and it is here so the band is measured against it rather
+    # than assumed better.
+    "b5_5_5":    dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=5, entry_rank=5),
+    # the three falsifiers. `nodisp` prices the clause built for this work order — without it a
+    # name reaching rank 1 cannot enter a full book at all, so if displacement is worth nothing
+    # this cell says so. `close` prices the execution correction: it is the centre filling at the
+    # deciding close, which is what every stored cell did and what no person could have taken.
+    # `door` puts WO-A6's state gate back, since Zak's rule does not name it either way.
+    "b5_nodisp": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=False, base_door=False, rider=False,
+                      exit_rank=8, entry_rank=3),
+    "b5_close":  dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=False,
+                      displace=True, base_door=False, rider=False,
+                      exit_rank=8, entry_rank=3),
+    "b5_door":   dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                      displace=True, base_door=True, rider=False,
+                      exit_rank=8, entry_rank=3),
 }
 
 
