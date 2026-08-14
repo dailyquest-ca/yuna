@@ -164,6 +164,9 @@ PARENT = {
     "evt_hi8": "lg8_trail_nextopen", "evt_hi6": "evt_hi8", "evt_hi12": "evt_hi8",
     "evt_hi8_sec70": "evt_hi8", "evt_hi8_s1": "evt_hi8", "evt_hi8_s2": "evt_hi8",
     "evt_hi8_s3": "evt_hi8", "evt_hi8_s4": "evt_hi8",
+    "mo_s1": "clk_monthly", "mo_s2": "clk_monthly", "mo_s3": "clk_monthly",
+    "mo_s4": "clk_monthly",
+    "bi_s1": "clk_bimonthly", "bi_s2": "clk_bimonthly", "bi_s3": "clk_bimonthly",
 }
 
 

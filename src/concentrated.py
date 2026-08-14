@@ -275,6 +275,26 @@ CELLS = {
                           trail=True, next_open=True, entry_rule="new_high", start_offset=3),
     "evt_hi8_s4":    dict(n=8, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                           trail=True, next_open=True, entry_rule="new_high", start_offset=4),
+    # ---- WO-A7: monthly's OWN stability. The clock ranking was read off phase 0, which is the
+    # comparison the phase test invalidated — so monthly was dismissed on corrupted evidence. It
+    # should be structurally far more stable than semi-annual for the reason semi-annual failed:
+    # 108 decision points against 18. A monthly calendar has no month-phase to shift, so the
+    # arbitrary choice under test is again when trading begins.
+    "mo_s1": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                  trail=True, next_open=True, start_offset=1),
+    "mo_s2": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                  trail=True, next_open=True, start_offset=2),
+    "mo_s3": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                  trail=True, next_open=True, start_offset=3),
+    "mo_s4": dict(n=8, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                  trail=True, next_open=True, start_offset=4),
+    # and the same for bi-monthly and quarterly, so the stability/frequency curve has three points
+    "bi_s1": dict(n=8, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                  trail=True, next_open=True, start_offset=1),
+    "bi_s2": dict(n=8, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                  trail=True, next_open=True, start_offset=2),
+    "bi_s3": dict(n=8, months=2, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                  trail=True, next_open=True, start_offset=3),
 }
 
 
