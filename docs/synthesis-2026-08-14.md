@@ -55,13 +55,18 @@ The reasoning behind that draft was also wrong on its own terms. "54 samples bea
 that bi-monthly would be stable where semi-annual was not; measured properly, bi-monthly spreads
 15.1 against semi-annual's 17.6. Sampling more often bought almost nothing.
 
-### The one framing under which an active book still makes sense
+### The weekly clock — and a reading of it that was too flat
 
 Weekly returns **36.25% mean against SPMO's 21.12%** — about 1.7× — at a −51% expected drawdown
-against −31%, also about 1.7×. Its Sharpe is essentially the ETF's. That is the signature of
-**leverage, not of edge**: the same risk-adjusted return, scaled up. For a twenty-year horizon
-with genuine indifference to drawdown that can be a rational thing to want, but it should be
-called what it is, and it costs 247 trades a year and $273k in spreads to synthesise.
+against −31%, also about 1.7×. Earlier revisions of this document called that **"leverage, not
+edge"** on the strength of its 0.970 mean Sharpe, and left it there.
+
+**That reading was too flat, and §13 corrects it.** The mean hides the distribution: **three of the
+five weekly phases carry a Sharpe above SPMO's 0.987** (1.058, 1.026, 1.012), and one phase at 0.810
+drags the average under. The arm's real defect was never that it was uniformly leverage — it was
+that **you get one phase, and which one is decided by the weekday you started on.**
+
+That is a fixable defect rather than a verdict, and §13 fixes it.
 
 ### What survives regardless
 
@@ -82,6 +87,9 @@ called what it is, and it costs 247 trades a year and $273k in spreads to synthe
 | Semi-annual beats monthly · bi-monthly is stable · the calendar arm beats the ETF | **all withdrawn** |
 | The 12-1 rank is a weak signal amplified by luck | **withdrawn — see §10's amendment** |
 | A6's centre is a plateau | **no — it is a peak on every axis tested (§11)** |
+| The weekly clock is uniformly "leverage, not edge" | **no — 3 of its 5 phases beat SPMO's Sharpe (§13)** |
+| Staggering a clock's phases collects their mean | **holds — 32.13% against a 32.82% control mean (§13)** |
+| Blending the phases lowers volatility | **no — they are one series; Sharpe fell 0.9465 → 0.9306 (§13)** |
 
 ---
 
@@ -570,7 +578,8 @@ than the measurements. Full text in [`docs/wo-a7-2026-08-14.md`](wo-a7-2026-08-1
    removed, which is not the same as a bar being cleared.**
 4. **Only work that could confirm or find a 30%+ return gets run.** That retired the bi-monthly
    B-arm — its own phase mean is 20.58%, below the ETF, and tranching collects a mean rather than a
-   maximum — and opened WO-A7 on the weekly clock instead.
+   maximum — and opened WO-A7 on the weekly clock instead. **WO-A7 met the target: 32.13%,
+   phase-independent.** See §13.
 
 The recommendation below stands as the research conclusion. Ruling 3 is a decision to act ahead of
 it, taken with the gap stated.
@@ -628,6 +637,43 @@ return, materially better mechanics, and the advantage does not depend on a star
    on something else is still worth doing, and it is no longer the only route left.
 4. **The B-arm**, if A6 is abandoned. Built and tested, deliberately not run — see §11.
 
+### The weekly arm, tranched (WO-A7) — the 30% target, met
+
+Pre-registration and full results: [`docs/wo-a7-2026-08-14.md`](wo-a7-2026-08-14.md). Runs 333–338.
+
+The weekly clock always had the highest returns in this programme and was set aside as "leverage,
+not edge" on the strength of a 0.970 mean Sharpe. That reading was too flat: **three of its five
+phases beat SPMO risk-adjusted**, and the mean was dragged under by one. Its actual defect was that
+you get *one* phase, drawn from a 12–14 point spread, decided by the weekday you started on.
+
+Tranching is the fix — five sub-books on five weekly phases, refreshing in stagger, held at once.
+It is the machinery built for WO-A6's bi-monthly B-arm, pointed at the clock where the return
+actually is. **The B-arm itself does not run and should not**: its own phase mean is 20.58%, below
+the ETF, and tranching collects a mean rather than a maximum.
+
+| | CAGR | Sharpe | bootstrap DD | trades/wk | 9-yr costs |
+|---|---:|---:|---:|---:|---:|
+| SPMO | 21.38% | **0.989** | −31.0% | 0 | 0 |
+| A6 family mean | 24.14% | 0.917 | −36.6% | 2.03 | $107k |
+| **w10_t5 (weekly, tranched)** | **32.13%** | 0.931 | **−49.6%** | **6.55** | **$248k** |
+| — its five phase controls | 32.82% mean, 12.28 pt spread | 0.9465 | −49.2% | ~5.8 | $219k |
+
+**Tranching converts the lottery.** 32.13% against a control mean of 32.82% — a 0.69-point gap, and
+on bootstrap medians 32.71% against 32.63%, essentially exact. That was the pre-registered central
+prediction and it holds.
+
+**Two of the three predictions did not.** The blended Sharpe came in *below* the component average
+(0.9306 against 0.9465) where it was predicted to beat it — the five phases hold the same names
+offset by days, so they are effectively one series and blending buys no volatility reduction.
+Tranching removed the *phase* risk, not the risk. And turnover ran 13% above the controls (340.7
+against ~300/yr) on cross-tranche rotation, with costs tracking exactly.
+
+**The caveat that matters most: this arm has had no sensitivity grid.** A6's headline fell 2.59
+points the moment its grid ran. `w10_t5`'s N, trail and pool have never been perturbed on this
+clock, so **32.13% should be read as the top of a range, not the middle of one** — exactly as
+26.73% should have been read before A6's grid, and treating it as settled would be that same error
+in the other direction.
+
 ### What was tried and did not work
 
 - **Every rebalance clock** from weekly to annual — all phase-sensitive, all below SPMO's Sharpe.
@@ -653,9 +699,10 @@ None of this repo places, modifies, or cancels an order. Every trade is placed b
 ### Reproducing any number here
 
 Runs are stored in `backtest_runs` with `params`, `stats` and full equity and trade ledgers. Key
-run IDs: **324** (A6 centre, `a6_floor0`; **318** is the identical earlier stamp), **319–323** (A6
+run IDs: **338** (`w10_t5`, the weekly tranched arm), **333–337** (its five N=10 phase controls),
+**324** (A6 centre, `a6_floor0`; **318** is the identical earlier stamp), **319–323** (A6
 falsifiers: start offsets and rank lags), **325** (rider off), **326–332** (the §3 sensitivity
-grid), **317** (`a6_floor4`, the crippled book — kept as the record of the unreachable floor),
+grid), **286, 305–308** (the stored N=8 weekly phases), **317** (`a6_floor4`, the crippled book — kept as the record of the unreachable floor),
 **309–316** (the first A6 pass, before the floor was diagnosed), **255** (calendar champion,
 next-open), **229** (close-based), **230** (intraday), **256** (sector cap), **258–263** (phase
 test), **251** (monthly), **87** (SPMO alone), **83** (VOO alone).
@@ -664,6 +711,6 @@ The cell name is in `params->>'variant'`. `stats->'bars_25'` carries the full §
 bootstrap, jackknife, OOS cut, deflated Sharpe and the trial ledger it was deflated against.
 
 The strategy code is `src/concentrated.py`; the §2.5 scorer is `src/finding.py`; the statistics
-are `src/bars.py`. Work orders `docs/wo-a4-*`, `docs/wo-a5-*` and `docs/wo-a6-*` carry the
+are `src/bars.py`. Work orders `docs/wo-a4-*`, `docs/wo-a5-*`, `docs/wo-a6-*` and `docs/wo-a7-*` carry the
 pre-registrations — `docs/wo-a6-banded-2026-08-14.md` is the current one and holds the Q-query
 answers in full.
