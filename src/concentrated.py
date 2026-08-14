@@ -68,6 +68,13 @@ import numpy as np
 
 from db import connect, dry, Heartbeat
 from backtest import SPREAD_CURVE, BENCH, PARK_BAND, param_digest
+# The discontinuity rule, imported rather than restated. `backtest.py` reasons out every constant
+# in it — why repetition DOWN is evidence and repetition up is momentum, why the $1 basis floor
+# exists and why the 1000x ceiling carries none — and a second copy here would be a second
+# definition of what a broken price series is. Only the quarantine half is wired in: the other
+# half of `screen_tape` HALTS on duplicate series, and the duplicate census is unresolved
+# (`src/dedupe_scan.py`, undispatchable from a branch), so it would stop every run in this arm.
+from backtest import _discontinuous, MAX_QUARANTINE_SHARE, DataIntegrityError
 from capture_audit import load_tape
 import finding
 
@@ -887,6 +894,44 @@ def build_grid(tape, calendar):
             op[i, j] = float(row[7]) * f if row[7] is not None else np.nan
             lo[i, j] = float(row[6]) * f if row[6] is not None else np.nan
             hi[i, j] = float(row[5]) * f if row[5] is not None else np.nan
+
+    # ---- a name whose ADJUSTED series is discontinuous must not be rankable. WO-A16.
+    #
+    # `backtest.py` has screened for this since 2026-08-11 and this driver never did, which is how
+    # the entire A4-A15 programme ran on a tape containing series like these:
+    #
+    #   LAN.US   oscillates between $0.0050 and $4,730 on ALTERNATING DAYS — 465 jumps, worst
+    #            946,100x. That is two securities interleaved under one symbol, not a price.
+    #   BMNR.US  reverse-split 2025-05-16. The raw close steps 0.02 -> 8.00, exactly 400x; the
+    #            adjustment applied is exactly 20x. The vendor's split factor is wrong by a factor
+    #            of twenty, so the adjusted series carries a FABRICATED 20x overnight gain.
+    #   ASRT.US  worst ratio 53,505x.  CLSK.US 9,372x.  VJC.US 13,318x.
+    #
+    # This is not a P&L problem, it is a RANKING problem, and that is why it cannot be left to the
+    # participation gate that happens to catch several of these. 12-1 momentum divided by realized
+    # volatility is computed FROM this series: a fabricated 20x inside the formation window makes a
+    # name the best-scoring in the universe on arithmetic alone. Run 484 traded 18 such names 55
+    # times — 5.6% of its trades, and -$166,343 of its P&L.
+    #
+    # On by default and not a cell axis, because no cell wants a fabricated return in its score.
+    # It changes what every prior cell would now produce; `code_stamp` is what makes that legible,
+    # and comparisons across a differing stamp were never valid anyway.
+    broken = _discontinuous({"close": adj, "raw_close": raw}, tickers)
+    if broken:
+        if len(broken) > MAX_QUARANTINE_SHARE * len(tickers):
+            raise DataIntegrityError(
+                f"{len(broken)} of {len(tickers)} names ({len(broken)/len(tickers):.1%}) have a "
+                f"discontinuous adjusted series, above the {MAX_QUARANTINE_SHARE:.0%} ceiling — "
+                f"that is a bad tape, not a set of bad tickers. Worst: "
+                + "; ".join(f"{t} ({r})" for t, r in list(broken.items())[:5]))
+        keep = [j for j, tk in enumerate(tickers) if tk not in broken]
+        adj, raw, dv = adj[:, keep], raw[:, keep], dv[:, keep]
+        op, lo, hi = op[:, keep], lo[:, keep], hi[:, keep]
+        tickers = [tickers[j] for j in keep]
+        print(f"tape screen: {len(broken)} of {len(broken) + len(tickers)} names quarantined "
+              f"for a discontinuous adjusted series")
+        for tk, why in sorted(broken.items())[:15]:
+            print(f"  {tk}: {why}")
     return dates, tickers, adj, raw, dv, op, lo, hi
 
 

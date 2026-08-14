@@ -788,6 +788,26 @@ PRICE_BASIS_FLOOR = 1.0        # under $1 the vendor's 4dp precision makes a rat
 # the very bottom, less everywhere above it — so a move of this size is a discontinuity at ANY
 # basis, and this threshold carries no floor.
 ABSURD_RATIO = 1000.0
+# It WAS a hiding place, and 2026-08-14 found what was hiding in it: a mis-stated split factor.
+# `BMNR.US` reverse-split on 2025-05-16. The raw close steps 0.02 -> 8.00, exactly 400x, and the
+# adjustment the vendor applied is exactly 20x — so the adjusted series carries a fabricated 20x
+# overnight gain. The basis was $0.3999, under the floor, and 20x is under ABSURD_RATIO, so it
+# passed both tests and went on to score as the best momentum name in the universe.
+#
+# The floor cannot simply be lowered, because the thing it protects against is real. But that
+# thing is QUANTIZATION, and quantization is computable rather than approximable: at basis p the
+# widest ratio a single tick of 4dp error can manufacture is (p + q) / (p - q). So the floor is
+# replaced by the quantity it was standing in for, and the bar becomes basis-aware —
+# `max(IMPOSSIBLE_UP, quantization bound)`. Above a dollar the bound is 1.0002 and IMPOSSIBLE_UP
+# governs exactly as before; at $0.0002 the bound is 3.0 and IMPOSSIBLE_UP still governs; only at
+# a basis of one or two ticks does it rise enough to disable the test, which is precisely where a
+# ratio genuinely is noise.
+#
+# A reverse split is not an edge case for this. A company reverse-splits BECAUSE its price is low,
+# so the seam ALWAYS sits under a dollar — the old floor was blind in the one place the defect it
+# was written for actually occurs. On the current tape this catches 136 further names over 1,865
+# bars, 2.2% of the 6,287 in the census and well inside MAX_QUARANTINE_SHARE.
+QUOTE_TICK = 1e-4              # the vendor quotes to four decimal places
 TRADEABLE_FLOOR = 5.0          # §3.2's price floor — below it the sleeve is out by law, so a
                                # discontinuity there cannot become a trade
 MIN_ADJUSTED_SHARE = 0.20      # 58.9% of the real tape differs from raw across 2,999 names; if
@@ -816,8 +836,14 @@ def _discontinuous(arrays, cols):
         ratio = np.where(prev > 0, curr / prev, np.nan)
     finite = np.isfinite(ratio)
 
-    on_a_real_price = (prev >= PRICE_BASIS_FLOOR) & ((ratio >= IMPOSSIBLE_UP)
-                                                     | (ratio <= IMPOSSIBLE_DOWN))
+    # The UP test carries no basis floor. It carries the quantization bound instead, which is what
+    # the floor was approximating — see the note on QUOTE_TICK. The DOWN test keeps the floor: a
+    # fall needs a real price to fall from, and nothing here changes that reasoning.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        quant = np.where(prev > QUOTE_TICK,
+                         (prev + QUOTE_TICK) / np.maximum(prev - QUOTE_TICK, QUOTE_TICK), np.inf)
+    up_bar = np.maximum(IMPOSSIBLE_UP, quant)
+    on_a_real_price = (ratio >= up_bar) | ((prev >= PRICE_BASIS_FLOOR) & (ratio <= IMPOSSIBLE_DOWN))
     at_any_price = (ratio >= ABSURD_RATIO) | (ratio <= 1.0 / ABSURD_RATIO)
     impossible = finite & (on_a_real_price | at_any_price)
     zeroed = np.isfinite(C) & (C <= 0.0)

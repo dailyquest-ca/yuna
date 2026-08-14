@@ -588,6 +588,58 @@ def test_a_grid_with_no_calendar_refuses_to_build():
         cc.build_grid(tape, set())
 
 
+def test_a_mis_stated_split_factor_is_quarantined_before_it_can_be_ranked():
+    """`BMNR.US` reverse-split on 2025-05-16: the raw close steps 0.02 -> 8.00, exactly 400x, and
+    the adjustment applied is exactly 20x. The adjusted series therefore carries a fabricated 20x
+    overnight gain, and 12-1 momentum over realized volatility is computed FROM that series — so
+    the name scores best in the universe on arithmetic alone. This driver had no tape screen at
+    all until WO-A16; `backtest.py` has had one since 2026-08-11.
+    """
+    days = sessions(400)
+    # enough clean names that quarantining one stays under the "this is a bad tape" ceiling —
+    # one broken name in a two-name tape is a bad tape, and the guard is right to say so.
+    tape = [(f"GOOD{k}.US", d, 100.0 + i + k, 100.0 + i + k, 1e6)
+            for k in range(12) for i, d in enumerate(days)]
+    # the seam: adjusted 0.40 -> 8.00 with the raw print stepping 0.02 -> 8.00 the same night
+    for i, d in enumerate(days):
+        pre = i < 200
+        raw_px = 0.02 if pre else 8.0 + i * 0.01
+        adj_px = 0.40 if pre else 8.0 + i * 0.01
+        tape.append(("SPLIT.US", d, raw_px, adj_px, 1e6))
+
+    dates, tickers, adj, raw, dv, _op, _lo, _hi = cc.build_grid(tape, set(days))
+    assert "SPLIT.US" not in tickers, "a 20x overnight step in the adjusted series is not a return"
+    assert "GOOD0.US" in tickers, "the screen must not take the whole tape with it"
+    assert len(tickers) == 12
+
+
+def test_one_broken_name_in_a_small_tape_is_reported_as_a_broken_tape():
+    """The ceiling is the second half of the guard: past a share of the census, "N bad tickers" is
+    the wrong diagnosis and the run must stop rather than quietly simulate what is left."""
+    days = sessions(400)
+    tape = [("GOOD.US", d, 100.0 + i, 100.0 + i, 1e6) for i, d in enumerate(days)]
+    for i, d in enumerate(days):
+        px = 0.40 if i < 200 else 8.0 + i * 0.01
+        tape.append(("SPLIT.US", d, px, px, 1e6))
+    with pytest.raises(cc.DataIntegrityError, match="bad tape"):
+        cc.build_grid(tape, set(days))
+
+
+def test_the_screen_keeps_the_largest_real_momentum_events():
+    """The guard would be worse than useless if it threw out the moves this sleeve exists to
+    catch. A name that triples in a session on a real event is a momentum event, not a defect —
+    `backtest.py` sets the impossible ceiling at 20x for exactly this reason."""
+    days = sessions(400)
+    tape = [("BASE.US", d, 50.0 + i, 50.0 + i, 1e6) for i, d in enumerate(days)]
+    for i, d in enumerate(days):
+        px = 20.0 if i < 200 else 71.4          # +257% in one session, a phase-3 readout
+        tape.append(("SQUEEZE.US", d, px, px, 1e6))
+
+    _dates, tickers, *_ = cc.build_grid(tape, set(days))
+    assert "SQUEEZE.US" in tickers, (
+        "a guard that quarantines the biggest genuine momentum events is worse than no guard")
+
+
 def test_a_rebalance_whose_rank_comes_up_empty_is_reported_not_swallowed():
     """The exact shape of the January defect: on a day nothing prints, no name clears the $5
     floor, the rank is empty, the whole book is sold and the account sits in the park until the
