@@ -81,7 +81,7 @@ That is a fixable defect rather than a verdict, and §13 fixes it.
 | Raw return rises with sampling frequency | **holds** |
 | Any *clock* beats the ETF risk-adjusted | **no — all four are below SPMO's Sharpe** |
 | Separating the observation clock from the transaction clock removes the date sensitivity | **holds — 17.6 pts → 2.4 (§11)** |
-| §3.2's percentage trail beats an ATR trail of the same intent | **holds — 26.7% vs 15.6% (§11)** |
+| §3.2's percentage trail beats an ATR trail of the same intent | **only where the trail is the exit — 26.7% vs 15.6% on A6, a dead heat on the weekly arm (§13)** |
 | The euphoria tighten earns its place | **holds — worth 2.55 pts (§11)** |
 | A concentrated momentum book can be diversified to 5 effective bets | **no — the ceiling is ~3.7 at any N (§11)** |
 | Semi-annual beats monthly · bi-monthly is stable · the calendar arm beats the ETF | **all withdrawn** |
@@ -90,6 +90,11 @@ That is a fixable defect rather than a verdict, and §13 fixes it.
 | The weekly clock is uniformly "leverage, not edge" | **no — 3 of its 5 phases beat SPMO's Sharpe (§13)** |
 | Staggering a clock's phases collects their mean | **holds — 32.13% against a 32.82% control mean (§13)** |
 | Blending the phases lowers volatility | **no — they are one series; Sharpe fell 0.9465 → 0.9306 (§13)** |
+| The weekly tranched centre is a peak, like A6's | **no — it is a plateau; 4 of 7 rungs above it (§13)** |
+| Tranching is how you escape the phase lottery | **no — the daily book escapes it too, and returns more (§13)** |
+| Tranching is worth doing anyway | **holds — a third of the turnover for 1.5 pts of CAGR (§13)** |
+| §4.1's top-250 pool lift carries to a fast clock | **no — −2.9 pts on the weekly arm (§13)** |
+| The weekly arm beats A6 risk-adjusted | **no — family to family, 0.905 against 0.917 (§13)** |
 
 ---
 
@@ -654,8 +659,9 @@ the ETF, and tranching collects a mean rather than a maximum.
 | | CAGR | Sharpe | bootstrap DD | trades/wk | 9-yr costs |
 |---|---:|---:|---:|---:|---:|
 | SPMO | 21.38% | **0.989** | −31.0% | 0 | 0 |
-| A6 family mean | 24.14% | 0.917 | −36.6% | 2.03 | $107k |
-| **w10_t5 (weekly, tranched)** | **32.13%** | 0.931 | **−49.6%** | **6.55** | **$248k** |
+| A6 family mean (6 cells) | 24.14% | **0.917** | **−36.6%** | **2.03** | **$107k** |
+| **weekly family mean (6 cells)** | **31.67%** | 0.905 | −50.0% | 6.55 | $248k |
+| — w10_t5, the centre | 32.13% | 0.931 | −49.6% | 6.55 | $248k |
 | — its five phase controls | 32.82% mean, 12.28 pt spread | 0.9465 | −49.2% | ~5.8 | $219k |
 
 **Tranching converts the lottery.** 32.13% against a control mean of 32.82% — a 0.69-point gap, and
@@ -668,11 +674,49 @@ offset by days, so they are effectively one series and blending buys no volatili
 Tranching removed the *phase* risk, not the risk. And turnover ran 13% above the controls (340.7
 against ~300/yr) on cross-tranche rotation, with costs tracking exactly.
 
-**The caveat that matters most: this arm has had no sensitivity grid.** A6's headline fell 2.59
-points the moment its grid ran. `w10_t5`'s N, trail and pool have never been perturbed on this
-clock, so **32.13% should be read as the top of a range, not the middle of one** — exactly as
-26.73% should have been read before A6's grid, and treating it as settled would be that same error
-in the other direction.
+### The grid ran, and it went the opposite way to A6's
+
+Seven cells, mirroring A6's §3 axis for axis (runs 339–345). I predicted the weekly headline would
+fall 2–4 points as A6's did, and pre-registered that landing within one point would mean the arm is
+a plateau where A6 was a peak. **It landed within half a point: family mean 31.67% against a centre
+of 32.13%, and four of the seven rungs came in ABOVE the centre.** A6's grid put zero of seven
+above.
+
+| | rungs above centre | family mean vs centre |
+|---|---:|---:|
+| A6 (banded) | **0 of 7** | −2.59 pts |
+| weekly (tranched) | **4 of 7** | −0.46 pts |
+
+**That contrast is the finding.** A6's centre is a fitted value; the weekly arm's is not. It is
+also the reverse of what I expected when I recommended running this grid, and it changes which arm
+looks better on the evidence rather than on the headline.
+
+**One correction it forces.** §13 previously compared the weekly *centre's* Sharpe (0.931) against
+A6's *family* Sharpe (0.917) and called the weekly arm marginally better risk-adjusted. Like-for-
+like it is not: family against family, **0.905 against 0.917**. The weekly arm buys +7.53 points of
+CAGR with 13 points more drawdown, 3.2× the turnover, 2.3× the costs, and slightly *worse*
+risk-adjusted return.
+
+Three more things the grid overturned, each worth carrying:
+
+- **Tranching is not what escapes the phase lottery.** The un-tranched daily book (`d10_p0`) returns
+  33.66% — 1.53 points *more* than the tranched centre — and it has no phase to be unlucky in
+  either, because you cannot draw a bad weekday if you trade every weekday. Tranching is a
+  **lower-turnover approximation of the daily book**: it gives up 1.53 points of CAGR for a third
+  of the turnover (341 against 1,011 names/yr), +0.024 Sharpe, and 5.6 points less drawdown. A good
+  trade, but a different claim than "it is how you beat the phase problem."
+- **The ATR trail is arm-specific, not bad.** It cost A6 11.15 points and costs the weekly arm 0.10
+  — at a quarter of the trading cost. On A6 the trail is the *only* exit; on a weekly clock the
+  rebalance is, and the trail is a backstop. **No component's value should be quoted without naming
+  its arm.**
+- **§4.1's top-250 lift does not carry.** Predicted to be the rung most likely to beat the centre;
+  came in second-worst at −2.92. That +1.5 was measured on no-stop variants at a slow clock, and I
+  generalised it past its conditions.
+
+**Flagged, not adopted:** `w10_n5` — five names, one per tranche — returns **37.76% on 180 names/yr**
+(3.46 trades a week, *below* the centre's 6.55) at the centre's Sharpe, for a −58.6% drawdown. It
+topped this grid, which is exactly why it does not get adopted off it. It needs its own centre,
+controls and grid first.
 
 ### What was tried and did not work
 
@@ -699,7 +743,7 @@ None of this repo places, modifies, or cancels an order. Every trade is placed b
 ### Reproducing any number here
 
 Runs are stored in `backtest_runs` with `params`, `stats` and full equity and trade ledgers. Key
-run IDs: **338** (`w10_t5`, the weekly tranched arm), **333–337** (its five N=10 phase controls),
+run IDs: **338** (`w10_t5`, the weekly tranched arm), **333–337** (its five N=10 phase controls), **339–345** (the weekly sensitivity grid),
 **324** (A6 centre, `a6_floor0`; **318** is the identical earlier stamp), **319–323** (A6
 falsifiers: start offsets and rank lags), **325** (rider off), **326–332** (the §3 sensitivity
 grid), **286, 305–308** (the stored N=8 weekly phases), **317** (`a6_floor4`, the crippled book — kept as the record of the unreachable floor),
