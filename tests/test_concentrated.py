@@ -193,6 +193,11 @@ PARENT = {
     "s42n12_p0": "s42_p0", "s1cap_p0": "s42n12_p0", "s1_p0": "s1cap_p0", "b_p0": "s1_p0",
     **{f"s1_p{p}": "s1_p0" for p in (7, 14, 21, 28, 35)},
     **{f"b_p{p}": "b_p0" for p in (7, 14, 21, 28, 35)},
+    # WO-A7's weekly tranche arm, also one axis at a time: N off the stored weekly phase, then the
+    # offsets, then the clock, then the tranche count.
+    "w10_p0": "fq_w1",
+    **{f"w10_p{p}": "w10_p0" for p in (1, 2, 3, 4)},
+    "d10_p0": "w10_p0", "w10_t5": "d10_p0",
 }
 
 
@@ -1369,3 +1374,39 @@ def test_a_tranche_never_sells_what_the_other_tranche_is_holding():
     worst = max(len(v) for v in by_date.values())
     assert worst <= CAL["n"] // 2, (
         f"one date sold {worst} names — a tranche can only ever sell its own {CAL['n'] // 2}")
+
+
+def test_a_tranched_book_sizes_off_the_WHOLE_account_including_the_park():
+    """The defect this pins produced no exception and no warning: a tranched book read NAV as
+    cash-plus-holdings, and since every idle dollar is parked before the rebalance runs, NAV came
+    out ZERO on the first date. per_name was zero, every slice was refused, and the run completed
+    reporting a book that never bought anything. A single-tranche book was immune only because it
+    liquidates the whole park a few lines earlier.
+
+    The invariant is the one that survives both paths: at sleeve 1.0 the book ends up invested."""
+    d, t, adj, raw, dv, park = _calendar_world()
+    for tr in (1, 2):
+        eq = cc.simulate(d, t, adj, raw, dv, park, tranches=tr, **CAL)[0]
+        settled = eq[len(eq) // 2:]
+        deployed = [dep for _, _, _, dep, _ in settled]
+        assert np.median(deployed) > 0.9, (
+            f"tranches={tr} left {1 - np.median(deployed):.1%} of a sleeve=1.0 account idle")
+
+
+def test_a_tranched_book_does_not_round_trip_the_whole_park_every_session():
+    """A single-tranche rebalance empties the park and re-parks the remainder, which is right — it
+    is rebalancing all of itself. A tranche is not: it touches a fraction of the account, and
+    liquidating the other tranches' park on its date charges the whole book a spread every time
+    the clock ticks. A tranched book unparks on demand instead.
+
+    The effect is invisible at sleeve 1.0, where the park is near-empty — measured, 3.1k against
+    3.4k, the difference being cross-tranche name rotation rather than park churn. Give the book a
+    real park and it is 29x. That is why this test runs at sleeve 0.5 and NOT at 1.0: a test of
+    this written on the cells actually being run would have passed while proving nothing."""
+    d, t, adj, raw, dv, park = _calendar_world()
+    fast = dict(CAL, every_sessions=1, sleeve=0.5)
+    solo = cc.simulate(d, t, adj, raw, dv, park, tranches=1, **fast)[2]
+    split = cc.simulate(d, t, adj, raw, dv, park, tranches=4, **fast)[2]
+    assert split < solo / 10, (
+        f"a tranched daily book at half sleeve cost {split:,.0f} against the un-tranched "
+        f"{solo:,.0f} — anything close to the latter means it is round-tripping the whole park")

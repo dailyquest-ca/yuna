@@ -505,6 +505,34 @@ CELLS = {
                        trail=True, next_open=True, every_sessions=42, rider_calendar=True,
                        rider_bets=0.0, tranches=2, offset=p)
        for p in (7, 14, 21, 28, 35)},
+    # ---- WO-A7, Zak's ruling of 2026-08-14: "the only thing I want to run is something that
+    # confirms a 30+% return or finds one." The bi-monthly B-arm cannot — its own phase mean is
+    # 20.58%, below the ETF, and tranching collects a mean rather than a maximum. The WEEKLY clock
+    # can: its five phases mean 36.25% and three of the five carry a Sharpe ABOVE SPMO's 0.987.
+    # Its defect is that you get ONE of those phases, drawn from a 14.1-point spread, and which
+    # one is decided by the day you happen to start. Tranching is exactly the instrument for that:
+    # five sub-books, each on its own weekly phase, held simultaneously.
+    #
+    # `every_sessions=1, tranches=5` is what builds them — every session is a rebalance date and
+    # `turn` cycles 0..4, so tranche k rebalances on sessions congruent to k mod 5. That IS the
+    # five weekly phases, running at once.
+    #
+    # N moves 8 -> 10 so the five tranches divide evenly (two names each). The `w10_p*` controls
+    # exist to price the tranching against its OWN phase mean at the same N — comparing a
+    # ten-name tranched book against the stored eight-name phases would move two axes and prove
+    # nothing.
+    "w10_p0": dict(n=10, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                   trail=True, next_open=True, every_sessions=5),
+    **{f"w10_p{p}": dict(n=10, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                         trail=True, next_open=True, every_sessions=5, offset=p)
+       for p in (1, 2, 3, 4)},
+    # `d10_p0` is the daily n=10 book — the un-tranched version of the clock `w10_t5` runs on, and
+    # the cell that isolates what the tranching is worth. It is also the churn case A6 was designed
+    # against, at this N, so it is worth having on the record rather than being a bookkeeping stop.
+    "d10_p0": dict(n=10, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                   trail=True, next_open=True, every_sessions=1),
+    "w10_t5": dict(n=10, months=1, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                   trail=True, next_open=True, every_sessions=1, tranches=5),
 }
 
 
@@ -1202,7 +1230,14 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                 if j not in wanted and (tranches == 1 or j in mine):
                     sell(i, j, held[j], "rebalance")
                     tranche_of.pop(j, None)
-            if park_qty > 0:
+            # A single-tranche book rebalances its WHOLE self, so emptying the park and re-parking
+            # the remainder costs one round trip per rebalance and is right. A tranche does not:
+            # it touches a fifth of the account, and liquidating the other four fifths' park on its
+            # date would charge the whole book a spread every session the clock ticks. At
+            # every_sessions=1 with five tranches that is 2,260 park round trips instead of 452, a
+            # cost the arm never actually incurs. Tranched books unpark on demand instead, exactly
+            # as the banded door does.
+            if park_qty > 0 and tranches == 1:
                 gross = park_qty * park_px[i]
                 cash += gross * (1 - spread_frac(1e9))
                 costs += gross * spread_frac(1e9)
@@ -1215,7 +1250,14 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             # of nav/12, the eight new names absorbed only 8/12 of the cash, and the remaining
             # ~23% of the account went silently to the park. Every A4 cell labelled sleeve=1.00
             # was therefore running about 0.77, and its drawdown is an understatement.
-            nav = cash + sum(q * (price(i, j) or 0.0) for j, q in held.items())
+            #
+            # The park is in this sum too, and must be. For a single-tranche book it is zero here
+            # — the block above just liquidated it — so this changes nothing for any stored cell.
+            # For a tranched book nothing was liquidated, and reading NAV as cash-plus-holdings
+            # gave nav = 0 on the first rebalance: everything sat in the park, per_name came out
+            # zero, and the book bought nothing for the whole run while reporting no error at all.
+            nav = (cash + park_qty * float(park_px[i])
+                   + sum(q * (price(i, j) or 0.0) for j, q in held.items()))
             eff_sleeve = sleeve * (vol_scalar(navs, float(vol_target)) if vol_target else 1.0)
             # ... and the active tranche funds its OWN share of the account, not the whole of it.
             # At tranches=2, n=12 this is nav/2 across 6 slots — the same per-name weight the
@@ -1229,6 +1271,10 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                 px = float(adj[i, j])
                 fee_frac = spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
                 have = held.get(j, 0.0) * px
+                if tranches > 1:
+                    want_cash = max(per_name - have, 0.0) * (1 + fee_frac)
+                    if cash < want_cash:
+                        unpark(i, want_cash - cash)
                 # Cap the slice at what the account can actually pay, fee included. Sizing N
                 # equal slices out of NAV and then charging a spread on each leaves the LAST
                 # name unfunded by exactly the fees — a book of eleven names wearing a
