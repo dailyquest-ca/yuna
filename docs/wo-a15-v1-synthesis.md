@@ -8,6 +8,13 @@ This document has three jobs. §1–2 state the strategy precisely enough to rei
 scratch. §3 records every decision with the evidence that produced it. §4 states honestly how far
 the simulation can be trusted to reproduce — including where it currently cannot.
 
+**Amended 2026-08-14.** Two changes, both in §4. The engine **is** bit-reproducible; the earlier
+claim that it was not came from comparing runs built by three different versions of the code, and
+§4.2 now says so. Separately, the universe was found to contain foreign securities carried under
+`.US` tickers, which the vendor's own metadata does not admit — §4.3 records the measured cost and
+[`wo-a16-foreign-listings.md`](wo-a16-foreign-listings.md) carries the finding. **Every number in
+this document is pre-gate.**
+
 ---
 
 ## 1. The strategy
@@ -235,36 +242,42 @@ clean monotone surface.
   to a full book; a book holding the top five never trades; the book never exceeds its slot count
   on either fill path; a displaced slot refills the same morning unless `swap_gap` is set.
 
-### 4.2 What is NOT pinned — read this before trusting a future run
+### 4.2 Reproducibility — settled, and the earlier reading of it was wrong
 
-**The engine is not proven bit-reproducible.** Three runs of this exact spec, identical
-`param_hash`, on the 20-year window:
+**The engine is bit-reproducible.** Runs 457 and 484, same spec, same code, dispatched an hour
+apart, on the 20-year window:
 
-| run | code_stamp | CAGR | trades | displaced / band | end NAV |
-| ---: | --- | ---: | ---: | ---: | ---: |
-| 422 | `d00ee243` | 15.50% | 974 | 541 / 428 | $1,683,865 |
-| 440 | `3b831e96` | 15.58% | 973 | 540 / 428 | $1,706,723 |
-| **457** | `08ff10e3` | **15.49%** | **974** | **541 / 428** | **$1,683,440** |
+| | run 457 | run 484 |
+| --- | ---: | ---: |
+| CAGR | 0.154948350433643 | 0.154948350433643 |
+| end NAV | $1,683,439.66482761 | $1,683,439.66482761 |
+| max drawdown | −0.805949264478038 | −0.805949264478038 |
+| total return | 15.8428138466003 | 15.8428138466003 |
+| trades | 974 | 974 |
+| displaced / band | 541 / 428 | 541 / 428 |
 
-Runs 422 and 457 agree on trade count and exit composition exactly, and still differ in end NAV by
-0.025% — the same decisions at slightly different fills. Run 440 differs by one trade.
+Identical to the last digit stored. Diffed below the headline as well: the 974 trade rows match in
+both directions with zero rows on either side, and all **4,932 equity rows agree on NAV and on
+position count**. There is no drift to characterise.
 
-**The cause is not established.** The unstable pool sort was one real source and is fixed, but
-quicksort is deterministic for identical input, so it does not obviously explain runs that saw the
-same data. No job wrote to the database between the runs; there are no in-place writes to the
-shared price arrays; the only mutable module state is reset per cell.
+**The earlier version of this section drew the opposite conclusion from the same table, and the
+refutation was a column it printed.** Runs 422, 440 and 457 carry code stamps `d00ee243`,
+`3b831e96` and `08ff10e3` — three different engines, not three runs of one. 422 and 440 predate the
+stable-sort fixes. They were never evidence of non-determinism, and the search for a cause was a
+search for something that was not happening.
 
-**Magnitude: 0.09 CAGR points, against a noise floor of 3–6 points from execution convention
-alone.** It changes no conclusion in this document. It is nonetheless a defect, and until it is
-closed:
+The lesson worth keeping: `code_stamp` exists precisely so that runs can be compared only when it
+matches, and a comparison that ignores it is not a comparison.
 
-- differences below ~0.1 CAGR points between runs mean nothing;
-- **no golden parity vector can be written**, because there is nothing stable to pin against;
-- the live daily desk cannot be proven to implement the strategy that was measured.
+Consequently:
 
-**The definitive test has not been run:** dispatch the identical cell list twice on the current
-code and diff the trade lists. That is the next thing to do, and it should be done before any of
-this reaches production.
+- a golden parity vector **can** be written, and run 484 is a valid one to pin against;
+- differences between runs at equal `code_stamp` are real, not noise;
+- the live daily desk can be held to the strategy that was measured.
+
+What this does **not** establish: reproducibility across a code change, across a numpy or pandas
+version, or against a tape that has since been re-ingested. The pinned requirements exist for the
+second of those; the third is what §4.3's data-quality items are about.
 
 ### 4.3 Other limits on the evidence
 
@@ -279,6 +292,13 @@ this reaches production.
 - **Duplicate listings are unfixed.** `src/dedupe_scan.py` is built and report-only; it cannot be
   dispatched from a feature branch because GitHub only registers `workflow_dispatch` for workflows
   on the default branch. The book can still hold one company twice.
+- **The universe carries foreign securities on `.US` tickers** — `PLZL.US` is Polyus in roubles on
+  MOEX, and EODHD's own metadata calls it NYSE / USD / USA. Their local-currency price × volume
+  clears the $10m liquidity gate on an FX rate. Seven confirmed names traded 21 times in run 484
+  for **−$3,075 against +$1,601,608, or −0.19%** — real, negative, and not the source of the
+  headline. The gate is built (`min_participation`) and the ladder that prices its threshold is in
+  [`wo-a16-foreign-listings.md`](wo-a16-foreign-listings.md). **The universe-wide count is still
+  unknown**, and the numbers in this document are pre-gate.
 - **Effective bets is 2.48** across all fifty grid cells, both windows. The five-name book is
   approximately a two-and-a-half-name book, and no band setting changes that.
 - **Min-history 210 was never measured** (189/210/252 not run).
@@ -288,8 +308,10 @@ this reaches production.
 ## 5. What adoption would require
 
 1. `docs/yuna_plan.md` §3.2 carries the rule and all nine constants explicitly.
-2. The reproducibility defect in §4.2 closed, and a golden parity vector written.
+2. ~~The reproducibility defect in §4.2 closed~~ — settled; a golden parity vector still to be
+   written, and run 484 is the vector to pin.
 3. The dedupe scan run and applied.
+3b. A threshold ruled for the participation gate (WO-A16), and the chosen cell re-run under it.
 4. The M4 refactor in `src/fundamentals.py` covered by a differential test before it reaches main.
 5. The daily desk built to `docs/wo-a11-daily-desk-spec.md`, against the amended plan.
 

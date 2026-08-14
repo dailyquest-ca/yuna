@@ -218,3 +218,31 @@ is `roadmap-2026-07-31.md`.
     equity curve — the window guard added alongside those inputs caught the empty calendar. The
     general form: **a default that only fires on `KeyError` is not a default in a CI environment**,
     because CI sets everything it mentions.
+37. **`code_stamp` is the first column to read when two runs disagree, not the last.** WO-A15 §4.2
+    reported the engine as not bit-reproducible, on three runs of one `param_hash` that differed by
+    0.09 CAGR points and one trade — then spent a section hunting a cause: unstable sorts, in-place
+    writes to the shared price arrays, mutable module state, a job writing to the database between
+    runs. None of it was happening. The three runs carried code stamps `d00ee243`, `3b831e96` and
+    `08ff10e3`; they were **three different engines**, and 422 and 440 predate the stable-sort
+    fixes that 457 contains. The document printed the stamp in its own table and read past it.
+    Held constant, the engine reproduces exactly: runs 457 and 484, an hour apart, agree on all
+    974 trades in both directions and on NAV and position count across all 4,932 equity rows.
+    The stamp exists so that runs are only compared when it matches. **A comparison that ignores
+    it is not a comparison**, and "the cause is not established" is a conclusion that should never
+    be reached while an identity column in the same table is still unexamined.
+38. **The vendor's metadata is a claim, not a fact, and the pipeline had no test that could catch
+    it lying.** `PLZL.US` is Polyus quoted in roubles on MOEX; EODHD reports Exchange `NYSE`,
+    CurrencyCode `USD`, CountryName `USA`. `src/backfill.py` read `Currency` from the symbol list
+    and stored it faithfully — the ingest is correct and the data is wrong, which is the hardest
+    shape of defect to find because every check of our own work passes. Rouble price times MOEX
+    volume read as $426m of daily dollar volume, so it cleared a $10m gate on an FX rate.
+    Three specific traps. The obvious test — bars printed on US market holidays — catches nothing
+    here, because the vendor serves the foreign series **already aligned to the US calendar**; what
+    survives is the residue, the name's own market holidays falling on days the NYSE is open.
+    A count of *finite* bars cannot see it either, because some series are padded flat rather than
+    left absent: `IVL.US` carries 271 zero-volume bars in 1,483, which is why its session count
+    matches SPY's exactly. And `L0_MIN_BARS` admitting 210 of 252 means a name absent 4% of the
+    year passes with room to spare — **a floor set for one purpose is not a guard for another.**
+    The gate that works is intrinsic and is written as a liquidity rule, not a nationality one: a
+    name must have actually traded on a declared fraction of its formation window. It needs no list
+    of countries, and it ejects untradeable names and foreign lines by the same test.
