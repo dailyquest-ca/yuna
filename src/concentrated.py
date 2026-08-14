@@ -112,6 +112,18 @@ A6_RIDER_WINDOW = 126       # §2: §2.2's own correlation window
 A6_RIDER_BETS = 5.0         # §2: effective-bets floor at formation
 A6_RIDER_RHO = 0.70         # §2: pairwise correlation defining a cluster
 A6_RIDER_PER_CLUSTER = 2    # §2: at most two names from one cluster
+A6_PATH_WINDOW = 231        # §3's A6-F rung: %-positive-days over the 231-session formation
+A6_PATH_POOL = 50           # ... measured against the median of the top-50 by rank
+
+TRAIL_DEFAULTS = dict(initial=TRAIL_INITIAL, arm=TRAIL_ARM, wide=TRAIL_WIDE,
+                      euphoria=TRAIL_EUPHORIA)
+
+# WO-A6 §3's ATR rung, verbatim from the work order: "3xATR(20) initial, +1R arm, 8xATR(22)
+# Chandelier". `mode` selects the shape; the percentage bands above are ignored in this mode. It is
+# a PROBE — §3.2's own numbers are the ones in TRAIL_DEFAULTS and a cell running this is asking
+# whether the trail's shape matters, not proposing a replacement for the plan's stop.
+TRAIL_ATR = dict(mode="atr", atr_init_mult=3.0, atr_init_window=20,
+                 atr_arm_r=1.0, atr_chand_mult=8.0, atr_chand_window=22)
 
 # The announced grid (WO-A4). One axis moves per cell against the centre `n12_semi`.
 CELLS = {
@@ -426,6 +438,38 @@ CELLS = {
     "a6f0_lag5": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                       trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
                       rank_lag=5),
+    # §2's rider, priced. Its block count says how often it fired; only this cell says what firing
+    # BOUGHT. `held_book` in the stats carries the continuous effective-bets read for both, which
+    # is the measurement the 1.84-effective-bet finding was made with.
+    "a6f0_norider": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                         trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
+                         rider=False),
+    # §3's sensitivity grid. ONE axis each, off a6_floor0. A centre that survives its falsifiers
+    # but has never been perturbed on N or on the exit band is a partial result.
+    "a6f0_x25":  dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
+                      exit_rank=25),
+    "a6f0_x60":  dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
+                      exit_rank=60),
+    "a6f0_n10":  dict(n=10, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=0.0),
+    "a6f0_n15":  dict(n=15, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=0.0),
+    # the trail's SHAPE, not its levels — WO-A5's ladder already moved the levels one step either
+    # side. `atr` is the work order's own 3xATR(20)/+1R/8xATR(22); `noeuph` disables the euphoria
+    # tighten by holding the band at its wide value, which is the cleanest way to ask what the
+    # 5% leash is worth without inventing a replacement number for it.
+    "a6f0_atr":  dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
+                      trail_cfg=TRAIL_ATR),
+    "a6f0_noeuph": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                        trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
+                        trail_cfg=dict(TRAIL_DEFAULTS, euphoria=TRAIL_DEFAULTS["wide"])),
+    # A6-F: does the ROAD to the 12-month return matter, or only the return?
+    "a6f0_path": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                      trail=True, next_open=True, entry_rule="banded", rider_bets=0.0,
+                      path_quality_gate=True),
 }
 
 
@@ -465,6 +509,7 @@ def build_grid(tape, calendar):
     dv = np.full(shape, np.nan)
     op = np.full(shape, np.nan)
     lo = np.full(shape, np.nan)
+    hi = np.full(shape, np.nan)
     for row in tape:
         tk, d, close, a, vol = row[:5]
         if d not in di:
@@ -476,13 +521,16 @@ def build_grid(tape, calendar):
         raw[i, j] = float(close) if close is not None else np.nan
         dv[i, j] = float(a) * float(vol) if vol is not None else np.nan
         if len(row) >= 8 and close:
-            # the whole bar is rescaled by the session's own adj/close factor, so open and low sit
-            # on the SAME axis as the adjusted closes the stop is set from. Comparing a raw low to
-            # an adjusted stop is the split defect that invalidated runs 18-44, in a new place.
+            # the whole bar is rescaled by the session's own adj/close factor, so open, high and
+            # low sit on the SAME axis as the adjusted closes the stop is set from. Comparing a raw
+            # low to an adjusted stop is the split defect that invalidated runs 18-44, in a new
+            # place. The high is carried for WO-A6 §3's ATR rung: true range needs it, and a range
+            # built from closes alone would be an invented substitute for a measurable quantity.
             f = float(a) / float(close)
             op[i, j] = float(row[7]) * f if row[7] is not None else np.nan
             lo[i, j] = float(row[6]) * f if row[6] is not None else np.nan
-    return dates, tickers, adj, raw, dv, op, lo
+            hi[i, j] = float(row[5]) * f if row[5] is not None else np.nan
+    return dates, tickers, adj, raw, dv, op, lo, hi
 
 
 def session_rebalances(dates, every, warmup, offset=0):
@@ -670,6 +718,38 @@ def rider_ok(i, book, adj, floor=None):
     return True, "ok"
 
 
+def path_quality(i, j, adj, window=A6_PATH_WINDOW):
+    """Share of up-days over the formation window. None where the window is incomplete.
+
+    WO-A6 §3's A6-F rung. Two names can post the same 12-month return by very different roads —
+    one grinding, one on three gaps — and the claim under test is that the grinding one is the
+    better hold. This measures the road; `path_gate` below decides what to do with it.
+    """
+    w = adj[max(0, i - window):i + 1, j]
+    w = w[np.isfinite(w)]
+    if len(w) < window // 2:
+        return None
+    r = np.diff(w) / w[:-1]
+    return float((r > 0).mean()) if len(r) else None
+
+
+def path_gate(i, cand, adj, pool):
+    """Does `cand` clear the POOL MEDIAN share of up-days? WO-A6 §3 sets the bar at the median of
+    the top-50 by rank, so the gate is relative and carries no invented threshold — it moves with
+    whatever the market is currently offering rather than asserting a level.
+
+    Names whose path cannot be measured are admitted, on the same reasoning as the rider: a filter
+    that silently doubles as a history requirement is not the filter it claims to be.
+    """
+    q = path_quality(i, cand, adj)
+    if q is None:
+        return True
+    peers = [p for p in (path_quality(i, k, adj) for k in pool) if p is not None]
+    if len(peers) < 5:
+        return True
+    return q >= float(np.median(peers))
+
+
 def at_new_high(i, j, adj, window=ENTRY_HIGH):
     """Does today's close exceed every close in the PRIOR `window` sessions?
 
@@ -748,10 +828,6 @@ def vol_scalar(equity, target, window=VOL_TARGET_WINDOW):
     return float(min(1.0, target / (sd * np.sqrt(252.0))))
 
 
-TRAIL_DEFAULTS = dict(initial=TRAIL_INITIAL, arm=TRAIL_ARM, wide=TRAIL_WIDE,
-                      euphoria=TRAIL_EUPHORIA)
-
-
 def stop_fill(stop, op, lo):
     """Where a resting stop-market order actually fills on a session, given its bar.
 
@@ -774,6 +850,71 @@ def stop_fill(stop, op, lo):
     if lo <= stop:
         return float(stop)
     return None
+
+
+def atr(i, j, highs, lows, adj, window):
+    """Wilder's true range, averaged over `window` sessions ending at `i`. None if unmeasurable.
+
+    TR is max(high-low, |high - prev close|, |prev close - low|) — the two gap terms are the whole
+    point of using ATR rather than the bar's own range, and dropping them would quietly under-state
+    volatility on exactly the names this book holds. Sessions missing any of the three inputs are
+    dropped rather than filled; a window with fewer than `window` complete rows returns None and
+    the caller falls back rather than trading on a number built from nothing.
+    """
+    if highs is None or lows is None or window < 1 or i < window:
+        return None
+    h = highs[i - window + 1:i + 1, j]
+    lw = lows[i - window + 1:i + 1, j]
+    pc = adj[i - window:i, j]
+    ok = np.isfinite(h) & np.isfinite(lw) & np.isfinite(pc)
+    if ok.sum() < window:
+        return None
+    h, lw, pc = h[ok], lw[ok], pc[ok]
+    tr = np.maximum(h - lw, np.maximum(np.abs(h - pc), np.abs(pc - lw)))
+    v = float(tr.mean())
+    return v if v > 0 else None
+
+
+def trail_stop_atr(px, st, cfg):
+    """WO-A6 §3's ATR rung, as the work order specifies it: 3xATR(20) initial, +1R arm,
+    8xATR(22) Chandelier. Every constant here is the WO's own; none is inferred.
+
+    `st["atr_init"]` and `st["atr_chand"]` are stamped at ENTRY and at each session respectively by
+    the caller, because ATR(20) at entry defines R for the life of the trade while the Chandelier
+    reads today's ATR(22). Where ATR is unmeasurable the caller leaves the previous value in place,
+    so the stop holds rather than jumping.
+    """
+    r = st.get("atr_init")
+    if not r:
+        return st["stop"]
+    want = st["entry"] - cfg["atr_init_mult"] * r
+    if st["armed"] or px >= st["entry"] + r * cfg["atr_arm_r"]:
+        st["armed"] = True
+        a = st.get("atr_chand") or r
+        want = max(want, st["hi"] - cfg["atr_chand_mult"] * a)
+    return max(st["stop"], want)
+
+
+def open_state(px, i, j, cfg, bars, adj):
+    """The per-name trail state at entry. One constructor, because there are three entry paths
+    (calendar rebalance, WO-A6's banded door, WO-A6e's new-high door) and a stop that differs by
+    which door a name came through is a bug waiting for a cell to expose it.
+
+    In ATR mode R is stamped here and never recomputed: the initial risk defines the arm threshold
+    for the life of the trade. Where ATR(20) cannot be measured at entry the name falls back to
+    §3.2's percentage initial rather than entering with no stop at all.
+    """
+    c = cfg or TRAIL_DEFAULTS
+    # ATR mode carries no percentage bands, so §3.2's own initial is the fallback there.
+    init = c.get("initial", TRAIL_DEFAULTS["initial"])
+    st = dict(entry=px, hi=px, armed=False, entered=i, stop=px * (1 - init))
+    if c.get("mode") == "atr":
+        hi_a, lo_a = bars if bars is not None else (None, None)
+        r = atr(i, j, hi_a, lo_a, adj, c["atr_init_window"])
+        if r:
+            st["atr_init"] = r
+            st["stop"] = px - c["atr_init_mult"] * r
+    return st
 
 
 def trail_stop(px, st, closes, cfg=None):
@@ -806,9 +947,10 @@ def trail_stop(px, st, closes, cfg=None):
 
 def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted, sleeve,
              start_nav, top_by_addv=None, index_px=None, gate_every=21, trail=False,
-             vol_target=None, trail_cfg=None, intraday=None, next_open=None,
+             vol_target=None, trail_cfg=None, intraday=None, next_open=None, bars=None,
              sectors=None, sector_cap=None, offset=0, entry_rule=None,
-             start_offset=0, every_sessions=None, rank_lag=0, rider_bets=None):
+             start_offset=0, every_sessions=None, rank_lag=0, rider_bets=None,
+             rider=True, exit_rank=None, path_quality_gate=False):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -840,6 +982,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     equity, trades, costs = [], [], 0.0
     navs = []                       # the NAV path alone, for the volatility governor
     stale_skips, empty_rebals, rider_blocks = 0, [], {}
+    bets_series, cluster_series = [], []   # WO-A6 §2's reported (not enforced) continuous read
 
     def price(i, j):
         """What the position is worth today: today's print, or the last one it made.
@@ -1023,8 +1166,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                 if st:      # a carried name: average cost moves, the stop never ratchets down
                     st["entry"] = (st["entry"] * (held[j] - qty) + px * qty) / held[j]
                 else:
-                    state[j] = dict(entry=px, hi=px, armed=False, entered=i,
-                                    stop=px * (1 - (trail_cfg or TRAIL_DEFAULTS)['initial']))
+                    state[j] = open_state(px, i, j, trail_cfg, bars, adj)
                 funded += 1
                 trades.append(dict(ticker=tickers[j], entry_date=dates[i], spend=spend,
                                    price=px, qty=qty))
@@ -1047,8 +1189,9 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                             top_by_addv=top_by_addv)
             rank_of = {j: r for r, j in enumerate(order, start=1)}
             # exit gate 2: the rank band. The trail below is gate 1 and runs unchanged.
+            band = A6_EXIT_RANK if exit_rank is None else int(exit_rank)
             for j in list(held):
-                if rank_of.get(j, 10 ** 9) > A6_EXIT_RANK and j not in queued:
+                if rank_of.get(j, 10 ** 9) > band and j not in queued:
                     queued.append(j)
             # entry gate: the state-door, highest qualifying rank first, rider on the RESULT
             if len(held) < n:
@@ -1062,10 +1205,17 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                         continue
                     if not base_state(obs, j, adj):
                         continue
-                    ok, why = rider_ok(obs, list(held) + [j], adj, floor=rider_bets)
-                    if not ok:
-                        rider_blocks[why] = rider_blocks.get(why, 0) + 1
-                        continue            # step DOWN the rank to the next qualifier
+                    if path_quality_gate and not path_gate(obs, j, adj, order[:A6_PATH_POOL]):
+                        rider_blocks["path quality"] = rider_blocks.get("path quality", 0) + 1
+                        continue
+                    # `rider=False` is the one-axis cell that PRICES the rider. Without it the
+                    # only evidence the rider works is its own block count, which measures how
+                    # often it fired and not what firing bought.
+                    if rider:
+                        ok, why = rider_ok(obs, list(held) + [j], adj, floor=rider_bets)
+                        if not ok:
+                            rider_blocks[why] = rider_blocks.get(why, 0) + 1
+                            continue        # step DOWN the rank to the next qualifier
                     px = float(adj[i, j])
                     fee_frac = spread_frac(np.nanmedian(dv[max(0, i - ADDV_WINDOW):i + 1, j]))
                     if cash < per_name * (1 + fee_frac):
@@ -1077,8 +1227,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                     held[j] = held.get(j, 0.0) + qty
                     cash -= spend
                     costs += spend * fee_frac / (1 + fee_frac)
-                    state[j] = dict(entry=px, hi=px, armed=False, entered=i,
-                                    stop=px * (1 - (trail_cfg or TRAIL_DEFAULTS)["initial"]))
+                    state[j] = open_state(px, i, j, trail_cfg, bars, adj)
                     trades.append(dict(ticker=tickers[j], entry_date=dates[i], spend=spend,
                                        price=px, qty=qty))
                 park_all(i)
@@ -1114,8 +1263,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                     held[j] = held.get(j, 0.0) + qty
                     cash -= spend
                     costs += spend * fee_frac / (1 + fee_frac)
-                    state[j] = dict(entry=px, hi=px, armed=False, entered=i,
-                                    stop=px * (1 - (trail_cfg or TRAIL_DEFAULTS)["initial"]))
+                    state[j] = open_state(px, i, j, trail_cfg, bars, adj)
                     trades.append(dict(ticker=tickers[j], entry_date=dates[i], spend=spend,
                                        price=px, qty=qty))
                 park_all(i)
@@ -1128,6 +1276,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         #     session gaps through it and at the stop otherwise
         if trail and held:
             op_a, lo_a = intraday if intraday is not None else (None, None)
+            bar_hi, bar_lo = bars if bars is not None else (None, None)
             for j in list(held):
                 st = state.get(j)
                 px_j = price(i, j)
@@ -1149,8 +1298,15 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                         sell(i, j, held[j], "trail_stop", price_override=fill)
                         continue
                 st["hi"] = max(st["hi"], px_j)
-                st["stop"] = trail_stop(px_j, st, adj[max(0, i - EUPHORIA_WINDOW + 1):i + 1, j],
-                                        trail_cfg)
+                if (trail_cfg or {}).get("mode") == "atr":
+                    a = atr(i, j, bar_hi, bar_lo, adj, trail_cfg["atr_chand_window"])
+                    if a:
+                        st["atr_chand"] = a       # unmeasurable → hold the last, never jump
+                    st["stop"] = trail_stop_atr(px_j, st, trail_cfg)
+                else:
+                    st["stop"] = trail_stop(px_j, st,
+                                            adj[max(0, i - EUPHORIA_WINDOW + 1):i + 1, j],
+                                            trail_cfg)
                 if op_a is None and px_j < st["stop"]:
                     queued.append(j)
         v = mark(i)
@@ -1162,6 +1318,17 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         held_v = sum(q * (price(i, j) or 0.0) for j, q in held.items())
         equity.append((dates[i], v, float(park_px[i]) if np.isfinite(park_px[i]) else None,
                        (held_v / v) if v > 0 else 0.0, len(held)))
+        # WO-A6 §2: "continuous effective bets is REPORTED, not enforced." The rider gates at
+        # formation and never forces an exit, so the book it actually holds can drift below any
+        # level the rider allowed on the way in — and the 1.84-effective-bet finding that motivated
+        # the rider was a measurement of exactly this, on the held book rather than at entry. A
+        # rider verified only by its own block count would be verified against its intent instead
+        # of its effect.
+        if i >= warmup and len(held) >= 2:
+            c = return_corr(i, list(held), adj)
+            if c is not None:
+                bets_series.append(effective_bets(c))
+                cluster_series.append(max(clusters_at(c).values()))
 
     # Close the surviving book on paper at the last session's mark. No fee, no cash movement, no
     # effect on the equity path above — this is bookkeeping, and `reason` says so. It exists
@@ -1178,7 +1345,33 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                                qty=held[j], reason="open_at_end"))
     return equity, trades, costs, dict(stale_skips=stale_skips,
                                        empty_rebalances=[d.isoformat() for d in empty_rebals],
-                                       rider_blocks=rider_blocks)
+                                       rider_blocks=rider_blocks,
+                                       held_book=book_diversification(bets_series, cluster_series))
+
+
+def book_diversification(bets, clusters):
+    """Summarise WO-A6 §2's continuous read of the book the strategy actually held.
+
+    Reported, never enforced. `p5` is the number that matters: the rider's whole purpose is to
+    stop the book becoming one bet in the sessions that hurt, and a healthy mean over a decade
+    tells you nothing about the left tail of a diversification measure.
+    """
+    if not bets:
+        return None
+    b = np.asarray(bets, dtype=float)
+    b = b[np.isfinite(b)]
+    if not len(b):
+        return None
+    c = np.asarray(clusters, dtype=float)
+    return dict(sessions=int(len(b)),
+                mean=round(float(b.mean()), 3),
+                median=round(float(np.median(b)), 3),
+                p5=round(float(np.percentile(b, 5)), 3),
+                min=round(float(b.min()), 3),
+                frac_below_5=round(float((b < 5.0).mean()), 4),
+                frac_below_3=round(float((b < 3.0).mean()), 4),
+                max_cluster_mean=round(float(c.mean()), 3) if len(c) else None,
+                max_cluster_max=int(c.max()) if len(c) else None)
 
 
 def pair_trades(trades, dates):
@@ -1242,7 +1435,7 @@ def main():
                 sector_by_ticker = dict(cur.fetchall())
             # the benchmark's own bars ARE the market calendar: an index ETF prints on every real
             # US session and on no holiday, which is exactly the predicate this grid needs
-            dates, tickers, adj, raw, dv, op, lo = build_grid(tape, set(bench_rows))
+            dates, tickers, adj, raw, dv, op, lo, hi = build_grid(tape, set(bench_rows))
             park_px = np.array([float(park_rows.get(d, np.nan)) for d in dates])
             # forward-fill the park so a dark session carries its last mark rather than vanishing
             for i in range(1, len(park_px)):
@@ -1268,7 +1461,7 @@ def main():
                     eq, trades, costs, health = simulate(
                         dates, tickers, adj, raw, dv, park_px, start_nav=start_nav,
                         index_px=bench_px if gated else None, intraday=bars_in,
-                        next_open=opens, sectors=sectors, **spec)
+                        next_open=opens, sectors=sectors, bars=(hi, lo), **spec)
                 finally:
                     COST_MULT = 1.0        # never leak a probe's costing into the next cell
                 exits = {}

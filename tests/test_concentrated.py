@@ -181,6 +181,13 @@ PARENT = {
     "a6_floor4": "a6", "a6_floor0": "a6",
     "a6f0_s21": "a6_floor0", "a6f0_s42": "a6_floor0", "a6f0_s63": "a6_floor0",
     "a6f0_lag1": "a6_floor0", "a6f0_lag5": "a6_floor0",
+    # WO-A6 §2's rider priced, and §3's sensitivity grid — every one of them one axis off the
+    # centre, which is the whole reason this tree exists.
+    "a6f0_norider": "a6_floor0",
+    "a6f0_x25": "a6_floor0", "a6f0_x60": "a6_floor0",
+    "a6f0_n10": "a6_floor0", "a6f0_n15": "a6_floor0",
+    "a6f0_atr": "a6_floor0", "a6f0_noeuph": "a6_floor0",
+    "a6f0_path": "a6_floor0",
 }
 
 
@@ -475,7 +482,7 @@ def test_the_grid_takes_its_sessions_from_the_market_calendar_not_the_tape():
     holiday = dt.date(2024, 1, 1)
     tape = [("REAL.US", d, 10.0, 10.0, 1e6) for d in real]
     tape += [("JUNK.US", holiday, 1.0, 1.0, 5.0)]          # the only thing printing that day
-    dates, tickers, adj, raw, dv, _op, _lo = cc.build_grid(tape, set(real))
+    dates, tickers, adj, raw, dv, _op, _lo, _hi = cc.build_grid(tape, set(real))
     assert holiday not in dates, "a day the benchmark did not trade is not a session"
     assert dates == real
 
@@ -1121,3 +1128,183 @@ def test_the_floor_is_overridable_so_the_ruling_can_rest_on_measurements():
     allowed, _ = cc.rider_ok(n - 1, [0, 1, 2, 3, 4], adj, floor=0.0)
     assert not blocked and why == "effective bets below floor"
     assert allowed, "floor 0 disables the clause and leaves the cluster cap in charge"
+
+
+# ---------------------------------------------------------------------------------------------
+# WO-A6 §3's sensitivity machinery. Every one of these axes is a knob that a cell claims to turn,
+# and the `lad_init10` lesson is that a knob wired to nothing produces a cell that varies nothing
+# and reports a "robust" result. The last three tests here exist to prove each knob MOVES.
+
+
+def test_atr_is_true_range_and_counts_the_gap_terms():
+    """TR = max(high-low, |high - prev close|, |prev close - low|). The two gap terms are the
+    reason to use ATR rather than the bar's own range: a name that gaps 20% and then trades a
+    quiet session has NOT had a quiet session."""
+    n = 30
+    adj = np.full((n, 1), 100.0)
+    hi = np.full((n, 1), 101.0)
+    lo = np.full((n, 1), 99.0)
+    assert cc.atr(n - 1, 0, hi, lo, adj, 20) == pytest.approx(2.0), "no gaps: TR is the bar range"
+
+    # one session gaps: prev close 100, bar trades 120-121. Range is 1, but the gap term is 21.
+    hi2, lo2 = hi.copy(), lo.copy()
+    hi2[n - 1, 0], lo2[n - 1, 0] = 121.0, 120.0
+    got = cc.atr(n - 1, 0, hi2, lo2, adj, 20)
+    assert got == pytest.approx((2.0 * 19 + 21.0) / 20), "the gap enters the average, not the range"
+
+
+def test_atr_refuses_an_incomplete_window_rather_than_averaging_what_is_there():
+    """A stop sized off four bars of a twenty-bar window is a number with a spurious precision.
+    None makes the caller fall back to a rule it can state; a partial mean does not."""
+    n = 30
+    adj, hi, lo = np.full((n, 1), 100.0), np.full((n, 1), 101.0), np.full((n, 1), 99.0)
+    hi[n - 5:, 0] = np.nan
+    assert cc.atr(n - 1, 0, hi, lo, adj, 20) is None
+    assert cc.atr(5, 0, np.full((n, 1), 101.0), lo, adj, 20) is None, "not enough history yet"
+    assert cc.atr(n - 1, 0, None, lo, adj, 20) is None, "no highs loaded at all"
+
+
+def test_the_atr_trail_arms_at_one_r_and_then_rides_the_chandelier():
+    """WO-A6 §3: '3xATR(20) initial, +1R arm, 8xATR(22) Chandelier.' R is the INITIAL risk and is
+    fixed at entry; the Chandelier reads today's ATR."""
+    cfg = cc.TRAIL_ATR
+    st = dict(entry=100.0, hi=100.0, stop=94.0, armed=False, atr_init=2.0)
+    assert cc.trail_stop_atr(101.0, st, cfg) == pytest.approx(94.0), "3xATR(20) = 6 below entry"
+    assert not st["armed"], "+1R is +2.0 here — 101 has not reached it"
+
+    st = dict(entry=100.0, hi=102.0, stop=94.0, armed=False, atr_init=2.0, atr_chand=1.0)
+    assert st and cc.trail_stop_atr(102.0, st, cfg) == pytest.approx(94.0)
+    assert st["armed"], "+1R reached: 102 >= 100 + 1 x 2.0"
+    # armed, so the Chandelier applies: high 102 minus 8 x ATR(22)=1.0 is 94, which ties the
+    # initial. Push the high up and it takes over.
+    st["hi"] = 110.0
+    assert cc.trail_stop_atr(110.0, st, cfg) == pytest.approx(102.0)
+
+
+def test_the_atr_trail_ratchets_and_never_widens():
+    """Same clause §3.2 carries for the percentage trail: the stop moves up, never down. A falling
+    ATR must not be able to give a losing position more room."""
+    cfg = cc.TRAIL_ATR
+    st = dict(entry=100.0, hi=120.0, stop=110.0, armed=True, atr_init=2.0, atr_chand=1.0)
+    # The ratchet lives in the CALLER's assignment, exactly as it does for the percentage trail:
+    # both functions return the stop and neither writes it. A caller that forgets this line has a
+    # trail that recomputes from scratch every session, which is silent and would not throw.
+    st["stop"] = cc.trail_stop_atr(120.0, st, cfg)
+    assert st["stop"] == pytest.approx(112.0)
+    st["atr_chand"] = 4.0                      # volatility quadruples
+    assert cc.trail_stop_atr(115.0, st, cfg) == pytest.approx(112.0), (
+        "a wider Chandelier cannot lower a stop that already ratcheted to 112")
+
+
+def test_open_state_stamps_r_at_entry_and_falls_back_when_atr_is_unmeasurable():
+    n = 40
+    adj, hi, lo = np.full((n, 1), 100.0), np.full((n, 1), 102.0), np.full((n, 1), 98.0)
+    st = cc.open_state(100.0, n - 1, 0, cc.TRAIL_ATR, (hi, lo), adj)
+    assert st["atr_init"] == pytest.approx(4.0)
+    assert st["stop"] == pytest.approx(88.0), "entry - 3 x ATR(20)"
+
+    # no bars at all: the name still enters, on §3.2's own 8% initial rather than with no stop
+    bare = cc.open_state(100.0, n - 1, 0, cc.TRAIL_ATR, None, adj)
+    assert "atr_init" not in bare
+    assert bare["stop"] == pytest.approx(92.0)
+
+    # and the default path is untouched by any of this
+    plain = cc.open_state(100.0, n - 1, 0, None, (hi, lo), adj)
+    assert plain["stop"] == pytest.approx(92.0) and "atr_init" not in plain
+
+
+def test_path_quality_is_the_share_of_up_days_and_the_gate_is_relative():
+    """A6-F carries no invented threshold: the bar is the pool's own median, so it moves with
+    whatever the market is offering instead of asserting a level."""
+    n = 300
+    grind = 100.0 * np.cumprod(np.where(np.arange(n) % 4 == 0, 0.99, 1.006))   # up 3 of 4
+    lumpy = 100.0 * np.cumprod(np.where(np.arange(n) % 4 == 0, 1.05, 0.995))   # up 1 of 4
+    adj = np.column_stack([grind, lumpy, grind, lumpy, grind, lumpy])
+    q_grind = cc.path_quality(n - 1, 0, adj)
+    q_lumpy = cc.path_quality(n - 1, 1, adj)
+    assert q_grind > q_lumpy > 0.0
+
+    pool = [0, 1, 2, 3, 4, 5]
+    assert cc.path_gate(n - 1, 0, adj, pool), "the grinder clears its own pool's median"
+    assert not cc.path_gate(n - 1, 1, adj, pool), "the lumpy name does not"
+    # unmeasurable is admitted, not blocked — the alternative is a history filter in disguise
+    short = np.full((10, 1), 100.0)
+    assert cc.path_gate(9, 0, short, [0]), "too little history admits rather than blocks"
+
+
+def test_book_diversification_reports_the_left_tail_not_just_the_mean():
+    """§2 says continuous effective bets is REPORTED. A mean over a decade hides exactly the
+    sessions the rider exists for, so p5 and the below-thresholds shares are the payload."""
+    bets = [10.0] * 90 + [1.5] * 10
+    got = cc.book_diversification(bets, [2] * 90 + [9] * 10)
+    assert got["mean"] == pytest.approx(9.15)
+    assert got["p5"] == pytest.approx(1.5), "the 5th percentile sees the bad sessions"
+    assert got["min"] == pytest.approx(1.5)
+    assert got["frac_below_5"] == pytest.approx(0.10)
+    assert got["frac_below_3"] == pytest.approx(0.10)
+    assert got["max_cluster_max"] == 9
+    assert cc.book_diversification([], []) is None
+
+
+def _banded_world(n=N_DAYS, k=20, seed=7):
+    """A banded-mode world with enough names to make a rank band and a rider mean something.
+
+    A shared market factor, because the correlation rider is being tested and independent series
+    would hand it a book that is already diversified — the fixture would prove the rider harmless
+    by never letting it bind. Each name adds an idiosyncratic drift so the RANK has an order.
+    """
+    rng = np.random.default_rng(seed)
+    mkt = np.cumsum(rng.normal(0.0004, 0.010, n))
+    paths = {}
+    for i in range(k):
+        idio = np.cumsum(rng.normal(0.00005 * i, 0.006, n))
+        paths[f"B{i:02d}.US"] = 100.0 * np.exp(mkt + idio)
+    dates, tickers, adj, raw, dv = grid(paths)
+    return dates, tickers, adj, raw, dv, np.full(n, 50.0)
+
+
+BANDED = dict(n=5, months=6, risk_adjusted=True, sleeve=1.0, start_nav=200_000.0,
+              trail=True, entry_rule="banded", rider_bets=0.0)
+
+
+def test_the_exit_band_is_wired_to_something():
+    """`lad_init10` was a cell that varied nothing: the initial stop it claimed to move was read
+    from a module constant, so the cell reported a robust plateau it had never left. Any parameter
+    a cell turns must be provable to MOVE the result, or the cell is measuring its own defaults."""
+    d, t, adj, raw, dv, park = _banded_world()
+    tight = cc.simulate(d, t, adj, raw, dv, park, exit_rank=6, **BANDED)[1]
+    loose = cc.simulate(d, t, adj, raw, dv, park, exit_rank=19, **BANDED)[1]
+    n_tight = len([x for x in tight if "entry_date" in x])
+    n_loose = len([x for x in loose if "entry_date" in x])
+    assert n_tight > n_loose, (
+        f"a tighter exit band must churn the book more, got {n_tight} vs {n_loose} entries")
+
+
+def test_the_rider_switch_is_wired_to_something():
+    """`rider=False` is the cell that prices §2. If it changed nothing, that cell would report the
+    rider as free when it had never been turned off."""
+    d, t, adj, raw, dv, park = _banded_world()
+    on = cc.simulate(d, t, adj, raw, dv, park, rider=True, **BANDED)[3]
+    off = cc.simulate(d, t, adj, raw, dv, park, rider=False, **BANDED)[3]
+    assert on["rider_blocks"], "the fixture shares a market factor — the cluster cap must bind"
+    assert not off["rider_blocks"], "rider=False must not consult the rider at all"
+
+
+def test_the_held_book_diversification_is_reported_on_every_run():
+    """WO-A6 §2: continuous effective bets is reported, not enforced. It has to be THERE."""
+    d, t, adj, raw, dv, park = _banded_world()
+    health = cc.simulate(d, t, adj, raw, dv, park, **BANDED)[3]
+    hb = health["held_book"]
+    assert hb and hb["sessions"] > 0
+    assert 1.0 <= hb["p5"] <= hb["median"] <= BANDED["n"] + 1e-9, (
+        f"effective bets cannot exceed the number of names held: {hb}")
+    assert hb["max_cluster_max"] >= 1
+
+
+def test_the_path_quality_gate_is_wired_to_something():
+    d, t, adj, raw, dv, park = _banded_world()
+    open_door = cc.simulate(d, t, adj, raw, dv, park, path_quality_gate=False, **BANDED)[3]
+    gated = cc.simulate(d, t, adj, raw, dv, park, path_quality_gate=True, **BANDED)[3]
+    assert "path quality" not in open_door["rider_blocks"]
+    assert gated["rider_blocks"].get("path quality", 0) > 0, (
+        "half the pool sits below its own median by construction — the gate must refuse someone")
