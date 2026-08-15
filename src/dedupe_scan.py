@@ -150,14 +150,29 @@ def reused_ticker_pairs(cur):
     Measured 2026-08-14: runs 484 and 491 both held BBBY_old.US and BBBY.US AT THE SAME TIME in
     February 2018 — one company, two of five slots, and every cap counting it as two names.
     """
+    # Only pairs where the surviving line COVERS the `_old` one end to end. 047's guard refuses any
+    # exclusion that would drop a line starting before the one kept in its place, and it is right
+    # to — so a pass that proposes such a pair is proposing something it cannot defend, and one
+    # undefendable pair kills the whole run. `CBIO_old.US` is exactly that: it starts before
+    # `CBIO.US`, and it reached the proposal list because the gap-finder's cut swept up the middle
+    # of this distribution along with the clean duplicates.
+    #
+    # Coverage is the right filter rather than a tighter score, because it is the guard's own
+    # question asked in advance. It is also why the clean cases pass: the `_old` series all begin
+    # at 2016-08-12, the backfill boundary, while several bases reach back to 2005.
     cur.execute("""
-        select u.ticker, replace(u.ticker, '_old', '') as base
-          from universe u
-         where u.ticker like '%%!_old.US' escape '!'
-           and exists (select 1 from universe b where b.ticker = replace(u.ticker, '_old', ''))
-           and exists (select 1 from prices p join prices q on q.ticker = replace(u.ticker,'_old','')
-                                              and q.d = p.d
-                        where p.ticker = u.ticker)""")
+        with pair as (select u.ticker as old_t, replace(u.ticker, '_old', '') as base_t
+                        from universe u
+                       where u.ticker like '%%!_old.US' escape '!'
+                         and exists (select 1 from universe b
+                                      where b.ticker = replace(u.ticker, '_old', ''))),
+             span as (select ticker, min(d) a, max(d) b from prices group by ticker)
+        select p.old_t, p.base_t
+          from pair p join span o on o.ticker = p.old_t
+                      join span s on s.ticker = p.base_t
+         where s.a <= o.a and s.b >= o.b
+           and exists (select 1 from prices x join prices y on y.ticker = p.base_t and y.d = x.d
+                        where x.ticker = p.old_t)""")
     # ordered as the scorer expects (t1 < t2) so the returned rows line up with `score`
     return [tuple(sorted(r)) for r in cur.fetchall()]
 
