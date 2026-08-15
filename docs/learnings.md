@@ -287,3 +287,26 @@ is `roadmap-2026-07-31.md`.
     **Cut every window before believing any headline from it, and prefer disjoint sub-windows to
     nested ones.** The rank correlation between the two windows this programme had been using read
     +0.872; between genuinely disjoint halves it is +0.592. The nested pair was flattering itself.
+41. **A merge plan written from the diff's shape is a guess; the imports are the fact.** WO-A21
+    split 184 commits into four PRs by reading which files changed and how risky each looked. Three
+    of the four groupings were impossible, and each would have put a red build on `main`.
+    `concentrated.py` and `blend.py` were filed as "research tooling, nothing imports it from the
+    pipeline" — true of the pipeline, irrelevant to the question, because they import eight symbols
+    from `backtest.py` that `main` does not have. A parity test was scheduled to land *before* the
+    refactor it proves, so that "the proof exists independently of the thing it proves" — except it
+    calls two functions that do not exist until that refactor. And a one-line `conftest.py` change
+    was described as a free bonus; it truncates three tables created by migrations the same document
+    holds back, so taking it alone errors **all 153** integration tests rather than the four new ones.
+    The near-miss underneath is worth more than the three errors. `verify_run.py`, `dedupe_scan.py`
+    and `capture_audit.py` all read `universe_excluded`, created by migration 041 — which §5 held
+    back as production data. The auditor would have merged **unable to run at all**, and no test
+    would have said so, because the unit tests never touch a database and the integration suite was
+    being handed the branch's schema. The fix was to notice that 041 does two separable things:
+    creates a table, then fills it with twelve hand-curated rows. The tools need the table. The rows
+    are the stale evidence. **When a migration blocks a merge, check whether its DDL and its DML
+    actually need to travel together** — usually they do not, and an empty table is an honest
+    default in a way that stale rows are not.
+    **The rule this leaves: a PR is not proposed until it has been assembled on top of the branch
+    point it targets and run there.** A worktree at `origin/main`, the candidate files checked out
+    over it, a fresh database, both suites. It took one command each and found everything above;
+    reasoning about the diff had found none of it, twice.

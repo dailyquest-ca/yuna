@@ -136,34 +136,72 @@ addendum: what closed, what new debt this created, and the fact that production 
 
 ## 4. Recommended sequence
 
-Four PRs, smallest risk first. Each is independently revertible.
+### 4.0 The first draft of this section was wrong three times
 
-**PR 1 — the auditor and the tooling.** `verify_run.py`, `dedupe_scan.py`, `capture_audit.py`,
-`push_study.py`, `blend.py`, `bars.py`, `finding.py`, `backtest_report.py`, `concentrated.py`,
-their tests, and the docs — including §3A's index, the supersession markers and the roadmap
-addendum. Nothing in the nightly path imports any of it. *Also fixes the CI email spam:*
-`tests/integration/conftest.py` adds `push_study` to the truncate list.
+Written from the shape of the diff rather than from the imports, and **each error would have put a
+red build on `main`.** Recorded rather than quietly fixed, because the lesson is the reusable part.
 
-**PR 2 — the parity proof.** `tests/test_refactor_parity.py` alone, against the current
-`arming.py` and `fundamentals.py` on main. It must pass **before** the refactors land, so the
-proof exists independently of the thing it proves.
+1. **PR 1 could not have contained `concentrated.py` or `blend.py`.** They import eight symbols
+   from `backtest.py` — `SPREAD_CURVE`, `BENCH`, `PARK_BAND`, `PARK_CHECK_EVERY`, `param_digest`,
+   `_discontinuous`, `MAX_QUARANTINE_SHARE`, `DataIntegrityError` — and **`main` has none of them.**
+   Collection-time `ImportError`. Same for `push_study.py`, which needs `signals.regression_momentum`.
+2. **PR 2 as written was impossible.** "Land the parity test first, against `main`'s `arming.py`
+   and `fundamentals.py`" — except the test calls `sg.m4_acceleration` and `sg.confirmation_state`,
+   and neither function exists on `main`. It cannot run before the refactor it proves. The instinct
+   was right and the mechanism was wrong: **what makes the test independent is that it transcribes
+   `main`'s implementation instead of importing it.** That property does not need an ordering.
+3. **The `conftest.py` change was described as a free bonus.** It truncates `push_study`,
+   `bill_rates` and `universe_excluded` — three tables created by migrations §5 holds back. Taken
+   without them, **every one of the 153 integration tests errors**, not just the new ones.
 
-**PR 3 — the production refactors.** `signals.py`, `arming.py`, `fundamentals.py`, `db.py`,
-`check.py`. PR 2's tests turn green against the new code and stay green.
+All three were found by building PR 1 in a worktree on top of `origin/main` and running it against
+a fresh database. That is now the standard: **a PR in this sequence is not proposed until it has
+been assembled and run against the branch point it targets.**
 
-**PR 4 — the verification instrument.** `backtest.py` and `test_price_integrity.py`. Record the
-current law-backtest headline in the PR body, merge, re-run, and record the new one.
+### 4.1 One dependency the plan had missed entirely
+
+`verify_run.py`, `dedupe_scan.py` and `capture_audit.py` all query **`universe_excluded`** in SQL,
+and migration 041 creates it. §5 holds all eleven migrations, so the auditor would have shipped
+unable to run.
+
+041 does two separable things: it creates the table, then inserts twelve hand-curated exclusions.
+**The tools need the first. The twelve rows are exactly what should wait** — the tape has been
+re-fetched since 041 was written, and its own APPS/BDN entry says "pending a re-pull". So
+`049_the_exclusion_table.sql` carries the DDL alone, and 041 stays untouched: its
+`create table if not exists` becomes a no-op, its inserts stay `on conflict do nothing`, and
+dispatching it later still applies precisely the rows it always did.
+
+**An empty exclusion table is the honest default** — "nothing has been ruled out yet" is true;
+"these twelve were ruled out on evidence last checked in August" is not.
+
+### 4.2 The sequence, corrected and verified
+
+| PR | contents | why it can go |
+| --- | --- | --- |
+| **1** | `verify_run.py`, `dedupe_scan.py`, `capture_audit.py`, `finding.py`, `bars.py`, `backtest_report.py` · their tests · **all** docs · `migrations/049` · `conftest` + `universe_excluded` · `dedupe.yml` · `README.md` | imports only `db.connect/dry/Heartbeat/config`, all present on `main`. **Verified: 205 unit + 151 integration green on top of `origin/main`, fresh database.** |
+| **2** | `signals.py`, `arming.py`, `fundamentals.py`, `db.py`, `check.py` · **`test_refactor_parity.py` in the same PR** | the parity test cannot precede the functions it calls. Its independence comes from transcription, not from ordering — §2.2 |
+| **3** | `backtest.py` · `test_price_integrity.py` · `test_backtest_engine.py` | needs PR 2's `signals`. Record the current law-backtest headline in the PR body, merge, re-run, record the new one — §3 |
+| **4** | `concentrated.py`, `blend.py`, `push_study.py` · `test_concentrated.py`, `test_blend.py`, `test_push_study.py`, `test_tail_equivalence.py` | needs PR 3's `backtest` symbols and PR 2's `signals.regression_momentum` |
+
+Each is independently revertible. **PR 1 changes no production data**: migration 049 creates one
+empty table and `migrate.yml` is dispatch-only, so merging does not even apply it.
 
 ---
 
 ## 5. What must NOT merge yet
 
-**The eleven migrations (038–048).** They change production data: benchmarks and a riskless rate,
-warrant and test-symbol exclusions, the deduplicated universe, the push ledger becoming a table,
-and two passes at duplicate listings. `migrate.yml` is dispatch-only, so merging does not apply
-them — but it makes them applicable, and several were written against a tape that has since been
-re-fetched. **Each needs its evidence re-checked against the current census before it is
-dispatched**, which is exactly the staleness learning 35 records.
+**The eleven migrations (038–048)** — every one, including 041, whose DDL is carried separately by
+049 precisely so that its twelve rows can keep waiting (§4.1). They change production data:
+benchmarks and a riskless rate, warrant and test-symbol exclusions, the deduplicated universe, the
+push ledger becoming a table, and two passes at duplicate listings. `migrate.yml` is dispatch-only,
+so merging does not apply them — but it makes them applicable, and several were written against a
+tape that has since been re-fetched. **Each needs its evidence re-checked against the current
+census before it is dispatched**, which is exactly the staleness learning 35 records.
+
+Two consequences of holding them, both intended. `push_study` and `bill_rates` do not exist until
+the migrations land, so `push_study.py` (PR 4) cannot run against production until then — it can
+still be reviewed and merged. And the `conftest` truncate list grows in step with the tables, one
+line per PR, rather than arriving ahead of them.
 
 **The workflow changes**, except the `dedupe` job and the `conftest` fix. `backtest.yml` gained
 research jobs and an audit step that **fails the build on a failed audit** — correct, and it will
