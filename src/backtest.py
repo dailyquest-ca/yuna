@@ -1458,7 +1458,6 @@ def simulate(frame, cfg):
         what is left has the same basis, the same stop and the same milestones ahead of it.
         """
         p = book[tk]
-        j = col[tk]
         share = qty / p["qty"]
         # Decisions ride raw prices, so the sleeve's P&L is price-only. The dividend the adjusted
         # series implies is measured and reported (`stats.dividend_bps`) rather than either banked
@@ -1609,7 +1608,6 @@ def simulate(frame, cfg):
                 continue
 
             # ---- §3.2 breakout confirmation, judged at EOD on the sessions since entry
-            k = t - p["entry_idx"] + 1
             window = range(p["entry_idx"], min(p["entry_idx"] + sg.CONFIRM_SESSIONS, t + 1))
             if hyp["confirm_before_entry"]:
                 # E1: the breakout was confirmed before a share was bought, so there is nothing to

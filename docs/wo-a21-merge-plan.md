@@ -101,14 +101,48 @@ before/after is legible rather than surprising.
 
 ---
 
+## 3A. The cleanup, done 2026-08-15
+
+Three things were owed before any of this is reviewable by someone who was not here.
+
+**Dead code.** There is no linter in CI, so this was measured rather than assumed: `ruff --select
+F,E9` against `main`'s tree flags **33**, against this branch **37**. Seven of the branch's were
+introduced here; the rest are `main`'s and are deliberately left alone, because an unrelated
+cleanup inside a 24k-line diff is how a real change hides. The seven were two dead locals in
+`backtest.py` (`j = col[tk]` left behind when dividends went to zero, `k = t - entry_idx + 1`
+replaced by the `window` range — neither read anywhere, both checked), unused imports in
+`concentrated.py`, `push_study.py`, `test_concentrated.py` and `test_verify_run.py`, and a dead
+`n = 500` in a fixture. **The branch now flags 30 against `main`'s 33.** Both suites re-run after:
+567 unit, 151 integration, green.
+
+**A docs directory that had stopped being navigable.** 42 files at one level, against a root
+README that says *"three documents, and only three."* `docs/README.md` is now the index — the three,
+then the programme, then the earlier record — and it marks what is superseded.
+
+**Superseded documents that did not say so.** This is the one that could have cost something.
+`wo-a15-v1-synthesis.md` states at the top what *it* supersedes and nothing about being superseded
+itself, so a reader would have taken `b5_12_3` — a cell selected on the defective tape — as the
+answer. Four documents now carry a warning block: `wo-a15` (wrong cell, defective tape), `wo-a17`
+(§3's finding stated too broadly, §3.1's decomposition invalid), `synthesis-2026-08-14.md` (all
+numbers pre-screen, one window), and the `backtest-findings` pair, which already had theirs. Each
+block also says **what still stands**, because a superseded document is not a worthless one.
+
+`roadmap-2026-07-31.md` — one of the three — had not moved since 08-11. It now carries a dated
+addendum: what closed, what new debt this created, and the fact that production is untouched. Its
+"both backtests bypass `signals.py`" debt row is closed and marked: `backtest.py` went from **0 to
+45** `signals` calls across 33 distinct functions.
+
+---
+
 ## 4. Recommended sequence
 
 Four PRs, smallest risk first. Each is independently revertible.
 
 **PR 1 — the auditor and the tooling.** `verify_run.py`, `dedupe_scan.py`, `capture_audit.py`,
 `push_study.py`, `blend.py`, `bars.py`, `finding.py`, `backtest_report.py`, `concentrated.py`,
-their tests, and the docs. Nothing in the nightly path imports any of it. *Also fixes the CI
-email spam:* `tests/integration/conftest.py` adds `push_study` to the truncate list.
+their tests, and the docs — including §3A's index, the supersession markers and the roadmap
+addendum. Nothing in the nightly path imports any of it. *Also fixes the CI email spam:*
+`tests/integration/conftest.py` adds `push_study` to the truncate list.
 
 **PR 2 — the parity proof.** `tests/test_refactor_parity.py` alone, against the current
 `arming.py` and `fundamentals.py` on main. It must pass **before** the refactors land, so the

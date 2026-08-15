@@ -27,7 +27,7 @@ import datetime as dt
 import numpy as np
 
 from db import connect, dry, Heartbeat
-from capture_audit import episodes_for_name, load_tape, LOOKBACK
+from capture_audit import episodes_for_name, load_tape
 import signals as sg
 
 DEFAULT_START = dt.date(2017, 9, 1)      # the E-series record's window (runs 46+)

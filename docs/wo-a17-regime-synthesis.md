@@ -1,5 +1,21 @@
 # WO-A17 · The strategy, exactly — and the regime that produces its entire result
 
+> ### ⚠️ Superseded in two specific places. The rest stands.
+>
+> **§3's central finding is stated too broadly.** "Zero of twenty-five configurations made money
+> over 2007–2017" is true of twenty-five **ungated** configurations. With the regime gate reaching
+> the banded book — it was inert when this was written — that decade returns +11.08% a year. The
+> regime dependence is a property of momentum *held through downtrends*, not of momentum.
+>
+> **§3.1's decomposition lays separate runs end to end**, which does not compose: the nine-year run
+> parks in SPMO and the twenty-year run parks in SPY, and under a gate the park *is* the return for
+> every session the book is off.
+>
+> The current strategy of record is [`wo-a20-v2-decision.md`](wo-a20-v2-decision.md).
+>
+> **Still good here:** §1's rule and constants, §2, the clean-tape grid, §4's mechanism, and §5's
+> established/not-established split.
+
 **Written 2026-08-15.** Supersedes the recommendation in `wo-a15-v1-synthesis.md`, which named the
 wrong cell on a defective tape. Every number here comes from runs 497–546, produced on a screened
 tape by code at `49904e7`, and every one is reproducible to the digit.

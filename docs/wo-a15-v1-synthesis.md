@@ -1,5 +1,20 @@
 # WO-A15 · The V1 momentum strategy — decision record and reproduction spec
 
+> ### ⚠️ Superseded. Do not act on the recommendation.
+>
+> **The cell this document names, `b5_12_3`, was selected on a defective tape.** The discontinuity
+> guard was blind below $1 and blind across trading gaps, so mis-stated split factors reached the
+> book — 136 names, 1,865 bars, plus `CLSK.US` at 9,372×. Every cell was re-run on a screened tape
+> and the ranking changed.
+>
+> The current strategy of record is [`wo-a20-v2-decision.md`](wo-a20-v2-decision.md).
+> [`wo-a17-regime-synthesis.md`](wo-a17-regime-synthesis.md) superseded this one first, and was
+> itself superseded in turn.
+>
+> **Still good here:** §1–2's reproduction spec (the *shape* of the rule is unchanged), §4's
+> honesty section, and §5's merge conditions — one of which, the M4 differential test, is now
+> `tests/test_refactor_parity.py`.
+
 **Written:** 2026-08-15. Supersedes the recommendation sections of WO-A13 and WO-A14.
 **Status:** research complete; **not adopted**. Adoption is a `docs/yuna_plan.md` amendment.
 **Code:** `src/concentrated.py` at `9538139`, cell `b5_12_3`.

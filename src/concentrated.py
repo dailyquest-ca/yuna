@@ -62,7 +62,6 @@ import sys
 import json
 import hashlib
 import pathlib
-import datetime as dt
 
 import numpy as np
 

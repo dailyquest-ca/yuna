@@ -1786,7 +1786,7 @@ def test_probe_dates_never_land_on_a_weekend_and_spread_across_weekdays():
     as the start. 2006-01-01 is a Sunday: all 34 probes would have asked for a session the market
     was shut, the union would have come back empty, and the census screen would have silently
     dropped every delisted name instead of screening them."""
-    import importlib.util, datetime as _dt
+    import datetime as _dt
     src = open("src/backfill.py").read()
     ns = {"dt": _dt}
     exec(src[src.index("def probe_dates"):src.index("def liquid_in_window")], ns)
@@ -1822,7 +1822,6 @@ def test_the_regime_latch_is_asymmetric_and_filters_whipsaw():
 def test_the_rising_clause_refuses_a_bounce_off_a_falling_average():
     """Zak's 'proof of recovery'. Being above a 200-day that is still falling is a dead-cat
     bounce; 2008-09 had several. The average itself has to be climbing."""
-    n = 500
     # a long decline, then a sharp bounce that clears a still-falling average
     px = np.concatenate([np.linspace(300.0, 120.0, 400), np.linspace(120.0, 190.0, 100)])
     i = 460

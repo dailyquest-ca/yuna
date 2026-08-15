@@ -1,5 +1,22 @@
 # Yuna — momentum research synthesis
 
+> ### ⚠️ Every number here was measured before the tape was screened.
+>
+> This document is written to be read outside the repo, which makes the warning matter more rather
+> than less. On 2026-08-15 the discontinuity guard was found blind below $1 and blind across
+> trading gaps; mis-stated split factors reached the book on 136 names over 1,865 bars, and
+> `src/concentrated.py` had no tape screen at all. Every cell was re-run afterwards and the
+> ranking changed.
+>
+> **It also measures one window.** The 2017–2026 record here is the half of the tape momentum
+> works on; the disjoint 2007–2017 decade was not cut until WO-A18, and ungated it returns −0.96%
+> a year.
+>
+> Current: [`wo-a20-v2-decision.md`](wo-a20-v2-decision.md) for the strategy,
+> [`wo-a18-programme-record.md`](wo-a18-programme-record.md) for the full history.
+> **What still stands is the method** — §4.3's standing recommendation against the arm, the
+> withdrawn-recommendation record at §5, and the discipline of naming every run ID.
+
 **As of 2026-08-14 · window 2017-08-15 → 2026-08-12 · 2,260 sessions · $200k start · US equities ·
 costs charged · next-open execution**
 
