@@ -268,3 +268,22 @@ is `roadmap-2026-07-31.md`.
     applied before a data-read cut must be re-examined together with the cut, not separately. And
     the run that exposed this was report-only: `SCAN_APPLY` defaulting to false is what stood
     between a reasoned change and a deleted company.
+40. **A twenty-year backtest is not twenty years of evidence until you cut it.** The banded book
+    returns 16.51%/yr over 2007-2026 on a clean tape, reproducing to the digit. Split at the
+    midpoint and it is **−5.22%/yr over 2007-2017 and +48.03%/yr over 2017-2026** — and the first
+    half is negative in **all twenty-five** cells of the 5x5 band grid, from −0.96% to −7.49%,
+    every one with a drawdown near −80%. There is no configuration of this rule that made money in
+    the first decade.
+    The compounding hides it perfectly: a decade at −5% costs 43%, nine years at +48% makes 33x,
+    and the product is a respectable-looking 16.5% headline that describes neither period. **A
+    single CAGR over a long window is the statistic most able to conceal a regime dependence**,
+    because the good years dominate the geometric mean and the bad years leave no trace in it.
+    Two consequences worth carrying. §2.5's deflated Sharpe had already said this in one number —
+    0.113 over 347 trials — and it was easier to read the CAGR and treat the deflation as a
+    technicality. It was not a technicality; it was the same fact. And the sub-window split is
+    cheap, which makes its absence from every prior WO in this programme the real defect: fifty
+    cells were compared on their full-window numbers and none of the comparisons could have
+    revealed that all of them lost money for ten years.
+    **Cut every window before believing any headline from it, and prefer disjoint sub-windows to
+    nested ones.** The rank correlation between the two windows this programme had been using read
+    +0.872; between genuinely disjoint halves it is +0.592. The nested pair was flattering itself.

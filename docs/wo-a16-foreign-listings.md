@@ -306,6 +306,59 @@ The two honest ways forward are a ruling on specific named pairs, or leaving it 
 size. What must not happen is a threshold adjusted until it emits exclusions — the near-miss in
 §6b's register began exactly that way, and it nearly deleted Randgold.
 
+## 6e. The grid on a clean tape, and the thing it exposes
+
+Fifty cells on the two windows WO-A14 used, plus twenty-five on a window **disjoint** from both.
+
+**Entry-band column means (the exit band matters far less):**
+
+| entry band | 2007-2017 | 2017-2026 | 2007-2026 |
+| ---: | ---: | ---: | ---: |
+| 1 | −3.80% | +51.31% | 17.38% |
+| 2 | **−2.61%** | +50.99% | **18.27%** |
+| **3** | **−6.55%** | **+46.59%** | **14.93%** |
+| 4 | −5.15% | +48.03% | 16.07% |
+| 5 | −4.35% | +50.79% | 17.92% |
+
+**Entry band 3 is the worst column on all three windows**, including the disjoint one. Zak's chosen
+`b5_12_3` ranks 14th, 15th and 17th of 25. The band finding is real — Spearman between the two
+*disjoint* windows is **+0.592** (the overlapping comparison flattered it at +0.872) — and it says
+the entry band should be tighter than 3. **3/12 was chosen from a contaminated grid and does not
+survive a clean one.**
+
+### But that is the second-order finding. This is the first-order one:
+
+> **Zero of twenty-five configurations made money between 2007 and 2017.**
+> The range is −0.96% to −7.49% a year, every cell, with drawdowns of −80% to −84%.
+
+The twenty-year headline is not a twenty-year record. It is:
+
+    2007-01-05 .. 2017-08-14   (2,671 sessions)   −5.22%/yr   →  about −43% cumulative
+    2017-08-15 .. 2026-08-13   (2,261 sessions)   +48.03%/yr  →  about 33x
+    ------------------------------------------------------------------------------
+    2007-01-05 .. 2026-08-13   (4,932 sessions)   +16.51%/yr
+
+**Every dollar of the edge comes from the last nine years, and the first ten lost money in every
+configuration tested.** No band setting, no participation floor and no tape fix changes that; the
+whole 5x5 surface is under water for the first decade.
+
+This is what the §2.5 verdict was already saying in a single number. A deflated Sharpe of 0.113
+over 347 trials is what it looks like when a result rests on one regime, and the regime here is
+identifiable: post-2016, the era of persistent mega-cap momentum. **The honest description of this
+strategy is not "16.5% a year for twenty years." It is "a bet that the 2017-2026 regime
+continues," and it should be written down that way or not at all.**
+
+Three things follow, and none of them is another grid.
+
+1. **A plan amendment that quotes the twenty-year CAGR would be misleading**, even though the
+   number is now arithmetically correct on a clean tape and reproduces to the digit.
+2. **The regime question is the whole question.** WO-A10's regime work was ruled advisory on the
+   grounds that the filter's edge was concentrated in 2008-09. That reasoning now cuts the other
+   way: if the strategy only works in one regime, knowing which regime you are in stops being
+   advisory.
+3. **A forward record is the only evidence that would move this**, and it is worth starting for
+   exactly that reason.
+
 ## 7. What is still open
 
 - **The universe-wide count is unknown.** 372 names sit at a no-trade rate of 3%+ among those
