@@ -6,7 +6,10 @@
 [`docs/roadmap-2026-07-31.md`](docs/roadmap-2026-07-31.md) is the build order — what is done, what
 drifted from the law, what gets built next and in which order. [`docs/learnings.md`](docs/learnings.md)
 is the scar tissue: facts this build paid for, worth reading before touching anything.
-(`docs/backtest-findings-2026-07-31.md` is dated evidence, not instruction.)
+
+Everything else in `docs/` is **dated evidence, not instruction** — and some of it has been
+overturned by a later run. [`docs/README.md`](docs/README.md) is the index: what to read, what is
+superseded, and why.
 
 ## Architecture (mirror of plan §4.0)
 
@@ -36,6 +39,7 @@ is the scar tissue: facts this build paid for, worth reading before touching any
 
 ```
 docs/         the plan (law), the roadmap (build order), the learnings (scar tissue)
+              + dated evidence — see docs/README.md for what supersedes what
 migrations/   numbered SQL, applied by the dispatch-only `migrate` workflow
 src/          ingest + compute jobs (Python); db.py holds the shared heartbeat contract
 .github/      workflows (all times UTC)
