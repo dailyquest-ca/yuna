@@ -282,6 +282,30 @@ and this programme has run a great deal of search.
 It does not say the strategy is bad. It says **the evidence does not yet clear the bar the plan
 sets**, and that a forward record is what would change it — not another grid.
 
+## 6d. The duplicate listings cannot be closed by a threshold, and that is the finding
+
+The scan was made dispatchable, given a second pass on the vendor's own `_old` reuse marker, had
+its threshold metric corrected, and had the coverage test moved off the scored population. After
+all four it proposes **nothing**, from either pass:
+
+```
+reused symbols (`_old`): widest gap 0.2714 -> 0.6552 (0.3838 wide, 2.4x)  — not separated by 3.0x
+the whole census:        widest gap 0.2134 -> 0.3316 (0.1182 wide, 1.6x)  — not separated by 3.0x
+```
+
+That is the correct answer, not a failure to fix. The `_old` population contains a genuine
+continuum — `GCI` at 0.27, `CBIO` at 0.54, `WFRD` at 0.67 are a corporate split and two
+reorganisations, sitting squarely between "one company" and "two companies." A cut placed in that
+region would be fitted, which is precisely what the scan exists to refuse.
+
+**So the duplicate defect stays open, and its size is known rather than guessed:** `BBBY_old.US`
+and `BBBY.US` held together for nine sessions in February 2018, one episode across a twenty-year
+run. `verify_run.py`'s B7 check now fails any run that repeats it.
+
+The two honest ways forward are a ruling on specific named pairs, or leaving it at that measured
+size. What must not happen is a threshold adjusted until it emits exclusions — the near-miss in
+§6b's register began exactly that way, and it nearly deleted Randgold.
+
 ## 7. What is still open
 
 - **The universe-wide count is unknown.** 372 names sit at a no-trade rate of 3%+ among those
