@@ -44,19 +44,46 @@ def test_the_reused_symbol_population_separates_where_the_whole_census_does_not(
     same_company = [1.0000, 1.0000, 1.0000, 1.0000, 1.0000, 1.0000, 0.9991, 0.9991, 0.9978,
                     0.9974, 0.9971, 0.9958, 0.9953, 0.9947, 0.9944, 0.9931, 0.9918, 0.9860,
                     0.9838, 0.9831, 0.9810, 0.9792, 0.9788, 0.9767, 0.9513, 0.8930, 0.8736]
-    ambiguous = [0.6665, 0.5434, 0.2740]     # WFRD, CBIO, GCI — reorganisations and a split
+    # WFRD, CBIO and GCI are reorganisations and a corporate split. The coverage filter in
+    # `reused_ticker_pairs` removes them before scoring, because their `_old` line carries history
+    # the survivor does not — so the population the scan actually thresholds is the one below.
     different = [0.0516, 0.0120, 0.0066, 0.0060, 0.0053, 0.0050,
                  0.0038, 0.0036, 0.0024, 0.0016, 0.0015, 0.0010]
-    lo, hi, ratio = ds.widest_gap(same_company + ambiguous + different)
-    assert ratio >= ds.THRESHOLD_MIN_GAP, "this population is separated well enough to cut"
+    lo, hi, ratio = ds.widest_gap(same_company + different)
+    assert (lo, hi) == (0.0516, 0.8736), "the gap is between the two populations"
+    assert ratio >= ds.THRESHOLD_MIN_GAP and hi >= ds.MIN_SAMENESS
     cut = (lo * hi) ** 0.5
     assert all(s > cut for s in same_company), "every clear duplicate must land above the cut"
-    assert all(d < cut for d in different), "WTW_old/WTW must survive — it is a second company"
-    # The middle is NOT asserted either way, deliberately. The gap-finder puts the cut at 0.119,
-    # which classes all three as duplicates; the first draft of this test asserted the opposite
-    # because that was the author's reading of what WFRD and GCI are, not a measurement. A test
-    # that encodes an opinion about ambiguous cases would fail whenever the data was right.
-    assert lo in different and hi in ambiguous, "the cut sits below the ambiguous middle"
+    assert all(d < cut for d in different), (
+        "GOLD_old (Randgold, 0.0516) must survive — Barrick is a different company")
+
+
+def test_the_gap_is_chosen_by_DIFFERENCE_because_agreement_is_a_proportion(): # noqa: N802
+    """The 2026-08-14 near-miss, kept as a fixture.
+
+    Ratio-selection put the widest gap at 0.0060 -> 0.0513: 8.6x, clearing THRESHOLD_MIN_GAP, and
+    both numbers meaning the two lines agree on essentially nothing. The proposed cut was 0.0175,
+    and `GOLD_old.US` — Randgold, 0.0516 — was one row from being deleted in favour of Barrick.
+
+    On a [0,1] scale the widest ratio sits wherever the smallest numbers are, which is exactly
+    where the score has stopped carrying information. Difference is the metric a proportion
+    supports, and it finds the hole that matters.
+    """
+    scores = [0.0060, 0.0513, 0.0516, 0.8736, 0.9513, 0.9767, 0.9918, 1.0000]
+    lo, hi, _ = ds.widest_gap(scores)
+    assert (lo, hi) == (0.0516, 0.8736), "the real hole is the one spanning 0.82, not 0.045"
+    assert (0.0060 * 0.0513) ** 0.5 < 0.02, "the ratio metric's answer was a cut near 1.75%"
+
+
+def test_a_cut_that_would_call_mostly_different_series_the_same_is_refused():
+    """MIN_SAMENESS. A cut asserts the lines above it ARE the same series, so a population that
+    agrees on under half its moving sessions cannot be on the far side of one — it disagrees more
+    often than it agrees. This is the floor of the claim, not a tuned threshold, and it is the
+    second of the two conditions that would each independently have stopped the Randgold case."""
+    scores = [0.0010, 0.0020, 0.0060, 0.0513, 0.0516, 0.0600]
+    lo, hi, ratio = ds.widest_gap(scores)
+    assert ratio >= ds.THRESHOLD_MIN_GAP, "the ratio test alone would let this through"
+    assert hi < ds.MIN_SAMENESS, "but nothing here agrees often enough to be one security"
 
 
 def test_a_continuum_yields_no_defensible_threshold():

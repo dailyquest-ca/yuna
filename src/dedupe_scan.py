@@ -41,6 +41,20 @@ MIN_PROBE_HITS = 4
 # The scan refuses to propose a threshold unless the two populations are separated by at least
 # this ratio. Placing a cut inside a continuum is fitting; placing one inside a gap is reading.
 THRESHOLD_MIN_GAP = 3.0
+# ...and the gap must be the widest by DIFFERENCE, not by ratio. Agreement is a proportion in
+# [0,1], and on that scale a ratio is dominated by the bottom: 0.0060 to 0.0513 is 8.6x, clears
+# the bar above, and both numbers mean the two lines agree on essentially nothing. On 2026-08-14
+# that produced a proposed cut of 0.0175 — two series are the same company if they agree on 1.75%
+# of their moving sessions — and put GOLD_old.US (Randgold, 0.0516) up for deletion in favour of
+# GOLD.US (Barrick). Proportions are compared by difference; ratios belong to quantities with a
+# meaningful zero and an unbounded range.
+#
+# The difference metric alone is not enough, because it says nothing about WHERE the gap sits. A
+# cut is a claim that the lines above it are THE SAME SERIES, and two lines that agree on less
+# than half their moving sessions disagree more often than they agree. That is not a fitted
+# threshold, it is the logical floor of the claim being made: the scan may not assert sameness of
+# series that mostly differ. So the population above the gap must clear one half.
+MIN_SAMENESS = 0.5
 
 
 def probe_anchors(cur, every=120):
@@ -115,20 +129,24 @@ def score(cur, pairs):
 
 
 def widest_gap(fracs):
-    """The largest multiplicative gap between consecutive scores, and where it sits.
+    """The largest gap between consecutive scores, and where it sits.
 
     Reported so the threshold is visibly read off the data. Returns (lo, hi, ratio) — lo is the
     best score BELOW the gap and hi the worst score above it, so any cut in (lo, hi] separates the
-    same two populations.
+    same two populations. The ratio comes back for the caller's separation test and for the
+    exclusion's stated reason, but it is NOT what selects the gap.
+
+    Selection is by DIFFERENCE. See MIN_SAMENESS: on a [0,1] agreement scale the widest ratio sits
+    wherever the smallest numbers are, and the smallest numbers are exactly where the score has
+    stopped meaning anything.
     """
     xs = sorted(f for f in fracs if f > 0)
     if len(xs) < 2:
         return None
     best = None
     for lo, hi in zip(xs, xs[1:]):
-        ratio = hi / lo if lo > 0 else float("inf")
-        if best is None or ratio > best[2]:
-            best = (lo, hi, ratio)
+        if best is None or (hi - lo) > (best[1] - best[0]):
+            best = (lo, hi, hi / lo if lo > 0 else float("inf"))
     return best
 
 
@@ -231,10 +249,17 @@ def main():
                     print(f"  {label}: nothing to threshold")
                     return None, None
                 lo, hi, ratio = g
-                print(f"  {label}: widest gap {lo:.4f} -> {hi:.4f} ({ratio:.1f}x)")
+                print(f"  {label}: widest gap {lo:.4f} -> {hi:.4f} "
+                      f"({hi - lo:.4f} wide, {ratio:.1f}x)")
                 if ratio < THRESHOLD_MIN_GAP:
                     print(f"    not separated by {THRESHOLD_MIN_GAP}x — a cut here would be "
                           f"fitted, not read. Proposing nothing from this pass.")
+                    return None, None
+                if hi < MIN_SAMENESS:
+                    print(f"    the population above the gap agrees on only {hi:.1%} of its "
+                          f"moving sessions, under {MIN_SAMENESS:.0%}. Calling those lines the "
+                          f"same series would assert sameness of series that mostly differ. "
+                          f"Proposing nothing from this pass.")
                     return None, None
                 c = (lo * hi) ** 0.5                     # geometric midpoint of the gap
                 print(f"    threshold {c:.4f} (geometric midpoint)")
