@@ -241,6 +241,93 @@ def check_foreign(results, cur, run_id):
           f"probable foreign listings: {worst}")
 
 
+def check_tape(results, cur, run_id):
+    """B5 — the prices this audit re-derives from must themselves be prices.
+
+    Every other check here asks whether the engine did the right arithmetic on its inputs. This one
+    asks whether the inputs were real, and it is the check that was missing when the audit passed a
+    run whose momentum ranking had been decided by a vendor's arithmetic error.
+
+    Three signatures, all computed against the LAST BAR THE NAME PRINTED rather than the previous
+    session, because the seam is nearly always across a trading gap:
+
+      * an adjusted move beyond 20x, which no equity makes in a session. The bar is basis-aware:
+        at price p a single tick of the vendor's 4dp precision spans at most (p+q)/(p-q), so a
+        sub-penny series is not condemned for quantization while a $0.40 basis still is.
+      * a bar whose own geometry is impossible — high below low, or a close outside the range.
+      * two tickers held at the same time whose daily returns agree: one company, two slots.
+
+    BMNR.US is why the first exists. It reverse-split on 2025-05-16 with the raw close stepping
+    exactly 400x and the adjustment applied exactly 20x, so the adjusted series carried a
+    fabricated 20x overnight gain, and 12-1 momentum is computed FROM that series.
+    BBBY_old.US/BBBY.US is why the third does: runs 484 and 491 held both in February 2018.
+    """
+    cur.execute("""
+        with traded as (select distinct ticker from backtest_trades where run_id = %s),
+        b as (select p.ticker, p.d, coalesce(p.adj_close, p.close) c,
+                     lag(coalesce(p.adj_close, p.close)) over
+                       (partition by p.ticker order by p.d) prev
+                from prices p join traded t on t.ticker = p.ticker
+               where coalesce(p.adj_close, p.close) > 0)
+        select ticker, d, prev, c, c/prev as ratio from b
+         where prev > 0
+           and c/prev >= greatest(20.0, case when prev > 0.0001
+                                        then (prev + 0.0001)/(prev - 0.0001) else 1e18 end)
+         order by c/prev desc limit 10""", (run_id,))
+    jumps = cur.fetchall()
+    if jumps:
+        worst = ", ".join(f"{r[0]} {r[1]} {float(r[2]):.4g}->{float(r[3]):.4g} "
+                          f"({float(r[4]):,.0f}x)" for r in jumps[:4])
+        _fail(results, "B5 the tape is prices",
+              f"{len(jumps)} impossible adjusted moves in traded names — a mis-stated split "
+              f"factor makes a name the best-scoring in the universe by arithmetic: {worst}")
+    else:
+        _ok(results, "B5 the tape is prices", "no traded name carries an impossible adjusted move")
+
+    cur.execute("""select count(*) from prices p
+                    join (select distinct ticker from backtest_trades where run_id = %s) t
+                      on t.ticker = p.ticker
+                   where p.high < p.low or p.close > p.high or p.close < p.low
+                      or p.open > p.high or p.open < p.low""", (run_id,))
+    bad_bars = cur.fetchone()[0]
+    if bad_bars:
+        _fail(results, "B6 bar geometry", f"{bad_bars} bars in traded names have a high below the "
+                                          f"low, or an open or close outside their own range")
+    else:
+        _ok(results, "B6 bar geometry", "every bar in a traded name contains its own open and close")
+
+    # One company under two symbols, held at once. The pair test is daily-RETURN agreement over
+    # shared sessions, which is `dedupe_scan.py`'s own rule — duplicates score 0.85-1.00 there and
+    # genuinely different securities 0.006-0.033, so 0.85 sits inside a gap with nothing in it.
+    cur.execute("""
+        with held as (select ticker, entry_date, coalesce(exit_date, date '2099-01-01') out
+                        from backtest_trades where run_id = %s),
+        pair as (select distinct a.ticker ta, b.ticker tb
+                   from held a join held b on a.ticker < b.ticker
+                  where a.entry_date <= b.out and b.entry_date <= a.out),
+        r as (select p.ticker, p.d, coalesce(p.adj_close,p.close)
+                     / nullif(lag(coalesce(p.adj_close,p.close))
+                       over (partition by p.ticker order by p.d),0) - 1 ret
+                from prices p
+               where p.ticker in (select ta from pair union select tb from pair))
+        select pr.ta, pr.tb, count(*) n,
+               (count(*) filter (where abs(x.ret - y.ret) < 1e-4))::numeric / count(*) agree
+          from pair pr join r x on x.ticker = pr.ta
+                       join r y on y.ticker = pr.tb and y.d = x.d
+         where x.ret is not null and y.ret is not null
+         group by 1,2 having count(*) >= 30
+            and (count(*) filter (where abs(x.ret - y.ret) < 1e-4))::numeric / count(*) >= 0.85
+         order by 4 desc""", (run_id,))
+    dupes = cur.fetchall()
+    if dupes:
+        worst = ", ".join(f"{r[0]}/{r[1]} ({float(r[3]):.1%} of {r[2]})" for r in dupes[:5])
+        _fail(results, "B7 one company one slot",
+              f"{len(dupes)} pairs held concurrently are the same security under two symbols, so "
+              f"the book doubled a position while every cap counted it twice: {worst}")
+    else:
+        _ok(results, "B7 one company one slot", "no two concurrently held names share a series")
+
+
 def check_lookahead(results, cur, run_id):
     # C1 — a fill can never reference a bar dated after itself. Structural, but cheap and the
     # class of defect it catches (an off-by-one into the future) is the expensive one.
@@ -318,6 +405,7 @@ def main():
             check_arithmetic(results, meta, eq, tr)
             check_data(results, cur, run_id, meta, eq, tr)
             check_foreign(results, cur, run_id)
+            check_tape(results, cur, run_id)
             check_lookahead(results, cur, run_id)
             check_rules(results, cur, run_id, eq)
 

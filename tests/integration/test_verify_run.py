@@ -22,12 +22,16 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 
-def _world(cur, *, lie_about_dd=True, foreign=True, overstuff=True):
+def _world(cur, *, lie_about_dd=True, foreign=True, overstuff=True, split=False, twin=False):
     """One clean name, one acquired mid-run, one that keeps a foreign calendar."""
     names = [("SPY.US", "bench", "index"), ("AAA.US", "clean", "stock"),
              ("DEAD.US", "acquired", "stock")]
     if foreign:
         names.append(("FGN.US", "foreign", "stock"))
+    if split:
+        names.append(("SPLIT.US", "mis-stated split factor", "stock"))
+    if twin:
+        names.append(("AAA_old.US", "the same company again", "stock"))
     for t, n, k in names:
         cur.execute("""insert into universe (ticker,name,kind,currency,status)
                        values (%s,%s,%s,'USD','active')""", (t, n, k))
@@ -46,6 +50,18 @@ def _world(cur, *, lie_about_dd=True, foreign=True, overstuff=True):
             cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
                            values ('FGN.US',%s,%s,%s,%s,%s,%s,1000000)""",
                         (d, 70 + i, 73 + i, 69 + i, 72 + i, 72 + i))
+        if split:
+            # dark for forty sessions, then back on the far side of a seam: the vendor recorded a
+            # 20x adjustment where the raw print stepped 400x, so the ADJUSTED series jumps too.
+            if not 100 <= i < 140:
+                px = 0.40 if i < 100 else 8.0 + i * 0.01
+                cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                               values ('SPLIT.US',%s,%s,%s,%s,%s,%s,1000000)""",
+                            (d, px, px * 1.01, px * 0.99, px, px))
+        if twin:                          # AAA under a second symbol, tick for tick
+            cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                           values ('AAA_old.US',%s,%s,%s,%s,%s,%s,1000000)""",
+                        (d, 100 + i, 103 + i, 99 + i, 102 + i, 102 + i))
 
     # the curve rises monotonically, so its TRUE max drawdown is zero
     cur.execute("""insert into backtest_runs (label,params,start_date,end_date,trading_days,
@@ -68,6 +84,16 @@ def _world(cur, *, lie_about_dd=True, foreign=True, overstuff=True):
         cur.execute("""insert into backtest_trades (run_id,ticker,entry_date,entry_price,qty,
                          exit_reason) values (%s,'FGN.US',%s,71.0,10,'open_at_end')""",
                     (rid, days[1]))
+    if split:
+        cur.execute("""insert into backtest_trades (run_id,ticker,entry_date,entry_price,qty,
+                         exit_reason) values (%s,'SPLIT.US',%s,9.4,10,'open_at_end')""",
+                    (rid, days[140]))
+    if twin:
+        # held across the SAME window as AAA.US, which is the harm: one company, two slots
+        cur.execute("""insert into backtest_trades (run_id,ticker,entry_date,entry_price,qty,
+                         exit_date,exit_price,exit_reason)
+                       values (%s,'AAA_old.US',%s,105.0,10,%s,150.0,'rank_band')""",
+                    (rid, days[5], days[50]))
     return rid
 
 
@@ -88,7 +114,7 @@ def _verdict(text, name):
 
 def test_the_auditor_catches_every_defect_it_claims_to(db, migrated):
     with db.cursor() as cur:
-        rid = _world(cur)
+        rid = _world(cur, split=True, twin=True)
     db.commit()
     text, code = _audit(migrated, rid)
 
@@ -98,6 +124,12 @@ def test_the_auditor_catches_every_defect_it_claims_to(db, migrated):
     # the foreign listing, which is the real defect this check was written for
     assert _verdict(text, "B4 listed where we think") == "FAIL", text
     assert "FGN.US" in text
+    # a mis-stated split factor, across a trading gap — the shape that got past the first guard
+    assert _verdict(text, "B5 the tape is prices") == "FAIL", text
+    assert "SPLIT.US" in text
+    # one company under two symbols, held at the same time
+    assert _verdict(text, "B7 one company one slot") == "FAIL", text
+    assert "AAA_old.US" in text
     # the book held three names while reporting two
     assert _verdict(text, "D1 slot discipline") == "FAIL", text
 
@@ -115,6 +147,10 @@ def test_the_auditor_passes_a_world_with_nothing_wrong_with_it(db, migrated):
     assert _verdict(text, "C2 execution convention") == "PASS", text
     # and the acquisition is recognised rather than reported as a missing bar
     assert _verdict(text, "B1b delisting fills") == "PASS", text
+    # the tape checks must not fire on a clean world either — a guard that always trips is noise
+    assert _verdict(text, "B5 the tape is prices") == "PASS", text
+    assert _verdict(text, "B6 bar geometry") == "PASS", text
+    assert _verdict(text, "B7 one company one slot") == "PASS", text
 
 
 def test_an_entry_priced_at_the_deciding_close_is_reported_as_such(db, migrated):

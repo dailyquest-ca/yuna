@@ -228,6 +228,18 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DD_BAR: ${{ inputs.dd_bar }}
+      # Every run audits itself, and a failed audit FAILS THE BUILD. `verify_run.py` never calls
+      # the engine — it re-derives the headline from the raw tape and checks each fill against the
+      # bar it claims to have filled on — so this is the one step that can disagree with the run
+      # that produced it. Per `.claude/rules/trading-code.md` a guard that finds a bad state halts
+      # rather than warning: the run rows are already written, and a red X is what says they must
+      # not be quoted. Every number in WO-A13 through WO-A15 was produced without this step.
+      - name: audit every run against the raw tape
+        if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true'
+        run: |
+          for rid in $(cat /tmp/run_ids.txt); do RUN_ID=$rid python src/verify_run.py; done
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: autopsy on failure
         if: failure() && steps.engine.outcome == 'failure'
         run: python src/report_fail.py concentrated /tmp/job.out
