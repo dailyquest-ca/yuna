@@ -211,6 +211,27 @@ def test_the_theme_cap_limits_how_many_of_one_industry_the_book_may_hold():
         "the freed slots must go to names the uncapped book never bought")
 
 
+def test_a_shorter_moving_average_leaves_the_market_sooner():
+    """The gate's window has never been varied — 200 is Clenow's number, inherited. A shorter
+    average sits closer to price, so it is crossed earlier on the way down. The fixture is a clean
+    single peak, so 'earlier' is unambiguous and the test cannot pass by accident."""
+    n = 900
+    idx = np.concatenate([np.linspace(100.0, 300.0, n // 2),
+                          np.linspace(300.0, 120.0, n - n // 2)])
+    state100, state200 = {}, {}
+    first_off = {}
+    for w, st in ((100, state100), (200, state200)):
+        for i in range(n):
+            if i < w:
+                continue
+            on = cc.regime_latch(i, idx, st, confirm_out=1, confirm_in=10, window=w)
+            if not on and w not in first_off and i > n // 2:
+                first_off[w] = i
+    assert first_off[100] < first_off[200], (
+        f"a 100-session average must cross before a 200-session one "
+        f"({first_off[100]} vs {first_off[200]})")
+
+
 def test_the_theme_cap_is_inert_when_it_is_not_set():
     """Every cell ruled before WO-A19 must reproduce, so an unset cap must not run at all."""
     n = 700
@@ -398,6 +419,12 @@ PARENT = {
     "b5_12_2_gp": "b5_12_2", "b5_12_2_gate": "b5_12_2_gp",
     **{f"b5_12_2_g{c}": "b5_12_2_gate" for c in (1, 2, 3, 4)},
     **{f"b5_12_2_t{c}": "b5_12_2" for c in (1, 2, 3)},
+    # the gate's own axes, each one hop off the gated cell rather than off each other, so every
+    # rung is comparable to every other rung and to the gate itself
+    **{f"b5_12_2_L{o}_{r}": "b5_12_2_gate"
+       for o, r in ((1, 1), (1, 3), (1, 5), (1, 20), (3, 20), (5, 40))},
+    **{f"b5_12_2_w{w}": "b5_12_2_gate" for w in (100, 150, 250)},
+    "b5_12_2_gr": "b5_12_2_gate",
 }
 
 # An arm whose clock, exit rule, entry rule AND fill convention all differ from everything before

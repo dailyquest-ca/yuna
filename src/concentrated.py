@@ -883,6 +883,34 @@ CELLS = {
                              displace=True, base_door=False, rider=False,
                              exit_rank=12, entry_rank=2, theme_cap=c)
        for c in (1, 2, 3)},
+
+    # WO-A19 §3: the gate's OWN axes, on the banded book, now that the gate actually reaches it.
+    #
+    # Every latch figure in the ledger was measured on the `w5` calendar arm. On this book the gate
+    # was inert until 2026-08-15, so `(1, 10)` is the only rung ever run here and it was chosen
+    # because it won on a different arm. Three axes, one at a time off `b5_12_2_gate`:
+    #
+    #   the LATCH      how long the signal must persist before the book leaves, and before it
+    #                  returns. Asymmetric on purpose — late out costs money once, early in costs
+    #                  money at every dead-cat bounce.
+    #   the WINDOW     the moving average's own length. 200 sessions is Clenow's number and has
+    #                  never been varied here; a shorter average reacts sooner and whipsaws more.
+    #   RISING         require the average itself to be climbing before re-entry, not merely
+    #                  touched from below.
+    **{f"b5_12_2_L{o}_{r}": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                                 trail=False, next_open=True, entry_rule="banded",
+                                 fill_at_open=True, displace=True, base_door=False, rider=False,
+                                 exit_rank=12, entry_rank=2, gated=True, latch=(o, r))
+       for o, r in ((1, 1), (1, 3), (1, 5), (1, 20), (3, 20), (5, 40))},
+    **{f"b5_12_2_w{w}": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                             trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                             displace=True, base_door=False, rider=False,
+                             exit_rank=12, entry_rank=2, gated=True, latch=(1, 10), gate_window=w)
+       for w in (100, 150, 250)},
+    "b5_12_2_gr": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                       displace=True, base_door=False, rider=False,
+                       exit_rank=12, entry_rank=2, gated=True, latch=(1, 10), gate_rising=True),
 }
 
 
@@ -1312,7 +1340,8 @@ def regime_rising(i, index_px, window=200, slope=21):
     return bool(np.nanmean(now) > np.nanmean(then))
 
 
-def regime_latch(i, index_px, state, *, confirm_out=1, confirm_in=1, require_rising=False):
+def regime_latch(i, index_px, state, *, confirm_out=1, confirm_in=1, require_rising=False,
+                 window=200):
     """WO-A10's asymmetric regime latch: quick to leave, slow to return.
 
     `state` is a dict carried across sessions holding the current verdict and the two streaks.
@@ -1329,9 +1358,9 @@ def regime_latch(i, index_px, state, *, confirm_out=1, confirm_in=1, require_ris
     had several. `require_rising` adds the recovery proof: the average itself must be climbing, not
     merely touched from below.
     """
-    ok_now = regime_ok(i, index_px)
+    ok_now = regime_ok(i, index_px, window=window)
     if require_rising and ok_now:
-        ok_now = regime_rising(i, index_px)
+        ok_now = regime_rising(i, index_px, window=window)
     if ok_now:
         state["up"] = state.get("up", 0) + 1
         state["down"] = 0
@@ -1492,7 +1521,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              latch=None, gate_rising=False,
              entry_rank=None, displace=False, base_door=True, fill_at_open=False,
              swap_gap=False, min_participation=None, gate_n=None,
-             themes=None, theme_cap=None):
+             themes=None, theme_cap=None, gate_window=200):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -1676,7 +1705,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             c_out, c_in = latch if latch else (1, 1)
             on = regime_latch(i, index_px, regime_state,
                               confirm_out=c_out, confirm_in=c_in,
-                              require_rising=gate_rising)
+                              require_rising=gate_rising, window=int(gate_window))
             if not on and held and gate_n is None:
                 for j in list(held):
                     sell(i, j, held[j], "gate_off")
@@ -1685,7 +1714,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             regime_off = not on
             gated_off = regime_off and gate_n is None
         elif index_px is not None and i % gate_every == 0 and np.isfinite(park_px[i]):
-            on = regime_ok(i, index_px)
+            on = regime_ok(i, index_px, window=int(gate_window))
             if not on and held and gate_n is None:
                 for j in list(held):
                     sell(i, j, held[j], "gate_off")
