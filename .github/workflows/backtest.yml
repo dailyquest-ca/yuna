@@ -43,8 +43,11 @@ on:
         description: 'drawdown kill bar for the §2.5 verdict (E3 cells declare -0.34; blank = the arm declares none)'
         default: ''
       research:
-        description: 'run a research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger, `concentrated` = WO-A4 the winner-catcher'
+        description: 'run a research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger, `concentrated` = WO-A4 the winner-catcher, `dedupe` = the duplicate-listing scan'
         default: ''
+      apply:
+        description: 'dedupe only: write the exclusions (default: report only)'
+        default: 'false'
       cells:
         description: 'concentrated only: comma-separated cells (blank = the whole announced grid)'
         default: ''
@@ -128,6 +131,33 @@ jobs:
       - name: autopsy on failure
         if: failure() && steps.engine.outcome == 'failure'
         run: python src/report_fail.py blend /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  # The duplicate-listing scan lives here for the reason the comment above already gives: GitHub
+  # only registers dispatch workflows from the DEFAULT branch, and `dedupe.yml` is not on it. That
+  # left the scan built and unrunnable, and the cost of that is now measured rather than theoretical
+  # — runs 484 and 491 both held BBBY_old.US and BBBY.US at the SAME TIME in February 2018. One
+  # company, two of five slots, 40% of the book, and every cap counting it as two names.
+  dedupe:
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'dedupe'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: run
+        id: engine
+        run: set -o pipefail; python src/dedupe_scan.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SCAN_APPLY: ${{ inputs.apply || 'false' }}
+      - name: autopsy on failure
+        if: failure() && steps.engine.outcome == 'failure'
+        run: python src/report_fail.py dedupe /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 

@@ -226,6 +226,35 @@ def test_a_discontinuity_below_the_price_floor_is_ignored():
     assert bt.screen_tape(arrays, cols, dates) == {}
 
 
+def test_a_seam_across_a_TRADING_GAP_is_caught(): # noqa: N802
+    """The hole that let `CLSK.US` through, and the shape almost every real seam has.
+
+    The grid is dates x tickers, so a name that does not print carries NaN. Comparing each bar to
+    the previous ROW therefore compares against NaN whenever the name was dark, and the ratio
+    vanishes. But a shell goes quiet, reverse-splits while nobody is trading it, and comes back at
+    a new price — CLSK.US stepped 0.0037 -> 34.6762, a ratio of 9,372, and the first version of
+    this guard could not see it because the bar before was not the row before.
+    """
+    arrays, cols, dates = _wide()
+    arrays["close"][100:140, 0] = np.nan                 # the name goes dark for forty sessions
+    arrays["raw_close"][100:140, 0] = np.nan
+    arrays["close"][140:, 0] *= 9372.0                   # and resumes on the far side of a seam
+    arrays["raw_close"][140:, 0] *= 9372.0
+
+    out = bt.screen_tape(arrays, cols, dates)
+    assert cols[0] in out, "a discontinuity across a gap is still a discontinuity"
+    assert "impossible" in out[cols[0]]
+
+
+def test_a_gap_alone_is_not_a_discontinuity():
+    """The other half. Names go quiet all the time and come back at a sane price; if the fix
+    turned every trading gap into a quarantine it would empty the census."""
+    arrays, cols, dates = _wide()
+    arrays["close"][100:140, 0] = np.nan
+    arrays["raw_close"][100:140, 0] = np.nan             # dark, then resumes where it left off
+    assert bt.screen_tape(arrays, cols, dates) == {}
+
+
 # --------------------------------------------------------------------- the ceiling
 def test_wholesale_discontinuity_halts_rather_than_quarantining():
     """Past a ceiling the diagnosis flips. Quarantining 60% of the universe and reporting a

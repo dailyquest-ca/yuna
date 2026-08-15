@@ -831,10 +831,32 @@ def _discontinuous(arrays, cols):
     turns every downstream return into an infinity.
     """
     C, R = arrays["close"], arrays["raw_close"]
-    prev, curr = C[:-1], C[1:]
+
+    # The comparison is against the LAST BAR THE NAME PRINTED, not the previous row of the grid.
+    #
+    # Row-adjacent was a hole, and it is the hole these series are shaped to fall through. The grid
+    # is dates x tickers, so a name that does not trade has NaN, and NaN/NaN is not finite — the
+    # ratio simply vanishes. But a seam is nearly always ACROSS a gap: a shell stops trading, a
+    # reverse split happens while it is dark, and it resumes at a new price. CLSK.US survived the
+    # first version of this guard on exactly that shape — 0.0037 to 34.6762, a ratio of 9,372,
+    # invisible because it had not printed for days beforehand.
+    #
+    # `maximum.accumulate` over the row index of the finite bars carries the last live row forward;
+    # shifting it by one makes it strictly earlier than the bar being tested. Rows before a name's
+    # first bar have no predecessor and are marked invalid rather than compared against row zero.
+    n_rows = C.shape[0]
+    have = np.isfinite(C) & (C > 0)
+    src = np.where(have, np.arange(n_rows)[:, None], -1)
+    last_live = np.maximum.accumulate(src, axis=0)
+    prev_row = np.vstack([np.full((1, C.shape[1]), -1, dtype=int), last_live[:-1]])
+    has_prev = prev_row >= 0
+    take = np.maximum(prev_row, 0)
+    prev = np.where(has_prev, np.take_along_axis(C, take, axis=0), np.nan)
+    curr = C
     with np.errstate(invalid="ignore", divide="ignore"):
-        ratio = np.where(prev > 0, curr / prev, np.nan)
+        ratio = np.where(has_prev & have & (prev > 0), curr / prev, np.nan)
     finite = np.isfinite(ratio)
+    prev_raw = np.where(has_prev, np.take_along_axis(R, take, axis=0), np.nan)
 
     # The UP test carries no basis floor. It carries the quantization bound instead, which is what
     # the floor was approximating — see the note on QUOTE_TICK. The DOWN test keeps the floor: a
@@ -850,7 +872,7 @@ def _discontinuous(arrays, cols):
     # The $5 floor is a fact about the actual print, so it reads the raw series, exactly as the
     # L0 admission test does. An adjusted price of $6 on a stock that printed $0.30 is not a
     # tradeable bar and a discontinuity in it cannot reach the book.
-    tradeable = np.isfinite(R[:-1]) & (R[:-1] >= TRADEABLE_FLOOR)
+    tradeable = np.isfinite(prev_raw) & (prev_raw >= TRADEABLE_FLOOR)
     collapsed = finite & tradeable & (ratio < 1.0 - MAX_SANE_DAILY_MOVE)
 
     out = {}
