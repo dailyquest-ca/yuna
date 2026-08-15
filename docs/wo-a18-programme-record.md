@@ -444,15 +444,29 @@ the adjusted open.
 After discounting for 361 trials of search, the observed Sharpe is not distinguishable from what
 searching that many configurations produces by itself.
 
-### 7.2 The largest open question, and it is not another grid
+### 7.2 The regime gate — raised, and ruled against
 
 **The regime gate has never been tested on the banded book.** Every gate number in §4.2 was
-measured on the `w5` arm. On that arm it converted 15.02% / −82.5% into 21.39% / −62.9%.
+measured on the `w5` arm, where it converted 15.02% / −82.5% into 21.39% / −62.9% — nearly twenty
+points of drawdown removed.
 
-The banded book's binding constraint is a **−82.5% drawdown** appearing in every cell on every
-window. The one intervention ever shown to move that number by ~20 points has not been run against
-the current cell. **`b5_12_2` with `index_px=SPY.US`, gate 1/10, is the single highest-value run
-outstanding**, and it directly tests the §3 regime finding rather than re-reading the same surface.
+It was put to Zak on 2026-08-15 as the highest-value outstanding run, on the grounds that the
+banded book's binding constraint is a −82.5% drawdown present in every cell on every window, and
+that the gate is the only intervention ever measured to move it.
+
+> **Ruling (Zak, 2026-08-15): there is no regime limit, and that is accepted.**
+
+The book runs ungated. This is consistent with §4.3's earlier ruling that the filter is advisory —
+it makes the same choice at the strategy level rather than only at the desk level. **The −82.5%
+drawdown is therefore an accepted property of the strategy, not an open problem**, and no document
+should describe it as something a future change is expected to fix.
+
+Two things this ruling does **not** settle, recorded so they are not later read as settled:
+
+- The regime *dependence* in §3 is unaffected. Declining to gate on regime is a decision about
+  what the book does; it is not evidence about whether the 2017–2026 result generalises.
+- The gate's measured effect on the `w5` arm stands as a fact in the ledger. Anyone reopening this
+  starts from `w5_g_plain` at 21.39% / −62.9% and the bracket in §4.2, not from scratch.
 
 ### 7.3 Everything else not established
 
@@ -470,8 +484,12 @@ outstanding**, and it directly tests the §3 regime finding rather than re-readi
 1. `2/12` replaces `3/12`. One-parameter correction to the entry band.
 2. **No plan amendment should quote "19.84% a year."** Say: *−2.3%/yr for the first decade,
    +52.2%/yr for the last nine.*
-3. **Run the gate on the banded book.** §7.2.
-4. The drawdown, not the CAGR, is the binding constraint on ever running this.
+3. **The book runs ungated** — ruled 2026-08-15, §7.2. The −82.5% drawdown is accepted, not
+   pending a fix.
+4. Because of 3, **the drawdown is a disclosure rather than a research task.** Anything written for
+   a reader — a plan amendment, a product page — has to state that this strategy has historically
+   lost four fifths of its value and taken thirteen years to recover, because no mechanism in it
+   prevents that recurring.
 5. A forward record is the only evidence that moves a deflated Sharpe. 361 in-sample trials cannot
    be undone by a 362nd.
 
