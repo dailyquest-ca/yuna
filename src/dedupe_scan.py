@@ -162,16 +162,25 @@ def reused_ticker_pairs(cur):
     return [tuple(sorted(r)) for r in cur.fetchall()]
 
 
-def keeper(cur, tickers):
+def keeper(cur, tickers, already=frozenset()):
     """047's rule, unchanged and still the right one: keep the line that is still printing.
 
-    Later last bar, then more bars, then the lower ticker. It is a total order, so the winner of a
-    group is never itself excluded.
+    Later last bar, then more bars, then the lower ticker. A total order, so a group always has
+    exactly one winner.
+
+    `already` is the set of lines a previous pass has EXCLUDED, and they are not eligible to be
+    kept. Its comment claimed a winner "is never itself excluded", which was true only while the
+    scan ran once against a clean list: on 2026-08-14 the reused-symbol pass proposed dropping
+    `GCI_old.US` in favour of `GCI.US`, which an earlier pass had already excluded, and 048's guard
+    correctly halted the whole run rather than let the group vanish. Nominating a dead line is the
+    defect; the guard behind it stays exactly as it is, and still fires if a group has no live
+    line left at all.
     """
+    live = [t for t in tickers if t not in already] or list(tickers)
     cur.execute("""select ticker, count(*) bars, max(d) last_bar
-                     from prices where ticker = any(%s) group by ticker""", (list(tickers),))
+                     from prices where ticker = any(%s) group by ticker""", (live,))
     rows = {t: (bars, last) for t, bars, last in cur.fetchall()}
-    return max(tickers, key=lambda t: (rows[t][1], rows[t][0], [-ord(c) for c in t]))
+    return max(live, key=lambda t: (rows[t][1], rows[t][0], [-ord(c) for c in t]))
 
 
 def main():
@@ -245,18 +254,21 @@ def main():
                 g = groups.setdefault(t1, {t1})
                 g.add(t2)
                 groups[t2] = g
+            # Read BEFORE choosing keepers, not after: a line an earlier pass already excluded is
+            # not a candidate to keep, and nominating one is what killed run 31855520505.
+            cur.execute("select ticker from universe_excluded")
+            already = {r[0] for r in cur.fetchall()}
+
             seen, proposals = set(), []
             for g in groups.values():
                 key = tuple(sorted(g))
                 if key in seen:
                     continue
                 seen.add(key)
-                keep = keeper(cur, g)
+                keep = keeper(cur, g, already)
                 for t in sorted(g - {keep}):
                     proposals.append((t, keep))
 
-            cur.execute("select ticker from universe_excluded")
-            already = {r[0] for r in cur.fetchall()}
             fresh = [(t, k) for t, k in proposals if t not in already]
             print(f"\n{len(proposals)} lines in {len(seen)} groups; {len(fresh)} not already excluded")
 

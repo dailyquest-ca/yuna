@@ -106,3 +106,35 @@ def test_the_keeper_rule_is_a_total_order(bars, last, expect):
         def execute(self, *a): pass
         def fetchall(self): return [(t, b, l) for t, (b, l) in bars.items()]
     assert ds.keeper(FakeCur(), set(bars)) == expect
+
+
+def test_a_line_an_earlier_pass_excluded_is_not_eligible_to_be_kept():
+    """What killed run 31855520505. The reused-symbol pass proposed dropping `GCI_old.US` in
+    favour of `GCI.US`, which an earlier pass had already excluded — so the group would have lost
+    both lines and the company would have vanished from the census. 048's guard halted the run,
+    correctly. The defect was upstream of the guard: the keeper rule nominated a dead line.
+
+    `GCI.US` here is the one that would win on merit — a later last bar — and must still lose.
+    """
+    bars = {"GCI_old.US": (1124, "2020-11-16"), "GCI.US": (2500, "2026-08-13")}
+
+    class FakeCur:
+        def execute(self, *a): pass
+        def fetchall(self): return [(t, b, l) for t, (b, l) in bars.items()]
+
+    assert ds.keeper(FakeCur(), set(bars)) == "GCI.US", "on merit alone the live line wins"
+    assert ds.keeper(FakeCur(), set(bars), {"GCI.US"}) == "GCI_old.US", (
+        "an excluded line cannot be the one kept, so the survivor keeps the group alive")
+
+
+def test_a_group_whose_every_line_is_excluded_still_yields_a_keeper():
+    """The guard behind this must stay armed. If every member is already excluded there is no live
+    line to prefer, so the rule falls back to merit and 048's check downstream is what refuses —
+    silently returning nothing here would drop the group without anyone noticing."""
+    bars = {"A.US": (100, "2026-01-01"), "B.US": (100, "2025-01-01")}
+
+    class FakeCur:
+        def execute(self, *a): pass
+        def fetchall(self): return [(t, b, l) for t, (b, l) in bars.items()]
+
+    assert ds.keeper(FakeCur(), set(bars), {"A.US", "B.US"}) == "A.US"
