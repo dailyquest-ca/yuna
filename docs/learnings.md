@@ -246,3 +246,25 @@ is `roadmap-2026-07-31.md`.
     The gate that works is intrinsic and is written as a liquidity rule, not a nationality one: a
     name must have actually traded on a declared fraction of its formation window. It needs no list
     of countries, and it ejects untradeable names and foreign lines by the same test.
+39. **A gap measured as a RATIO is the wrong instrument for a score that is a proportion.**
+    `dedupe_scan.py` reads its threshold from the widest multiplicative gap in the agreement
+    distribution, which is the right instinct — a cut read off a bimodal census is a rule, and the
+    same number written into a file is a guess. But agreement is a FRACTION in [0,1], and on that
+    scale a ratio is dominated by the bottom: 0.0060 to 0.0513 is 8.6x and clears the 3.0x bar,
+    while both numbers mean "these two series agree on essentially nothing." The scan duly
+    proposed a threshold of **0.0175** — two series are the same company if they agree on 1.75% of
+    their moving sessions — and put `GOLD_old.US` (Randgold, 0.0516) up for deletion in favour of
+    `GOLD.US` (Barrick). Randgold's pre-2019 history, gone, on a ratio between two numbers that
+    are both approximately zero.
+    The failure was invited by a change made three commits earlier for a different good reason: a
+    coverage filter that removed pairs whose exclusion would lose history. That filter took the
+    very bottom out of the distribution, and the widest ratio moved into the noise it left behind.
+    **A threshold rule is not safe merely because it is read from data — it must be read with a
+    metric the data supports.** Proportions are compared by difference; ratios belong to
+    quantities with a meaningful zero and unbounded range. The scan's own stated populations
+    (duplicates 0.85-1.00, different securities 0.006-0.033) are separated by 0.8 in absolute
+    terms and that is the separation worth finding.
+    Two second-order lessons. **Changing the population changes the threshold**, so any filter
+    applied before a data-read cut must be re-examined together with the cut, not separately. And
+    the run that exposed this was report-only: `SCAN_APPLY` defaulting to false is what stood
+    between a reasoned change and a deleted company.
