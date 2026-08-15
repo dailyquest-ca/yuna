@@ -220,6 +220,68 @@ programme has already made three times.
 What adopting it changes, honestly stated: the headline for V1 moves from **15.49% to 16.72%**, the
 drawdown from −80.59% to −78.30%, and every number in `wo-a15-v1-synthesis.md` becomes stale.
 
+## 6a. What the ladder looks like once the tape is screened
+
+The numbers in §5.1 were measured on an unscreened tape. Re-run on a screened one (runs 491–496):
+
+| cell | floor | CAGR before | CAGR after | max DD after |
+| --- | ---: | ---: | ---: | ---: |
+| `b5_12_3` | — | 15.4948% | **16.3169%** | −80.47% |
+| `b5_12_3_p90` | 0.90 | 16.1828% | 18.0753% | −79.82% |
+| `b5_12_3_p95` | 0.95 | 16.6215% | 16.1408% | −81.27% |
+| `b5_12_3_p98` | 0.98 | 16.7206% | 17.4021% | −82.48% |
+| `b5_12_3_p99` | 0.99 | 17.6285% | 16.8342% | −82.72% |
+| `b5_12_3_p100` | 1.00 | 18.8985% | 17.7838% | −77.35% |
+
+**The monotone ladder is gone.** Before, the rungs ordered perfectly from 15.49 to 18.90; after,
+they scatter between 16.14 and 18.08 with no relationship to the threshold at all. The clean
+surface was the gate accidentally removing names whose price series were corrupt — not a
+selection effect, and not something that would have repeated.
+
+Two things follow. **§6's recommendation stands but its justification narrows**: adopt the gate
+because a rouble-denominated MOEX line cannot be bought, not because of any measured lift. And the
+1.9-point spread across rungs is a better estimate of this cell's sensitivity to small changes in
+the eligible universe than anything measured so far — **larger than most of the differences the
+band grid was read for.**
+
+## 6b. Every defect found, and where each one stands
+
+| # | defect | measured | status |
+| --- | --- | --- | --- |
+| 1 | Foreign securities on `.US` tickers | 7 names, 21 trades, −$3,075 | gate built, threshold unruled |
+| 2 | `concentrated.py` had **no tape screen** | 18 names, 55 trades, −$166,343 | fixed — screen imported |
+| 3 | Guard blind under $1, where reverse splits happen | 136 names, 1,865 bars | fixed — quantization bound |
+| 4 | Guard blind **across trading gaps** | `CLSK.US` at 9,372× | fixed — last printed bar |
+| 5 | Duplicate listings held concurrently | `BBBY_old`/`BBBY`, Feb 2018 | scan now dispatchable |
+| 6 | Bar geometry violations | 1,432 bars | **detected, none reached a fill** |
+| 7 | Runs were never audited | every run to WO-A15 | fixed — audit gates the build |
+
+Two classes were checked and found clean: **duplicate `(ticker, date)` rows: zero**, and the park
+and calendar series themselves — SPY, VOO and SPMO carry no discontinuity, their worst sessions
+being −10.9% and +14.5%, both real market days.
+
+## 6c. The §2.5 verdict on the chosen cell is *unproven*
+
+Run 491 scored itself against §2.5 and the machinery reports:
+
+```
+deflated Sharpe 0.113, below the 0.95 bar        n_trials_used: 347
+observed Sharpe 0.0355/session (0.563 annualized)
+verdict: unproven
+```
+
+**This is the single most important number in the programme and it is not the CAGR.** After
+discounting for 347 distinct trials of search, the observed Sharpe is not distinguishable from
+what searching that many configurations would produce by itself.
+
+The supporting figures are better than that sounds — full-window CAGR 16.35% against the
+benchmark's 11.15%, bootstrap median 16.37% with a 5th percentile of −2.0%, and the jackknife
+holds (ex-top-3 still beats the benchmark). But the deflation is the test that prices the search,
+and this programme has run a great deal of search.
+
+It does not say the strategy is bad. It says **the evidence does not yet clear the bar the plan
+sets**, and that a forward record is what would change it — not another grid.
+
 ## 7. What is still open
 
 - **The universe-wide count is unknown.** 372 names sit at a no-trade rate of 3%+ among those
