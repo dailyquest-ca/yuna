@@ -173,6 +173,64 @@ def test_the_partial_gate_sheds_its_worst_names_first():
         "the best-ranked holding must not be the one shed")
 
 
+def test_the_theme_cap_limits_how_many_of_one_industry_the_book_may_hold():
+    """WO-A19 §2. The fixture is the real 2025-26 shape: the four best-scoring names all share one
+    industry, so an uncapped book fills with them and a capped book must take weaker names from
+    elsewhere instead. `WDC`, `SNDK`, `RGTI` and `QBTS` are all "Computer Hardware"."""
+    n = 700
+    dates = sessions(n)
+    # four strong names in one theme, four weaker ones spread across three others
+    paths = {"H0.US": 100.0 * np.exp(np.linspace(0, 1.4, n)),
+             "H1.US": 100.0 * np.exp(np.linspace(0, 1.3, n)),
+             "H2.US": 100.0 * np.exp(np.linspace(0, 1.2, n)),
+             "H3.US": 100.0 * np.exp(np.linspace(0, 1.1, n)),
+             "A0.US": 100.0 * np.exp(np.linspace(0, 0.6, n)),
+             "B0.US": 100.0 * np.exp(np.linspace(0, 0.5, n)),
+             "C0.US": 100.0 * np.exp(np.linspace(0, 0.4, n)),
+             "C1.US": 100.0 * np.exp(np.linspace(0, 0.3, n))}
+    tickers = sorted(paths)
+    adj = np.column_stack([paths[t] for t in tickers])
+    dv = np.full_like(adj, 5e8)
+    themes = ["hardware" if t.startswith("H") else t[0].lower() for t in tickers]
+    common = dict(n=5, months=6, risk_adjusted=False, sleeve=1.0, start_nav=100_000.0,
+                  entry_rule="banded", displace=True, base_door=False, rider=False,
+                  exit_rank=12, entry_rank=2, themes=themes)
+
+    def held_names(trades):
+        return {t["ticker"] for t in trades if "entry_date" in t}
+
+    _e0, free, _c0, _h0 = cc.simulate(dates, tickers, adj, adj, dv, adj[:, 4], **common)
+    _e2, capped, _c2, _h2 = cc.simulate(dates, tickers, adj, adj, dv, adj[:, 4],
+                                        theme_cap=2, **common)
+
+    assert len({t for t in held_names(free) if t.startswith("H")}) == 4, (
+        "uncapped, the book takes all four of the strongest theme")
+    assert len({t for t in held_names(capped) if t.startswith("H")}) <= 2, (
+        "capped at two, it cannot hold more than two of them")
+    assert held_names(capped) - held_names(free), (
+        "the freed slots must go to names the uncapped book never bought")
+
+
+def test_the_theme_cap_is_inert_when_it_is_not_set():
+    """Every cell ruled before WO-A19 must reproduce, so an unset cap must not run at all."""
+    n = 700
+    dates = sessions(n)
+    paths = {f"N{k}.US": 100.0 * np.exp(np.linspace(0, 0.9 - 0.1 * k, n)) for k in range(8)}
+    tickers = sorted(paths)
+    adj = np.column_stack([paths[t] for t in tickers])
+    dv = np.full_like(adj, 5e8)
+    common = dict(n=5, months=6, risk_adjusted=False, sleeve=1.0, start_nav=100_000.0,
+                  entry_rule="banded", displace=True, base_door=False, rider=False,
+                  exit_rank=12, entry_rank=2)
+
+    a, ta, _c, _h = cc.simulate(dates, tickers, adj, adj, dv, adj[:, 0], **common)
+    # every name in one theme: with the cap unset this must change nothing at all
+    b, tb, _c2, _h2 = cc.simulate(dates, tickers, adj, adj, dv, adj[:, 0],
+                                  themes=["one"] * len(tickers), **common)
+    assert [r[1] for r in a] == [r[1] for r in b]
+    assert len(ta) == len(tb)
+
+
 def test_the_participation_gate_is_inert_when_it_is_not_set():
     """Every cell ruled before WO-A16 must reproduce to the last decimal, so the default must not
     merely be lenient — it must not run at all. A name with a genuine trading halt proves it."""
@@ -339,6 +397,7 @@ PARENT = {
     # alternative it exists to beat, rather than against the ungated book.
     "b5_12_2_gp": "b5_12_2", "b5_12_2_gate": "b5_12_2_gp",
     **{f"b5_12_2_g{c}": "b5_12_2_gate" for c in (1, 2, 3, 4)},
+    **{f"b5_12_2_t{c}": "b5_12_2" for c in (1, 2, 3)},
 }
 
 # An arm whose clock, exit rule, entry rule AND fill convention all differ from everything before

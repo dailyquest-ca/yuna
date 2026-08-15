@@ -865,6 +865,24 @@ CELLS = {
                              displace=True, base_door=False, rider=False,
                              exit_rank=12, entry_rank=2, gated=True, latch=(1, 10), gate_n=c)
        for c in (1, 2, 3, 4)},
+
+    # WO-A19 §2: the THEME cap — at most `theme_cap` of the five holdings may share an industry.
+    #
+    # This is the intervention aimed at the number no band setting moved: effective bets of 2.435
+    # on a five-name book. WO-A18 §2.4 shows why — of the ten largest wins, WDC and SNDK are one
+    # trade, RGTI and QBTS are another, RKLB and OKLO and BE a third. The book says five positions
+    # and holds about two and a half ideas.
+    #
+    # Zak ruled in 2026-08-13 that a theme cap was not wanted — *"It's OK to go in and go hard on a
+    # theme... and accept a bad drawdown when it happens"* — and `sector_cap=0.70` is the loose
+    # version that ruling produced. This arm prices the tighter one at the finer granularity, which
+    # is what the ruling was never actually shown: a cap of 2 on Computer Hardware would have
+    # blocked one of WDC/SNDK/RGTI/QBTS in 2025-26 and one of the top four trades with it.
+    **{f"b5_12_2_t{c}": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                             trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                             displace=True, base_door=False, rider=False,
+                             exit_rank=12, entry_rank=2, theme_cap=c)
+       for c in (1, 2, 3)},
 }
 
 
@@ -1473,7 +1491,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              rider_calendar=False, base_gate=False,
              latch=None, gate_rising=False,
              entry_rank=None, displace=False, base_door=True, fill_at_open=False,
-             swap_gap=False, min_participation=None, gate_n=None):
+             swap_gap=False, min_participation=None, gate_n=None,
+             themes=None, theme_cap=None):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -1936,6 +1955,29 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                                 reverse=True)[:max(0, len(live) - cap)]:
                     queued.append(j)
                     queue_reason[j] = "gate_trim"
+            # WO-A19 §2: the THEME cap. At most `theme_cap` holdings may share an industry.
+            #
+            # This is the count version of the question `sector_cap` asks as a fraction, at the
+            # granularity the question is actually asked in. `universe.sector` has 29 values and
+            # puts a memory maker and a database company both in "Technology"; `universe.industry`
+            # has 239 and separates them. On the 2025-26 book it binds exactly where the
+            # concentration is: WDC, SNDK, RGTI and QBTS are all "Computer Hardware", and RKLB
+            # sits with LMT and RTX in "Aerospace & Defense".
+            #
+            # Counts both the live book and the orders already queued for tomorrow, or two fills
+            # in the same theme could be committed on the same session and breach the cap between
+            # them.
+            def theme_of(j):
+                return (themes[j] if themes is not None and themes[j] else "?")
+
+            def theme_full(j):
+                if not theme_cap or themes is None:
+                    return False
+                t = theme_of(j)
+                here = sum(1 for k in held if not slot_free(k) and theme_of(k) == t)
+                here += sum(1 for b in pending_buys if theme_of(b["j"]) == t)
+                return here >= int(theme_cap)
+
             # `cap > 0` guards the fully-gated case: with a cap of zero the book is empty and
             # "displace the worst holding" has no argument to take.
             if displace and cap > 0 and len([j for j in held if not slot_free(j)]) >= cap:
@@ -1945,6 +1987,11 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                 for j in order[:entry_band]:
                     if j in held or j in queued or j in {b["j"] for b in pending_buys}:
                         continue
+                    # The cap has to bind here too. A displacing name that swaps one holding for
+                    # another in the same over-represented theme would satisfy the band rule and
+                    # defeat the cap entirely — and displacement is this book's dominant exit.
+                    if theme_full(j) and theme_of(j) != theme_of(worst):
+                        break
                     if rank_of.get(j, 10 ** 9) < worst_rank:
                         queued.append(worst)
                         queue_reason[worst] = "displaced"
@@ -1970,6 +2017,9 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                     if (j in held or j in queued or not np.isfinite(adj[i, j])
                             or j in {b["j"] for b in pending_buys}):
                         continue
+                    if theme_full(j):
+                        rider_blocks["theme cap"] = rider_blocks.get("theme cap", 0) + 1
+                        continue        # step DOWN the rank to the next eligible theme
                     # The state door is WO-A6's own entry condition and it is NOT part of Zak's
                     # band rule, so a cell can switch it off. Leaving it welded on would have made
                     # the band ladder measure the door and the band together.
@@ -2213,6 +2263,13 @@ def main():
                 bench_rows = dict(cur.fetchall())
                 cur.execute("select ticker, sector from universe where sector <> ''")
                 sector_by_ticker = dict(cur.fetchall())
+                # WO-A19 §2's theme key. `industry` is the finer of the two vendor labels — 239
+                # values against `sector`'s 29 — and it is the granularity a theme cap is actually
+                # asked in: "two semis" is an industry, not a sector. 4,931 of 6,333 stocks carry
+                # one; the rest fall to "?" and are capped together, which is the conservative
+                # direction (an unlabelled name can be blocked, never smuggled in).
+                cur.execute("select ticker, industry from universe where industry <> ''")
+                industry_by_ticker = dict(cur.fetchall())
             # the benchmark's own bars ARE the market calendar: an index ETF prints on every real
             # US session and on no holiday, which is exactly the predicate this grid needs
             cal = set(bench_rows)
@@ -2236,6 +2293,7 @@ def main():
 
             written = []
             sectors = [sector_by_ticker.get(t) for t in tickers]
+            themes = [industry_by_ticker.get(t) for t in tickers]
             bench_px = np.array([float(bench_rows.get(d, np.nan)) for d in dates])
             for i in range(1, len(bench_px)):
                 if not np.isfinite(bench_px[i]):
@@ -2251,7 +2309,8 @@ def main():
                     eq, trades, costs, health = simulate(
                         dates, tickers, adj, raw, dv, park_px, start_nav=start_nav,
                         index_px=bench_px if gated else None, intraday=bars_in,
-                        next_open=opens, sectors=sectors, bars=(hi, lo), **spec)
+                        next_open=opens, sectors=sectors, themes=themes,
+                        bars=(hi, lo), **spec)
                 finally:
                     COST_MULT = 1.0        # never leak a probe's costing into the next cell
                 exits = {}
