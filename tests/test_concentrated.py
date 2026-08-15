@@ -116,6 +116,63 @@ def test_a_name_that_rests_on_its_own_market_holidays_fails_the_participation_ga
     assert set(loose) == {"HOME.US", "ABROAD.US"}
 
 
+def test_the_partial_gate_caps_the_book_and_parks_the_difference():
+    """WO-A19. Below the index's 200-day the book holds `gate_n` names instead of five, and the
+    freed weight goes to the PARK — per-name size stays NAV/5, so a cap of 2 is 40% invested.
+    Sizing off the cap instead would hold the same exposure in fewer names, which is more
+    concentrated in exactly the regime where concentration is least survivable.
+    """
+    n = 700
+    dates = sessions(n)
+    # eight names on separated trends so the rank order is stable and knowable
+    paths = {f"N{k}.US": 100.0 * np.exp(np.linspace(0, 0.9 - 0.1 * k, n)) for k in range(8)}
+    # the index rises for the first half and falls hard through the second, so the gate shuts
+    idx = np.concatenate([np.linspace(100.0, 200.0, n // 2),
+                          np.linspace(200.0, 90.0, n - n // 2)])
+    tickers = sorted(paths)
+    adj = np.column_stack([paths[t] for t in tickers])
+    dv = np.full_like(adj, 5e8)
+    common = dict(n=5, months=6, risk_adjusted=False, sleeve=1.0, start_nav=100_000.0,
+                  entry_rule="banded", displace=True, base_door=False, rider=False,
+                  exit_rank=12, entry_rank=2, latch=(1, 10), index_px=idx)
+
+    eq_open, _t, _c, _h = cc.simulate(dates, tickers, adj, adj, dv, adj[:, 0], **common)
+    eq_cap2, _t2, _c2, _h2 = cc.simulate(dates, tickers, adj, adj, dv, adj[:, 0],
+                                         gate_n=2, **common)
+
+    # positions carried once the gate has shut. The slice is taken off the equity list, which
+    # begins after the 252-bar warmup — indexing it by session number reads past its end.
+    tail = slice(len(eq_open) // 2, None)
+    full_gate = [p for _d, _v, _b, _dep, p in eq_open[tail]]
+    capped = [p for _d, _v, _b, _dep, p in eq_cap2[tail]]
+    assert max(full_gate) == 0, "the full gate holds nothing while the index is below its average"
+    assert max(capped) == 2, "the partial gate holds exactly its cap"
+    assert min(capped) >= 1, "and does not drift to empty"
+
+
+def test_the_partial_gate_sheds_its_worst_names_first():
+    """Trimming happens where the rank is already known, so the book keeps its best names. A trim
+    that dropped an arbitrary two of five would be a different strategy wearing the same number."""
+    n = 700
+    dates = sessions(n)
+    paths = {f"N{k}.US": 100.0 * np.exp(np.linspace(0, 0.9 - 0.1 * k, n)) for k in range(8)}
+    idx = np.concatenate([np.linspace(100.0, 200.0, n // 2),
+                          np.linspace(200.0, 90.0, n - n // 2)])
+    tickers = sorted(paths)
+    adj = np.column_stack([paths[t] for t in tickers])
+    dv = np.full_like(adj, 5e8)
+    _eq, trades, _c, _h = cc.simulate(
+        dates, tickers, adj, adj, dv, adj[:, 0], n=5, months=6, risk_adjusted=False, sleeve=1.0,
+        start_nav=100_000.0, entry_rule="banded", displace=True, base_door=False, rider=False,
+        exit_rank=12, entry_rank=2, latch=(1, 10), index_px=idx, gate_n=2)
+
+    trimmed = [t for t in trades if t.get("reason") == "gate_trim"]
+    assert trimmed, "the cap must actually bind and be attributed, not silently absorbed"
+    # N0 has the steepest trend and is therefore never the worst name; it must survive every trim
+    assert all(t["ticker"] != "N0.US" for t in trimmed), (
+        "the best-ranked holding must not be the one shed")
+
+
 def test_the_participation_gate_is_inert_when_it_is_not_set():
     """Every cell ruled before WO-A16 must reproduce to the last decimal, so the default must not
     merely be lenient — it must not run at all. A name with a genuine trading halt proves it."""
@@ -277,6 +334,11 @@ PARENT = {
     # threshold — the same shape as WO-A10 §2's bracket, and for the same reason: the rungs are
     # alternatives to be compared with each other, not a chain where each inherits the last.
     **{f"b5_12_3_p{p}": "b5_12_3" for p in (100, 99, 98, 95, 90)},
+    # WO-A19's partial regime gate. The full gate is one axis off the chosen cell, and each cap is
+    # one axis off the full gate — so the ladder reads against "go to cash", which is the
+    # alternative it exists to beat, rather than against the ungated book.
+    "b5_12_2_gp": "b5_12_2", "b5_12_2_gate": "b5_12_2_gp",
+    **{f"b5_12_2_g{c}": "b5_12_2_gate" for c in (1, 2, 3, 4)},
 }
 
 # An arm whose clock, exit rule, entry rule AND fill convention all differ from everything before

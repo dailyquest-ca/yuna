@@ -834,6 +834,37 @@ CELLS = {
                              displace=True, base_door=False, rider=False,
                              exit_rank=12, entry_rank=3, min_participation=p / 100.0)
        for p in (100, 99, 98, 95, 90)},
+
+    # WO-A19: the PARTIAL regime gate, on the corrected cell `b5_12_2`.
+    #
+    # WO-A18 §7.2 ruled against the full gate — the book runs ungated and the -82.5% drawdown is
+    # accepted. This arm asks a narrower question that ruling did not cover: not "go to cash", but
+    # "hold FEWER names" while the index is below its own 200-day. A cap of 2 on a five-name book
+    # is 40% invested and 60% parked, because per-name size stays NAV/5.
+    #
+    # The full gate is included at the same latch so the ladder has both ends of its own axis. On
+    # the `w5` arm the full gate moved 15.02%/-82.5% to 21.39%/-62.9%; whether any of that reaches
+    # the banded book has never been measured, and whether a partial cap keeps the drawdown relief
+    # without the return cost is the question.
+    #
+    # Latch (1, 10) throughout — one session to leave, ten to return. That was the bracket's best
+    # rung in WO-A10 (20.12% against 18.64% at 1/3 and 16.11% at 1/20) and holding it fixed keeps
+    # this a one-axis ladder in the cap.
+    # Chained one axis at a time, exactly as WO-A10's arm was: the plain gate first, then the
+    # latch, then the cap. `b5_12_2_gp` is the sampled gate every stored gate cell used.
+    "b5_12_2_gp": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                       trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                       displace=True, base_door=False, rider=False,
+                       exit_rank=12, entry_rank=2, gated=True),
+    "b5_12_2_gate": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                         trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                         displace=True, base_door=False, rider=False,
+                         exit_rank=12, entry_rank=2, gated=True, latch=(1, 10)),
+    **{f"b5_12_2_g{c}": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                             trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                             displace=True, base_door=False, rider=False,
+                             exit_rank=12, entry_rank=2, gated=True, latch=(1, 10), gate_n=c)
+       for c in (1, 2, 3, 4)},
 }
 
 
@@ -1442,7 +1473,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              rider_calendar=False, base_gate=False,
              latch=None, gate_rising=False,
              entry_rank=None, displace=False, base_door=True, fill_at_open=False,
-             swap_gap=False, min_participation=None):
+             swap_gap=False, min_participation=None, gate_n=None):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -1551,6 +1582,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         park_qty -= qty
 
     gated_off = False
+    regime_off = False              # WO-A19: the gate said no, but `gate_n` keeps the book alive
     regime_state = {}               # WO-A10's latch: {on, up, down} carried across sessions
     queued = []                     # trail stops hit at yesterday's close, filled at today's
     queue_reason = {}               # why each queued name is leaving — trail, band or displaced
@@ -1611,26 +1643,37 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         # the streaks instead of being sampled every `gate_every`. Sampling is a lag with no
         # meaning — it can hold a book three weeks into a crash because the calendar said so.
         # Unset, this is byte-identical to the sampled gate every stored cell ran.
+        # WO-A19: `gate_n` is the PARTIAL gate. Instead of selling the whole book when the index is
+        # below its 200-day, the book is capped at `gate_n` names and keeps running. Per-name size
+        # is unchanged, so a cap of 2 on a five-name book is 40% invested and 60% parked — the cap
+        # cuts exposure AND concentration together. Sizing NAV/gate_n instead would hold the same
+        # exposure in fewer names, which is more concentrated in the regime where concentration is
+        # least survivable, and is not what a limit means.
+        #
+        # The full gate is `gate_n = 0` in spirit and is left exactly as it was, byte for byte, so
+        # every stored gate cell still reproduces.
         latched = latch is not None or gate_rising
         if index_px is not None and latched and np.isfinite(park_px[i]):
             c_out, c_in = latch if latch else (1, 1)
             on = regime_latch(i, index_px, regime_state,
                               confirm_out=c_out, confirm_in=c_in,
                               require_rising=gate_rising)
-            if not on and held:
+            if not on and held and gate_n is None:
                 for j in list(held):
                     sell(i, j, held[j], "gate_off")
                 queued.clear()
                 park_all(i)
-            gated_off = not on
+            regime_off = not on
+            gated_off = regime_off and gate_n is None
         elif index_px is not None and i % gate_every == 0 and np.isfinite(park_px[i]):
             on = regime_ok(i, index_px)
-            if not on and held:
+            if not on and held and gate_n is None:
                 for j in list(held):
                     sell(i, j, held[j], "gate_off")
                 queued.clear()
                 park_all(i)
-            gated_off = not on
+            regime_off = not on
+            gated_off = regime_off and gate_n is None
         # ---- the volatility governor, on the same clock. Barroso-Santa-Clara scale by the
         # book's OWN realized volatility: the series that forecasts a momentum crash, unlike the
         # index trend the gate above watches. Trades only outside §2.1's band.
@@ -1867,7 +1910,35 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             # twenty years. It is now `b5_12_gap`, measured on purpose instead of by mistake.
             def slot_free(j):
                 return fill_at_open and not swap_gap and j in queued
-            if displace and len([j for j in held if not slot_free(j)]) >= n:
+            # WO-A19: the partial gate's cap, applied where the rank is already known so trimming
+            # sheds the WORST names rather than an arbitrary set. Sized off `n` throughout, so the
+            # freed weight goes to the park instead of being redistributed into the survivors.
+            # The cap is the ONE place the regime reaches the banded book, and until WO-A19 there
+            # was no such place: `gated_off` was consulted by the calendar rebalance and the
+            # volatility governor and by nothing else, so the gate sold the whole book and the
+            # banded entry re-bought it the same session. Every gate figure in the ledger was
+            # measured on the `w5` calendar arm; on this arm the gate was inert, which is why
+            # WO-A18 §7.2 could record it as "never tested" without anyone noticing it was also
+            # untestable. The full gate is `cap = 0` and the partial gate is `cap = gate_n`.
+            if gated_off:
+                cap = 0
+            elif regime_off and gate_n is not None:
+                cap = int(gate_n)
+            else:
+                cap = n
+            if cap < n:
+                # Count the excess ONCE and shed exactly that many. Re-counting `held` inside the
+                # loop is wrong: a name appended to `queued` is still in `held` until it fills, so
+                # the count never falls and the loop sheds the entire book. Caught by the fixture
+                # below, which trimmed all five names on a cap of two.
+                live = [j for j in held if not slot_free(j) and j not in queued]
+                for j in sorted(live, key=lambda k: rank_of.get(k, 10 ** 9),
+                                reverse=True)[:max(0, len(live) - cap)]:
+                    queued.append(j)
+                    queue_reason[j] = "gate_trim"
+            # `cap > 0` guards the fully-gated case: with a cap of zero the book is empty and
+            # "displace the worst holding" has no argument to take.
+            if displace and cap > 0 and len([j for j in held if not slot_free(j)]) >= cap:
                 live = [j for j in held if not slot_free(j)]
                 worst = max(live, key=lambda j: rank_of.get(j, 10 ** 9))
                 worst_rank = rank_of.get(worst, 10 ** 9)
@@ -1889,12 +1960,12 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             # pool for an empty slot and it costs no new constant.
             fill_band = max(band, n)
             committed = len([j for j in held if not slot_free(j)]) + len(pending_buys)
-            if committed < n:
+            if committed < cap:
                 nav_now = mark(i)
                 eff = sleeve * (vol_scalar(navs, float(vol_target)) if vol_target else 1.0)
-                per_name = nav_now * eff / n
+                per_name = nav_now * eff / n      # sized off n, NOT cap — see the WO-A19 note
                 for j in order[:fill_band]:
-                    if committed >= n:
+                    if committed >= cap:
                         break
                     if (j in held or j in queued or not np.isfinite(adj[i, j])
                             or j in {b["j"] for b in pending_buys}):
