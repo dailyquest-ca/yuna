@@ -456,6 +456,68 @@ that the gate is the only intervention ever measured to move it.
 
 > **Ruling (Zak, 2026-08-15): there is no regime limit, and that is accepted.**
 
+> **SUPERSEDED the same day by measurement.** Zak then asked for the gate to be tested anyway. It
+> had never run on this book — `gated_off` was consulted by the calendar rebalance and nothing
+> else, so the gate sold the book and the banded entry bought it back the same session. Once that
+> was fixed, §7.2a. The ruling above was made on the honest belief that the gate was untested; it
+> was in fact **untestable**, and what it measures now is not what anyone was ruling on.
+
+### 7.2a What the gate does once it actually reaches the book
+
+Twenty years, 4,933 sessions, against the ungated control at **20.06% / −82.5%**:
+
+| cell | gate | CAGR | max DD | bootstrap p5 | deflated Sharpe |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `b5_12_2` | **none** | 20.06% | **−82.5%** | 1.16% | 0.072 |
+| `b5_12_2_gp` | sampled, no latch | **26.78%** | −63.0% | **10.62%** | — |
+| `b5_12_2_L1_3` | latch 1 out / 3 in | **26.54%** | **−61.2%** | 9.90% | **0.214** |
+| `b5_12_2_L1_1` | 1 / 1 | 26.16% | −62.1% | 9.41% | 0.202 |
+| `b5_12_2_L1_5` | 1 / 5 | 25.99% | −61.3% | 9.51% | 0.203 |
+| `b5_12_2_w250` | 250-day average | 25.76% | −63.2% | 9.46% | — |
+| `b5_12_2_gate` | 1 / 10 | 23.82% | −60.9% | 8.04% | 0.159 |
+| `b5_12_2_gr` | 1 / 10 + rising | 23.30% | −60.9% | 7.80% | — |
+| `b5_12_2_w150` | 150-day | 21.64% | −60.8% | 6.60% | — |
+| `b5_12_2_L1_20` | 1 / 20 | 21.30% | −61.8% | 6.24% | 0.109 |
+| `b5_12_2_w100` | 100-day | 20.25% | −63.1% | 5.43% | — |
+| `b5_12_2_L3_20` | 3 / 20 | 19.91% | −68.0% | 4.80% | — |
+| `b5_12_2_L5_40` | 5 / 40 | 17.50% | −68.4% | 3.50% | — |
+
+**Every one of the thirteen gate variants cuts the drawdown, from −82.5% to between −60.8% and
+−68.4%.** There is no setting of this gate that does not remove fourteen to twenty-two points of
+drawdown, and most raise the return as well.
+
+**The latch ladder points the opposite way to WO-A10's.** On the `w5` arm 1/10 won and short
+confirmations lost; here 1/3 wins and every long confirmation costs. Quick re-entry suits a book
+that re-decides every session; slow re-entry suited one that re-decided twice a year. The `w5`
+rungs were never evidence about this book.
+
+### 7.2b And it turns the losing decade profitable
+
+The disjoint window, 2007-01-05 to 2017-08-14, 2,671 sessions:
+
+| cell | CAGR | max DD | trades |
+| --- | ---: | ---: | ---: |
+| `b5_12_2` ungated | **−0.96%** | −81.8% | 451 |
+| `b5_12_2_t3` theme cap 3 | +1.18% | −79.2% | 447 |
+| `b5_12_2_t2` theme cap 2 | +1.00% | −76.6% | 462 |
+| `b5_12_2_t1` theme cap 1 | +2.89% | −68.7% | 551 |
+| `b5_12_2_g2` cap 2 in a downtrend | +3.69% | −70.7% | 536 |
+| `b5_12_2_g1` cap 1 in a downtrend | +7.60% | −68.2% | 459 |
+| **`b5_12_2_gate`** full gate | **+11.08%** | **−60.2%** | 366 |
+
+**§3's central finding needs restating because of this.** "Zero of twenty-five configurations made
+money over 2007–2017" was true, and it was true of twenty-five **ungated** configurations. The gate
+takes that decade from −0.96% a year to **+11.08%**, and takes 21.6 points off its drawdown.
+
+So the regime dependence in §3 is not a property of momentum as such. It is a property of momentum
+**held through downtrends**, which is the one thing this book was built never to stop doing. The
+partial caps confirm the direction monotonically: the more the book holds in a downtrend, the worse
+both windows get.
+
+**What this does not do** is clear the §2.5 bar. The best deflated Sharpe here is 0.214 against
+0.95, roughly tripled from the ungated 0.072 and still nowhere near proven. And the gate has now
+been selected on both windows, so neither is out-of-sample for it.
+
 The book runs ungated. This is consistent with §4.3's earlier ruling that the filter is advisory —
 it makes the same choice at the strategy level rather than only at the desk level. **The −82.5%
 drawdown is therefore an accepted property of the strategy, not an open problem**, and no document
