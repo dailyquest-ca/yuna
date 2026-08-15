@@ -132,6 +132,36 @@ def widest_gap(fracs):
     return best
 
 
+def reused_ticker_pairs(cur):
+    """`X_old.US` against `X.US` — the vendor's OWN marker that a symbol was reused.
+
+    This pass exists because the general scan cannot cut and is right not to: across all 471
+    candidate pairs the distribution is continuous, the widest gap is 1.6x, and a threshold read
+    off that would be fitted. But the tape carries 178 `_old` tickers, and the suffix is not a
+    score — it is EODHD stating that this symbol carried a different company before. That is
+    categorical evidence, and it makes a much narrower population worth scoring on its own.
+
+    The suffix alone is not enough to exclude, which is the whole reason the agreement test still
+    runs. `WTW_old` is Weight Watchers and `WTW` is Willis Towers Watson: two genuinely different
+    companies, agreeing on 0.15% of their moving sessions, and dropping either would delete real
+    history. Within this population the two cases separate cleanly, so the cut is read from this
+    subpopulation's own widest gap by exactly the same rule the general scan uses.
+
+    Measured 2026-08-14: runs 484 and 491 both held BBBY_old.US and BBBY.US AT THE SAME TIME in
+    February 2018 — one company, two of five slots, and every cap counting it as two names.
+    """
+    cur.execute("""
+        select u.ticker, replace(u.ticker, '_old', '') as base
+          from universe u
+         where u.ticker like '%%!_old.US' escape '!'
+           and exists (select 1 from universe b where b.ticker = replace(u.ticker, '_old', ''))
+           and exists (select 1 from prices p join prices q on q.ticker = replace(u.ticker,'_old','')
+                                              and q.d = p.d
+                        where p.ticker = u.ticker)""")
+    # ordered as the scorer expects (t1 < t2) so the returned rows line up with `score`
+    return [tuple(sorted(r)) for r in cur.fetchall()]
+
+
 def keeper(cur, tickers):
     """047's rule, unchanged and still the right one: keep the line that is still printing.
 
@@ -164,20 +194,52 @@ def main():
                 if n:
                     print(f"  [{lo:.2f}, {hi:.2f})  {n:5d}  {'#' * min(n, 60)}")
 
-            gap = widest_gap([s[4] for s in scored])
-            if not gap:
-                print("\nnothing to threshold")
-                return 0
-            lo, hi, ratio = gap
-            print(f"\nwidest gap: {lo:.4f} -> {hi:.4f}  ({ratio:.1f}x)")
-            if ratio < THRESHOLD_MIN_GAP:
-                print(f"the two populations are not separated by {THRESHOLD_MIN_GAP}x. A cut here "
-                      f"would be fitted, not read. Proposing nothing.")
-                return 0
-            cut = (lo * hi) ** 0.5                       # geometric midpoint of the gap
-            print(f"threshold: {cut:.4f} (geometric midpoint)")
+            # The reused-symbol pass, scored and thresholded on its own population. It runs whether
+            # or not the general scan can cut, because its candidates are named by the vendor
+            # rather than found by correlation.
+            # Each pass carries its OWN cut and says so in the exclusion it writes. A single global
+            # threshold would have made the reused-symbol proposals cite the census gap that did
+            # not produce them, and an exclusion whose stated reason is not its actual reason is
+            # how the last three attempts at this defect went stale.
+            def cut_from(population, label):
+                g = widest_gap([s[4] for s in population])
+                if not g:
+                    print(f"  {label}: nothing to threshold")
+                    return None, None
+                lo, hi, ratio = g
+                print(f"  {label}: widest gap {lo:.4f} -> {hi:.4f} ({ratio:.1f}x)")
+                if ratio < THRESHOLD_MIN_GAP:
+                    print(f"    not separated by {THRESHOLD_MIN_GAP}x — a cut here would be "
+                          f"fitted, not read. Proposing nothing from this pass.")
+                    return None, None
+                c = (lo * hi) ** 0.5                     # geometric midpoint of the gap
+                print(f"    threshold {c:.4f} (geometric midpoint)")
+                return c, ratio
 
-            dups = [s for s in scored if s[4] >= cut]
+            dups, why = [], {}
+            reused = score(cur, reused_ticker_pairs(cur))
+            print(f"\nreused symbols (`_old`, the vendor's own marker): {len(reused)} pairs scored")
+            rcut, rratio = cut_from(reused, "reused") if reused else (None, None)
+            if rcut is not None:
+                hit = [s for s in reused if s[4] >= rcut]
+                dups += hit
+                for s in hit:
+                    why[(s[0], s[1])] = f"threshold {rcut:.4f} read from a {rratio:.1f}x gap in " \
+                                        f"the reused-symbol population"
+                print(f"    {len(hit)} pairs are one company under two symbols")
+
+            print("\nthe whole census:")
+            cut, ratio = cut_from(scored, "census")
+            if cut is not None:
+                hit = [s for s in scored if s[4] >= cut and (s[0], s[1]) not in why]
+                dups += hit
+                for s in hit:
+                    why[(s[0], s[1])] = f"threshold {cut:.4f} read from a {ratio:.1f}x gap in " \
+                                        f"the census distribution"
+
+            if not dups:
+                print("\nno proposals from either pass")
+                return 0
             groups = {}
             for t1, t2, *_ in dups:
                 g = groups.setdefault(t1, {t1})
@@ -224,12 +286,12 @@ def main():
             score_by = {(t1, t2): (sh, mv, f) for t1, t2, sh, mv, f in dups}
             for t, k in fresh:
                 sh, mv, f = score_by.get((t, k)) or score_by.get((k, t)) or (0, 0, 0.0)
+                prov = why.get((t, k)) or why.get((k, t)) or "no threshold recorded"
                 cur.execute("""insert into universe_excluded (ticker, reason, detail)
                                values (%s, 'duplicate_listing', %s)
                                on conflict (ticker) do nothing""",
                             (t, f"same daily returns as {k} ({f:.4f} of {mv} moving sessions agree "
-                                 f"to {TOL:g}, over {sh} shared); threshold {cut:.4f} read from a "
-                                 f"{ratio:.1f}x gap in the census distribution"))
+                                 f"to {TOL:g}, over {sh} shared); {prov}"))
             conn.commit()
             print(f"\nwrote {len(fresh)} exclusions")
     return 0

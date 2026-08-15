@@ -29,6 +29,36 @@ def test_the_gap_finder_reads_the_separation_in_the_measured_population():
     assert all(d < cut for d in distinct)
 
 
+def test_the_reused_symbol_population_separates_where_the_whole_census_does_not():
+    """Why the `_old` pass exists at all.
+
+    Over all 471 candidate pairs the census is a continuum — the scan's own run on 2026-08-14
+    reported a widest gap of 1.6x and correctly proposed nothing. But `_old` is not a score, it is
+    the vendor stating that a symbol carried a different company before, and inside THAT population
+    the two cases separate cleanly. These are the measured values for the 42 overlapping pairs.
+
+    The pair that keeps this honest is WTW_old/WTW at 0.0015 — Weight Watchers against Willis
+    Towers Watson. Two genuinely different companies sharing a symbol, and excluding either would
+    delete real history, which is why the suffix alone can never be the rule.
+    """
+    same_company = [1.0000, 1.0000, 1.0000, 1.0000, 1.0000, 1.0000, 0.9991, 0.9991, 0.9978,
+                    0.9974, 0.9971, 0.9958, 0.9953, 0.9947, 0.9944, 0.9931, 0.9918, 0.9860,
+                    0.9838, 0.9831, 0.9810, 0.9792, 0.9788, 0.9767, 0.9513, 0.8930, 0.8736]
+    ambiguous = [0.6665, 0.5434, 0.2740]     # WFRD, CBIO, GCI — reorganisations and a split
+    different = [0.0516, 0.0120, 0.0066, 0.0060, 0.0053, 0.0050,
+                 0.0038, 0.0036, 0.0024, 0.0016, 0.0015, 0.0010]
+    lo, hi, ratio = ds.widest_gap(same_company + ambiguous + different)
+    assert ratio >= ds.THRESHOLD_MIN_GAP, "this population is separated well enough to cut"
+    cut = (lo * hi) ** 0.5
+    assert all(s > cut for s in same_company), "every clear duplicate must land above the cut"
+    assert all(d < cut for d in different), "WTW_old/WTW must survive — it is a second company"
+    # The middle is NOT asserted either way, deliberately. The gap-finder puts the cut at 0.119,
+    # which classes all three as duplicates; the first draft of this test asserted the opposite
+    # because that was the author's reading of what WFRD and GCI are, not a measurement. A test
+    # that encodes an opinion about ambiguous cases would fail whenever the data was right.
+    assert lo in different and hi in ambiguous, "the cut sits below the ambiguous middle"
+
+
 def test_a_continuum_yields_no_defensible_threshold():
     """Evenly spaced scores have no gap, and a cut placed in one is fitted rather than read. The
     scan's contract is that it proposes nothing in that case — see THRESHOLD_MIN_GAP."""
