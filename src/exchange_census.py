@@ -132,8 +132,78 @@ def main():
                         jump += "  ** LIKELY REISSUE **"
                 print(f"  {tk:<12} {ln:>4} sessions dark  {a} .. {b}{jump}")
 
+            held_back(cur)
+
     print("\ncensus: read-only, nothing written")
     return 0
+
+
+# ---- the three questions migration 050 held back --------------------------------------------
+#
+# 050 applied what survived re-verification and deliberately left five rows unapplied, each needing
+# one measurement rather than a judgement. They are asked here rather than in a new job because
+# this is already the read-only universe-hygiene report, and because an exclusion is permanent in
+# effect: a name wrongly excluded is never ranked, never traded, and leaves no trace of what it
+# would have done.
+#
+# The first question is live and costing something right now. 041 IS applied in production, so
+# APPS.US and BDN.US are excluded today under a row whose own text says "pending a re-pull" — and
+# the re-pull has since happened. Two live, tradable common stocks are being kept out of §3.3's
+# ranking on evidence nobody has re-checked.
+QUARANTINED = (("APPS.US", "BDN.US"), ("VGNT.US", "VGNT-W.US"))
+DEAD_PAIRS = (("TBSI.US", "TBSIQ.US"), ("VVUS.US", "VVUSQ.US"))
+
+
+def _returns(cur, a, b):
+    """Aligned daily returns for two tickers over the sessions they share. NaN where either is out."""
+    cur.execute("""select d, ticker, coalesce(adj_close, close) from prices
+                    where ticker in (%s, %s) order by d""", (a, b))
+    series = {}
+    for d, tk, px in cur.fetchall():
+        series.setdefault(d, {})[tk] = float(px) if px is not None else float("nan")
+    days = sorted(series)
+    import numpy as np
+    cols = {}
+    for tk in (a, b):
+        px = np.array([series[d].get(tk, np.nan) for d in days], dtype=float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            cols[tk] = np.diff(px) / px[:-1]
+    return cols[a], cols[b], len(days)
+
+
+def held_back(cur):
+    import bars
+
+    print("\n=== 050's quarantine rows: does the identical series survive the re-pull? ===")
+    for a, b in QUARANTINED:
+        ra, rb, n = _returns(cur, a, b)
+        if n < 2:
+            print(f"  {a} / {b}: fewer than two shared sessions — no bars to compare")
+            continue
+        twins = bars.same_security(ra, rb)
+        shared = int((~(ra != ra) & ~(rb != rb)).sum())
+        print(f"  {a} / {b}: {shared} shared sessions · same series = {twins}")
+        verdict = ("STILL CORRUPT — the exclusion stands" if twins else
+                   "CLEAN — the defect is gone, and §3.2 calls a standing exclusion of a live "
+                   "tradable common stock a strategy change. Propose RELEASING it.")
+        print(f"      {verdict}")
+
+    print("\n=== 050's dead pairs: which line prints later? ===")
+    for a, b in DEAD_PAIRS:
+        cur.execute("""select ticker, max(d) from prices where ticker in (%s, %s)
+                        group by ticker order by 2 desc""", (a, b))
+        rows = cur.fetchall()
+        if len(rows) < 2:
+            print(f"  {a} / {b}: only {len(rows)} of the two has bars at all")
+            for tk, last in rows:
+                print(f"      {tk} last prints {last}")
+            continue
+        (keep, keep_last), (drop, drop_last) = rows
+        # §3.2: "keep the line still printing". When neither is, the later last-print is the one
+        # the vendor carried furthest, and that is the line to keep.
+        print(f"  {a} / {b}: {keep} last prints {keep_last}, {drop} last prints {drop_last}")
+        print(f"      keep {keep}, exclude {drop} (§3.2 keeps the line still printing; neither is, "
+              f"so the later last-print decides)")
 
 
 if __name__ == "__main__":
