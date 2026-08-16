@@ -192,7 +192,39 @@ seed on this record.
 
 ---
 
-## 8. Still open from earlier work orders
+## 8. What the migration actually changed, measured
+
+Migrations **049–055** were all pending — which means the WO-A22 exclusions you ruled on this
+morning had never reached production. They are applied now, and the effect was measured rather
+than assumed: the desk sheet after the migration is **byte-identical** to the one before it, and
+the universe is still 3,204.
+
+That is the correct outcome and the census says why. `PLZL`, `NVTK`, `MGROS` and `IVL` all carry
+`status = delisted`, and `desk.py` already filters delisted names. The four duplicate lines
+(`BLL`, `HFC`, `BBBY_old`, `RFMD`) are dead symbols by construction — each is a rename or a merger
+into a survivor. **So 050's exclusions bind on the historical tape run 589 was measured over, and
+change nothing about today's ranking.** Both statements needed to be true and now both are checked.
+
+Two things the census surfaced that were not on anybody's list:
+
+**Eight active names are being excluded right now.** The census counts 3,212 active stocks; the
+desk ranks 3,204. That gap is `universe_excluded`, and **041 is applied in production** — today's
+dry run proved it by listing only 049 onward as pending. So `APPS.US` and `BDN.US` are excluded
+today under a 041 row whose own text reads *"identical 653-bar series … pending a re-pull"*, and
+the re-pull has since happened. If the vendor defect is gone, two live tradable common stocks have
+been kept out of §3.3's ranking on evidence nobody re-checked — and §3.2 calls a standing exclusion
+of a live tradable common stock a strategy change, not hygiene. The census now runs that test
+(`bars.same_security`, daily returns at 1e-4 with the variation floor) and prints RELEASE or
+STANDS. **The release itself is your ruling, not mine.**
+
+**An NYSE/NASDAQ allow-list still keeps zero of 3,212.** `universe.exchange` holds `US` for all
+6,332 stocks — it is EODHD's bulk-feed bucket, not a listing venue. That confirms the WO-A22 §8.1
+finding on today's data: the exchange filter you asked about cannot be built from this column, which
+is why the four foreign names are excluded by name.
+
+---
+
+## 9. Still open from earlier work orders
 
 - **Runs 616/618** — the sub-window controls, and the §3.1 amendment they would justify. Not yet
   read.
