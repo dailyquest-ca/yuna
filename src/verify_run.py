@@ -39,6 +39,7 @@ check. Exit code is non-zero if anything fails, so CI can gate on it.
 
     RUN_ID=457 python src/verify_run.py
 """
+import collections
 import os
 import sys
 
@@ -369,24 +370,53 @@ def check_lookahead(results, cur, run_id):
 
 
 def check_rules(results, cur, run_id, eq):
-    # D1 — slot discipline, from the trade list rather than the engine's own counter
-    cur.execute("""select ticker, entry_date, coalesce(exit_date, date '2999-12-31')
+    # D1 — slot discipline, from the trade list rather than the engine's own counter.
+    #
+    # This check used to sample `dates[::5]` and call it "enough to catch a breach". It is not: the
+    # book re-decides every session and displacement is capped at one per session, so a breach can
+    # open and close inside five sessions and never be looked at. Every session is swept now, by
+    # event rather than by scanning the span list per date — O(n log n) instead of dates x spans,
+    # which is what made the sampling tempting in the first place.
+    cur.execute("""select ticker, entry_date, coalesce(exit_date, date '2999-12-31'),
+                          qty, entry_price
                      from backtest_trades where run_id = %s""", (run_id,))
     spans = cur.fetchall()
-    # count concurrent DISTINCT names on the sessions the curve covers
     dates = [r[0] for r in eq]
-    worst, worst_d = 0, None
-    for d in dates[::5]:                      # every fifth session: enough to catch a breach
-        live = {tk for tk, a, b in spans if a <= d <= b}
+    events = {}
+    for tk, a, b, _q, _p in spans:
+        events.setdefault(a, []).append((1, tk))
+        events.setdefault(b, []).append((-1, tk))     # exit session still counts as held
+    live, worst, worst_d = collections.Counter(), 0, None
+    for d in dates:
+        for delta, tk in events.get(d, ()):
+            if delta > 0:
+                live[tk] += 1
+            else:
+                live[tk] -= 1
+                if live[tk] <= 0:
+                    del live[tk]
         if len(live) > worst:
             worst, worst_d = len(live), d
     reported = max((r[2] or 0) for r in eq) if eq else 0
-    if worst > reported:
-        _fail(results, "D1 slot discipline",
-              f"trade list shows {worst} concurrent names on {worst_d}, engine reported max {reported}")
-    else:
+
+    if worst <= reported:
         _ok(results, "D1 slot discipline",
-            f"max {worst} concurrent names (engine reported {reported})")
+            f"max {worst} concurrent names (engine reported {reported}), every session swept")
+        return
+
+    # A breach in NAMES is not yet a breach in CAPITAL, and the difference decides how much it
+    # matters. §3.5 sizes every position at NAV / slots, so N positions is N/slots of NAV: five is
+    # 100%, seven is 140% and that is unintended leverage. But if the extra names are duplicate
+    # listings of one company, the book may be holding the right number of BETS under the wrong
+    # number of SYMBOLS. Report both, because the reader cannot infer either from the other.
+    live_rows = [(tk, q, p) for tk, a, b, q, p in spans if a <= worst_d <= b]
+    held = sorted({tk for tk, _q, _p in live_rows})
+    basis = sum(float(q or 0) * float(p or 0) for _tk, q, p in live_rows)
+    nav = next((float(r[1]) for r in eq if r[0] == worst_d), None)
+    share = f"{basis / nav:.0%} of NAV at cost" if nav else "NAV unavailable"
+    _fail(results, "D1 slot discipline",
+          f"trade list shows {worst} concurrent names on {worst_d}, engine reported max {reported} "
+          f"— {share}; names {', '.join(held)}")
 
 
 def main():

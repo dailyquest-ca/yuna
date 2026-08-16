@@ -30,6 +30,7 @@ Read these three and stop:
 | --- | --- |
 | [`wo-a20-v2-decision.md`](wo-a20-v2-decision.md) | **The current strategy of record.** V2 — entry band 2, exit band 12, regime gate with a 1/3 latch. Research complete; **not adopted**. Adoption is a plan amendment. |
 | [`wo-a18-programme-record.md`](wo-a18-programme-record.md) | **The history.** Everything tried, every ruling, every number, in the order it happened. Where an earlier document conflicts with this one, this one is later. |
+| [`wo-a22-cell-of-record-audit.md`](wo-a22-cell-of-record-audit.md) | **The cell of record, audited.** Run 589 passes 13 of 16 checks — every headline verifies to the digit, the tape is clean — and fails three, all about which names were in the book. Read before quoting §3.1. |
 | [`wo-a21-merge-plan.md`](wo-a21-merge-plan.md) | **The merge plan.** What of this branch is safe on `main`, in what order, and what must not go until the plan is amended. |
 
 ### Superseded — do not act on the recommendation
