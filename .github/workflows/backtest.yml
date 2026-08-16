@@ -43,7 +43,10 @@ on:
         description: 'drawdown kill bar for the §2.5 verdict (E3 cells declare -0.34; blank = the arm declares none)'
         default: ''
       research:
-        description: 'run a research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger, `concentrated` = WO-A4 the winner-catcher, `dedupe` = the duplicate-listing scan'
+        description: 'run a research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger, `concentrated` = WO-A4 the winner-catcher, `dedupe` = the duplicate-listing scan, `verify` = audit stored runs and compute NOTHING'
+        default: ''
+      run_ids:
+        description: 'verify only: comma-separated run ids to audit (e.g. 589,607). READ-ONLY — verify_run.py issues no INSERT, UPDATE, DELETE or COMMIT, so this cannot alter a stored run or the tape.'
         default: ''
       apply:
         description: 'dedupe only: write the exclusions (default: report only)'
@@ -158,6 +161,40 @@ jobs:
       - name: autopsy on failure
         if: failure() && steps.engine.outcome == 'failure'
         run: python src/report_fail.py dedupe /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  verify:
+    # Audit runs that already exist. It re-derives every headline from the stored trades and the
+    # equity curve rather than trusting the run's own summary, so it answers "is the number real"
+    # without re-running the engine that produced it — and without a NAV, a window or a cell, none
+    # of which it needs.
+    #
+    # It is READ-ONLY by construction, which is what makes it safe to point at production: there is
+    # no INSERT, UPDATE, DELETE or COMMIT anywhere in `verify_run.py`. Unlike the audit step inside
+    # the `concentrated` job, this one costs nothing and changes nothing.
+    #
+    # Every run is audited even when an earlier one fails, and the job fails at the end if any did.
+    # Auditing 589 and stopping before 607 because 589 was red is the opposite of the point.
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'verify'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: audit
+        run: |
+          test -n "${{ inputs.run_ids }}" || { echo "run_ids is required for research=verify"; exit 1; }
+          rc=0
+          for rid in $(echo "${{ inputs.run_ids }}" | tr ',' ' '); do
+            echo "::group::run $rid"
+            RUN_ID="$rid" python src/verify_run.py || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
