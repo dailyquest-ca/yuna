@@ -179,7 +179,15 @@ def main():
                 pnls = fetch_trade_pnls(cur, run["id"])
 
                 full = score_cut(cut(equity, pnls), dd_bar=dd_bar)
-                oos = score_cut(cut(equity, pnls, since=OOS_START), dd_bar=dd_bar)
+                # A run can END before the OOS cut — the 2007-2017 half of a disjoint split has no
+                # Aug-2025 sessions to be tested on. That is a third case, and neither of the two
+                # obvious answers is right. Asking anyway raised `cut from 2025-08-01 holds 0
+                # sessions`, which under the workflow's `bash -e` loop killed the finding step for
+                # every remaining run in the batch (run 607). Skipping quietly would be worse: an
+                # untestable claim would score as a tested one. It fails closed instead — no OOS
+                # block, and `proven` is unreachable.
+                oos = (score_cut(cut(equity, pnls, since=OOS_START), dd_bar=dd_bar)
+                       if equity[-1][0] >= OOS_START else None)
 
                 trials = trial_sharpes(cur, run["id"])
                 sds = np.array(list(trials.values()))
@@ -200,10 +208,16 @@ def main():
                     bootstrap_p5_drawdown=full["bootstrap"]["max_drawdown"]["p5"])
                 # §2.5(a) makes the OOS cut part of the definition, not decoration: a full-window
                 # pass with an OOS miss is unproven, with the reason on the record.
-                if verdict["verdict"] == "proven" and not oos["bootstrap_median_beats_benchmark"]:
-                    verdict = dict(verdict="unproven",
-                                   reasons=["OOS bootstrap-median CAGR does not exceed the "
-                                            "benchmark's on the Aug-2025 cut"])
+                if verdict["verdict"] == "proven":
+                    if oos is None:
+                        verdict = dict(verdict="unproven",
+                                       reasons=[f"the equity path ends {equity[-1][0].isoformat()}, "
+                                                f"before the Aug-2025 cut — §2.5(a)'s out-of-sample "
+                                                f"test cannot be run on this window"])
+                    elif not oos["bootstrap_median_beats_benchmark"]:
+                        verdict = dict(verdict="unproven",
+                                       reasons=["OOS bootstrap-median CAGR does not exceed the "
+                                                "benchmark's on the Aug-2025 cut"])
 
                 out = dict(source="wo-e-series-2026-08-12 §2.5",
                            scored_at=dt.date.today().isoformat(),
@@ -224,7 +238,14 @@ def main():
                 raise
 
         lines = [f"### §2.5 bars · run {run['id']} · `{run['label']}`", ""]
-        for name, c in (("full", full), ("OOS (Aug-2025)", oos)):
+        cuts = [("full", full)]
+        cuts.append(("OOS (Aug-2025)", oos) if oos is not None else (None, None))
+        for name, c in cuts:
+            if c is None:
+                lines += [f"**OOS (Aug-2025)** not applicable — the path ends "
+                          f"{equity[-1][0].isoformat()}, before the cut. Verdict cannot read "
+                          f"`proven` on this window.", ""]
+                continue
             b = c["bootstrap"]
             lines += [f"**{name}** {c['window'][0]} → {c['window'][1]} · "
                       f"{c['total_return']:+.2%} vs benchmark {c['benchmark']['total_return']:+.2%} "
