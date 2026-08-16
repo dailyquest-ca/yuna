@@ -126,3 +126,187 @@ is `roadmap-2026-07-31.md`.
     because nothing maintained it — so the queue seated a position we had sold and dropped two we
     owned. §3.0 says membership lists never drop a name the book owns; the way to keep that true is
     to ask the book at run time and re-derive the flag from it, never to remember separately.
+31. **A guard calibrated on the defect it caught will fire on everything that resembles it.** The
+    price-basis fix came with an integrity guard that halted the run on any adjusted daily move
+    beyond 85%. Measured against the real tape it condemned **819 of 5,264 names** — the
+    re-derivation of runs 18-44 could never have started. Worse, the second draft counted moves
+    in *both* directions and quarantined GME, DJT, LUNR, INSM and CHK: the January 2021 squeeze
+    (+93% then +135%), the Trump Media announcement (+357%), a lunar-lander contract, a phase-3
+    readout. **A data guard that deletes the decade's biggest momentum events from a momentum
+    backtest is worse than no guard**, because it removes precisely the trades under study, and
+    it does it silently — the run still completes and still prints a number.
+    **The asymmetry is the fix:** falling is evidence, rising is momentum. After a real -85% the
+    price sits at 15% of its old level, so a second one from above $5 needs a ~6.7x recovery in
+    between, which equities do not do. Repetition *down* is a discontinuous series; repetition
+    *up* is the thing we are hunting.
+    **Corollary, and the more general lesson:** every threshold in that guard was picked by
+    querying the tape and counting what it would condemn, then checking the survivors by name.
+    Three candidate rules were measured and discarded before one held — magnitude alone (cannot
+    separate Yellow Corp's bankruptcy from a broken series), share-of-names (19.5% on a raw
+    basis against 15.6% on an adjusted one, so no threshold sits between them), and the
+    corporate-action record (`corporate_actions` holds four split rows, all from August 2026 —
+    a live feed for the book, not a historical archive). A threshold that was never counted
+    against the data is a guess wearing a constant's clothing.
+32. **Distinguish a broken security from a broken tape, or you get neither.** The first guard
+    conflated them and so had exactly one response — halt — to two problems with opposite
+    remedies. One bad ticker among 5,264 should be *removed*; the same symptom across the whole
+    universe means the price basis is wrong and nothing can be trusted. The gate now halts on a
+    tape invariant asserted directly (the decision series must differ from the raw print on at
+    least 20% of bars; the real tape differs on 58.9% across 2,999 names), quarantines individual
+    securities with a named reason recorded in `stats.excluded_discontinuous`, and halts anyway
+    if the quarantine exceeds 10% of the universe — because at that point "bad tickers" is the
+    wrong diagnosis. Current reality is 2.70%.
+33. **The invalid unit is often the bar, not the security.** Vendors pad the delisting tail with
+    `0.0000` after an acquisition — CONN 5 bars, HIBB 7, AEL 2, PACW 1. Condemning the ticker
+    throws away years of valid history *and* biases the sleeve against takeouts, which are the
+    good ending for a momentum position. Masking those bars to NaN — which is already what "no
+    bar" means to the engine — cut the traded-name casualty list from 16 to 5. Before excluding
+    a thing, check whether the corruption is the whole thing or one row of it.
+34. **The run that "improved suspiciously" was the clean one; the old run was contaminated.**
+    Run 46 came back +5.65% where run 18 said -4.55%, with drawdown halved, immediately after a
+    change to data handling — which `.claude/rules/trading-code.md` says to treat as a look-ahead
+    bug until proven otherwise. The obvious innocent story was wrong: splits were NOT arriving as
+    crashes in the trade list, and the proof is that both runs have **zero** trades losing more
+    than 12% and an identical worst trade of -9.87%. An 8% stop cannot produce a -50% trade, so
+    if the defect had been reaching the book that way it would have been visible there. It wasn't.
+    The real mechanism ran the other way. ADDV was computed as `raw_close x volume` while volume
+    was already split-adjusted, so a name's *past* liquidity was inflated by its own *future*
+    split factor — CMG's pre-split ADDV read $79bn, 660 names were affected, and 170,220 name-days
+    entered L0 on the strength of it alone. **Run 18 had the look-ahead. Run 46 removed it**, and
+    the names it stopped admitting were junk that lost money: the 147 trades that vanished lost
+    $7,857 between them, and they are ~1.8x more likely than the retained trades to sit on a name
+    that later split 2:1 or more (8.8% against 4.9%).
+    Two lessons. **A result improving after a data fix is not by itself evidence of a new bug — it
+    is equally consistent with removing an old one**, and the way to tell them apart is to name the
+    mechanism and find it in the data, not to argue from the direction of the number. And the
+    reason this could only be *partly* settled is that the law surface changed between the two runs
+    while `law_stamp` stayed at 2026-08-09; with the stamp broken, no two runs can be cleanly
+    differenced, so a residual will always remain unattributable. Fix the stamp before trusting
+    any delta.
+35. **A guard that ran and wrote rows is not a guard that worked.** Three migrations have now
+    attacked duplicate listings — 045 by hand, 047 on sampled closes, 048 on sampled daily
+    returns — and each one completed, inserted a plausible number of exclusions, and left behind
+    the case its own header named as the motivating example. 047 compared closes with exact float
+    equality at a 99% bar; BBBY_old against BBBY agrees on 2,245 of 2,274 shared closes — 98.72%,
+    short by 0.28 points on sub-cent vendor rounding. Its byte-exact sibling BYON was excluded, so
+    the migration looked like it had handled the group. 048 moved to daily returns, which is the
+    right invariant, and then kept a 1e-9 tolerance that splits the duplicate population in half:
+    on the current tape SPWR_old/SPWRQ scores 0.467 exact and 0.952 at 1e-4, BALL/BLL scores
+    0.0015 and 0.994, and both are one company.
+    **Two general lessons.** A tolerance has to be looser than the noise it must survive: two
+    vendor copies of one series, quoted in cents, differ in the fifth decimal of a daily return
+    from rounding alone, so any test tighter than that measures the vendor's rounding rather than
+    the securities. And **evidence baked into a migration goes stale the moment the data moves** —
+    both files sampled eight dates in 2018-2025, so when the backfill extended the census to 2005
+    every pair that died before 2018 (ANR/ANRZ, WLT/WLTGQ, TBSI/TBSIQ) became invisible to both,
+    and the series the thresholds had been calibrated against were re-fetched underneath them.
+    048 had recorded BBBY as unfixable residue — "plainly below any threshold this file could
+    defend" — which was true of its tape and false of the tape three days later.
+    The remedy is that the scan is now a job (`src/dedupe_scan.py`), takes its probe anchors from
+    the benchmark's own session list rather than hard-coded dates, and **reports the census
+    distribution before proposing a threshold**. Measured across the co-held pairs, duplicates
+    score 0.85-1.00 on daily-return agreement and genuinely different securities score 0.006-0.033
+    — a 25x gap with nothing in it. The cut is the geometric midpoint of the widest gap the scan
+    actually finds, and it proposes nothing when no gap is there. A threshold read off a bimodal
+    distribution is a rule; the same number written into a file is a guess with a good history.
+36. **A blank `workflow_dispatch` input is set, not unset, so `os.environ.get(k, default)` never
+    fires.** The park, calendar and window became env-level for WO-A9's deep test, and the
+    workflow passes `PARK: ${{ inputs.park }}` — which for a blank input is the empty string. Four
+    dispatches died on `contains no session of ,` before the cause was obvious, and the workflow's
+    own help text said blank meant the default. Use `os.environ.get(k, "").strip() or default`.
+    It failed loudly, which is the only reason this cost runs instead of a silently mis-parked
+    equity curve — the window guard added alongside those inputs caught the empty calendar. The
+    general form: **a default that only fires on `KeyError` is not a default in a CI environment**,
+    because CI sets everything it mentions.
+37. **`code_stamp` is the first column to read when two runs disagree, not the last.** WO-A15 §4.2
+    reported the engine as not bit-reproducible, on three runs of one `param_hash` that differed by
+    0.09 CAGR points and one trade — then spent a section hunting a cause: unstable sorts, in-place
+    writes to the shared price arrays, mutable module state, a job writing to the database between
+    runs. None of it was happening. The three runs carried code stamps `d00ee243`, `3b831e96` and
+    `08ff10e3`; they were **three different engines**, and 422 and 440 predate the stable-sort
+    fixes that 457 contains. The document printed the stamp in its own table and read past it.
+    Held constant, the engine reproduces exactly: runs 457 and 484, an hour apart, agree on all
+    974 trades in both directions and on NAV and position count across all 4,932 equity rows.
+    The stamp exists so that runs are only compared when it matches. **A comparison that ignores
+    it is not a comparison**, and "the cause is not established" is a conclusion that should never
+    be reached while an identity column in the same table is still unexamined.
+38. **The vendor's metadata is a claim, not a fact, and the pipeline had no test that could catch
+    it lying.** `PLZL.US` is Polyus quoted in roubles on MOEX; EODHD reports Exchange `NYSE`,
+    CurrencyCode `USD`, CountryName `USA`. `src/backfill.py` read `Currency` from the symbol list
+    and stored it faithfully — the ingest is correct and the data is wrong, which is the hardest
+    shape of defect to find because every check of our own work passes. Rouble price times MOEX
+    volume read as $426m of daily dollar volume, so it cleared a $10m gate on an FX rate.
+    Three specific traps. The obvious test — bars printed on US market holidays — catches nothing
+    here, because the vendor serves the foreign series **already aligned to the US calendar**; what
+    survives is the residue, the name's own market holidays falling on days the NYSE is open.
+    A count of *finite* bars cannot see it either, because some series are padded flat rather than
+    left absent: `IVL.US` carries 271 zero-volume bars in 1,483, which is why its session count
+    matches SPY's exactly. And `L0_MIN_BARS` admitting 210 of 252 means a name absent 4% of the
+    year passes with room to spare — **a floor set for one purpose is not a guard for another.**
+    The gate that works is intrinsic and is written as a liquidity rule, not a nationality one: a
+    name must have actually traded on a declared fraction of its formation window. It needs no list
+    of countries, and it ejects untradeable names and foreign lines by the same test.
+39. **A gap measured as a RATIO is the wrong instrument for a score that is a proportion.**
+    `dedupe_scan.py` reads its threshold from the widest multiplicative gap in the agreement
+    distribution, which is the right instinct — a cut read off a bimodal census is a rule, and the
+    same number written into a file is a guess. But agreement is a FRACTION in [0,1], and on that
+    scale a ratio is dominated by the bottom: 0.0060 to 0.0513 is 8.6x and clears the 3.0x bar,
+    while both numbers mean "these two series agree on essentially nothing." The scan duly
+    proposed a threshold of **0.0175** — two series are the same company if they agree on 1.75% of
+    their moving sessions — and put `GOLD_old.US` (Randgold, 0.0516) up for deletion in favour of
+    `GOLD.US` (Barrick). Randgold's pre-2019 history, gone, on a ratio between two numbers that
+    are both approximately zero.
+    The failure was invited by a change made three commits earlier for a different good reason: a
+    coverage filter that removed pairs whose exclusion would lose history. That filter took the
+    very bottom out of the distribution, and the widest ratio moved into the noise it left behind.
+    **A threshold rule is not safe merely because it is read from data — it must be read with a
+    metric the data supports.** Proportions are compared by difference; ratios belong to
+    quantities with a meaningful zero and unbounded range. The scan's own stated populations
+    (duplicates 0.85-1.00, different securities 0.006-0.033) are separated by 0.8 in absolute
+    terms and that is the separation worth finding.
+    Two second-order lessons. **Changing the population changes the threshold**, so any filter
+    applied before a data-read cut must be re-examined together with the cut, not separately. And
+    the run that exposed this was report-only: `SCAN_APPLY` defaulting to false is what stood
+    between a reasoned change and a deleted company.
+40. **A twenty-year backtest is not twenty years of evidence until you cut it.** The banded book
+    returns 16.51%/yr over 2007-2026 on a clean tape, reproducing to the digit. Split at the
+    midpoint and it is **−5.22%/yr over 2007-2017 and +48.03%/yr over 2017-2026** — and the first
+    half is negative in **all twenty-five** cells of the 5x5 band grid, from −0.96% to −7.49%,
+    every one with a drawdown near −80%. There is no configuration of this rule that made money in
+    the first decade.
+    The compounding hides it perfectly: a decade at −5% costs 43%, nine years at +48% makes 33x,
+    and the product is a respectable-looking 16.5% headline that describes neither period. **A
+    single CAGR over a long window is the statistic most able to conceal a regime dependence**,
+    because the good years dominate the geometric mean and the bad years leave no trace in it.
+    Two consequences worth carrying. §2.5's deflated Sharpe had already said this in one number —
+    0.113 over 347 trials — and it was easier to read the CAGR and treat the deflation as a
+    technicality. It was not a technicality; it was the same fact. And the sub-window split is
+    cheap, which makes its absence from every prior WO in this programme the real defect: fifty
+    cells were compared on their full-window numbers and none of the comparisons could have
+    revealed that all of them lost money for ten years.
+    **Cut every window before believing any headline from it, and prefer disjoint sub-windows to
+    nested ones.** The rank correlation between the two windows this programme had been using read
+    +0.872; between genuinely disjoint halves it is +0.592. The nested pair was flattering itself.
+41. **A merge plan written from the diff's shape is a guess; the imports are the fact.** WO-A21
+    split 184 commits into four PRs by reading which files changed and how risky each looked. Three
+    of the four groupings were impossible, and each would have put a red build on `main`.
+    `concentrated.py` and `blend.py` were filed as "research tooling, nothing imports it from the
+    pipeline" — true of the pipeline, irrelevant to the question, because they import eight symbols
+    from `backtest.py` that `main` does not have. A parity test was scheduled to land *before* the
+    refactor it proves, so that "the proof exists independently of the thing it proves" — except it
+    calls two functions that do not exist until that refactor. And a one-line `conftest.py` change
+    was described as a free bonus; it truncates three tables created by migrations the same document
+    holds back, so taking it alone errors **all 153** integration tests rather than the four new ones.
+    The near-miss underneath is worth more than the three errors. `verify_run.py`, `dedupe_scan.py`
+    and `capture_audit.py` all read `universe_excluded`, created by migration 041 — which §5 held
+    back as production data. The auditor would have merged **unable to run at all**, and no test
+    would have said so, because the unit tests never touch a database and the integration suite was
+    being handed the branch's schema. The fix was to notice that 041 does two separable things:
+    creates a table, then fills it with twelve hand-curated rows. The tools need the table. The rows
+    are the stale evidence. **When a migration blocks a merge, check whether its DDL and its DML
+    actually need to travel together** — usually they do not, and an empty table is an honest
+    default in a way that stale rows are not.
+    **The rule this leaves: a PR is not proposed until it has been assembled on top of the branch
+    point it targets and run there.** A worktree at `origin/main`, the candidate files checked out
+    over it, a fresh database, both suites. It took one command each and found everything above;
+    reasoning about the diff had found none of it, twice.
