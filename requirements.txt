@@ -4,3 +4,8 @@ numpy==2.1.3
 pandas==2.2.3
 psycopg[binary]==3.2.3
 pytest==8.3.4
+# Test-only, like pytest above: `tests/test_workflows_parse.py` parses every workflow file, which
+# is the only guard against a YAML defect that GitHub does not report until a dispatch fails. It
+# reads no decision arithmetic, so a version bump here cannot move a number — but it is pinned
+# anyway, because "pinned unless argued otherwise" is the rule this file exists to state.
+PyYAML==6.0.3
