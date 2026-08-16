@@ -79,6 +79,59 @@ def main():
             keep, live = cur.fetchone()
             print(f"  active stocks {live}, kept by NYSE/NASDAQ only: {keep} "
                   f"({keep / live:.1%}) — dropped: {live - keep}")
+            # ---- reused tickers -------------------------------------------------------------
+            #
+            # RXDX was Ignyta until Roche bought it in 2018, then the symbol was reissued to
+            # Prometheus Biosciences in 2021 — one ticker, two companies, 777 missing sessions in
+            # between. It was found by accident while explaining a B4 flag, and nothing in this
+            # repo looks for the class.
+            #
+            # It is the worst tape defect available, worse than a mis-stated split: a 252-session
+            # formation window spanning the gap computes (adj[i-21] / adj[i-252] - 1) across TWO
+            # UNRELATED COMPANIES, and §3.3 makes that number the entire opinion. The engine cannot
+            # tell; the score is arithmetically valid and economically meaningless.
+            #
+            # A quarter of dead sessions is far past any halt or suspension, so the gap threshold
+            # needs no calibration — it is not a tuned parameter, it is "obviously not trading".
+            print("\n=== one ticker, two companies: dead runs longer than a quarter ===")
+            cur.execute("""
+                with span as (select p.ticker, min(p.d) a, max(p.d) b
+                                from prices p join universe u on u.ticker = p.ticker
+                               where u.kind = 'stock' group by p.ticker),
+                miss as (select s.ticker, bm.d,
+                                row_number() over (partition by s.ticker order by bm.d) rn
+                           from span s
+                           join prices bm on bm.ticker = 'SPY.US' and bm.d between s.a and s.b
+                          where not exists (select 1 from prices p
+                                             where p.ticker = s.ticker and p.d = bm.d)),
+                runs as (select ticker, count(*) len, min(d) from_d, max(d) to_d
+                           from (select ticker, d, rn, d - (rn * interval '1 day') grp
+                                   from miss) g
+                          group by ticker, grp)
+                select r.ticker, r.len, r.from_d, r.to_d,
+                       (select coalesce(p.adj_close,p.close) from prices p
+                         where p.ticker = r.ticker and p.d < r.from_d
+                         order by p.d desc limit 1) as before_px,
+                       (select coalesce(p.adj_close,p.close) from prices p
+                         where p.ticker = r.ticker and p.d > r.to_d
+                         order by p.d limit 1) as after_px
+                  from runs r where r.len >= 63
+                 order by r.len desc limit 40""")
+            gaps = cur.fetchall()
+            if not gaps:
+                print("  none — no stock ticker goes dark for a quarter inside its own span")
+            for tk, ln, a, b, before, after in gaps:
+                # A price that resumes at a wildly different level across a long dead period is the
+                # tell for a REISSUE rather than a suspension: the same company coming back from a
+                # halt resumes near where it stopped.
+                jump = ""
+                if before and after and float(before) > 0:
+                    r = float(after) / float(before)
+                    jump = f"  {float(before):.2f} -> {float(after):.2f} ({r:.2f}x)"
+                    if r > 3 or r < 0.33:
+                        jump += "  ** LIKELY REISSUE **"
+                print(f"  {tk:<12} {ln:>4} sessions dark  {a} .. {b}{jump}")
+
     print("\ncensus: read-only, nothing written")
     return 0
 
