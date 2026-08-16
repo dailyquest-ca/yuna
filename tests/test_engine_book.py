@@ -135,3 +135,28 @@ def test_participation_caps_the_order_at_98_percent_of_addv():
     assert engine.participation_ok(100, 50.0, 5_000.0) is False       # 5,000 > 0.98 * 5,000
     assert engine.participation_ok(100, 50.0, None) is False, "unknown liquidity is not permission"
     assert engine.participation_ok(100, 50.0, 0.0) is False
+
+
+def test_the_latch_walked_forward_never_flips_on_a_single_green():
+    """The latch derived over a whole series must obey the same asymmetry as one evaluated by hand:
+    it can turn OFF in one session and can never turn ON in fewer than three.
+
+    Derived rather than stored on purpose — §3.4 says an unevaluable gate reads OFF, and a stored
+    flag that survives a failed ingest would say ON while the data behind it is missing.
+    """
+    rng = np.random.default_rng(4)
+    px = 100 * np.exp(np.cumsum(rng.normal(0.0002, 0.02, 1500)))
+    state = engine.gate_history(px)
+    assert state.shape == px.shape
+    assert not state[:engine.GATE_SMA - 1].any(), "before the window can be evaluated it is OFF"
+
+    flips_on = [i for i in range(1, len(state)) if state[i] and not state[i - 1]]
+    for i in flips_on:
+        greens = sum(engine.gate_green(k, px) for k in range(i - engine.LATCH_IN + 1, i + 1))
+        assert greens == engine.LATCH_IN, (
+            f"session {i} turned ON without {engine.LATCH_IN} consecutive greens")
+
+    flips_off = [i for i in range(1, len(state)) if not state[i] and state[i - 1]]
+    for i in flips_off:
+        assert not engine.gate_green(i, px), f"session {i} turned OFF on a green session"
+    assert flips_on and flips_off, "the fixture must actually exercise both directions"

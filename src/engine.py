@@ -135,6 +135,27 @@ def gate_state(i, index_px, previous):
     return greens >= LATCH_IN
 
 
+def gate_history(index_px):
+    """Every session's gate state, walked forward from the first evaluable one.
+
+    The latch is DERIVED rather than stored, and that is deliberate. A persisted flag is one more
+    thing that can be stale, and §3.4 already says an unevaluable gate reads OFF — a stored row
+    that survives a failed ingest would say ON while the data behind it is missing, which is
+    precisely the state the clause exists to forbid. Walking it forward from the tape makes tonight's
+    answer a function of the tape and nothing else, so it is identical in the backtest, in the
+    shadow, and on the morning Zak reads it.
+
+    Returns an array of bools the same length as `index_px`; sessions before the 200-day window can
+    be evaluated are OFF, which is the same answer §3.4 gives for any gate it cannot evaluate.
+    """
+    state = np.zeros(len(index_px), dtype=bool)
+    prev = False
+    for i in range(len(index_px)):
+        prev = gate_state(i, index_px, prev)
+        state[i] = prev
+    return state
+
+
 def orders(ranked, held, *, gate_on, slots=SLOTS, exit_rank=EXIT_RANK,
            fill_band=FILL_BAND, displace_band=DISPLACE_BAND):
     """§3.5 — what the book does tonight, given tonight's rank and what it holds.
