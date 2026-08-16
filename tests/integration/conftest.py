@@ -69,8 +69,18 @@ def db(migrated):
                                     fundamentals, balances, rulings, learnings, backtest_runs,
                                     backtest_trades, backtest_equity, runs, bill_rates,
                                     universe_excluded, push_study,
-                                    engine_sessions, engine_ranks restart identity
+                                    engine_sessions, engine_ranks, shadow_attestations,
+                                    levered_tranches restart identity
                                     cascade""")
+            # §2.3's ramp is migration-seeded rather than test-written, and truncating it above is
+            # what makes each test state its own world. Restore the three rows the plan names, or
+            # every payload assertion after the first would read an empty schedule.
+            cur.execute("""insert into levered_tranches (seq, amount_cad, planned_on, approximate,
+                                                          note) values
+                             (1, 12500, '2026-08-15', false, '§2.3 "$12.5K immediately"'),
+                             (2, 12500, '2026-09-15', true,  '§2.3 "$12.5K ~Sep 15"'),
+                             (3, 12600, '2026-10-15', true,  '§2.3 "$12.6K ~Oct 15"')
+                           on conflict (seq) do nothing""")
             cur.execute("delete from universe")
             # config is append-only by design (§4.3), so a test that overrides a threshold leaves
             # its row behind and silently governs every later test — and every later *run*, since

@@ -122,6 +122,33 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
+  shadow:
+    # §6.4's attestation: the live engine against the sim, on the same bars, written down. Ten
+    # sessions of this is what §6.5 gates the seed on, so it runs every night of the chain and not
+    # only when someone remembers to dispatch it.
+    #
+    # It writes only `shadow_attestations`, so it does not need the writes group and it cannot
+    # affect the sheet it is attesting.
+    needs: score
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/shadow.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py shadow /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
   check:
     # §4.4's six gauges. Writes nothing but its own report row — a checker that can edit what it
     # checks is a participant, not a witness. A red is a RESULT and exits 0.
