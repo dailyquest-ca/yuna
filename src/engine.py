@@ -206,7 +206,7 @@ def gate_history(index_px):
     return state
 
 
-def orders(ranked, held, *, gate_on, slots=SLOTS, exit_rank=EXIT_RANK,
+def orders(ranked, held, *, gate_on, twin_of=None, slots=SLOTS, exit_rank=EXIT_RANK,
            fill_band=FILL_BAND, displace_band=DISPLACE_BAND):
     """§3.5 — what the book does tonight, given tonight's rank and what it holds.
 
@@ -215,6 +215,18 @@ def orders(ranked, held, *, gate_on, slots=SLOTS, exit_rank=EXIT_RANK,
 
     Gate OFF sells everything and buys nothing — §3.4, "the entire book sells at the next
     executable open; queued exits clear; all proceeds to park. No buys of any kind while OFF."
+
+    `twin_of(a, b)` answers "are these two columns the same security under two symbols", and it
+    enforces §3.7(3): *"Dual-listed / share-class twins inside the top 12: hold at most one of a
+    pair; prefer the higher-ADDV line."* It is a CALLABLE rather than a precomputed set because the
+    test needs the tape and this module never touches one — the caller supplies the relation, this
+    function supplies the rule.
+
+    Without it the book can hold one company in two of five slots at 1.25x the intended weight,
+    with every cap counting it twice. That is not hypothetical: `verify_run.py` B7 found exactly
+    that in run 589, seven times. `ranked` arrives best-first, so skipping any candidate that twins
+    something already kept or already queued prefers the better-ranked line — and §3.2's pool is
+    ordered by ADDV, so on a genuine dual listing the better-ranked line is the higher-ADDV one.
     """
     rank_of = {j: r for r, j in enumerate(ranked, start=1)}
     if not gate_on:
@@ -243,6 +255,11 @@ def orders(ranked, held, *, gate_on, slots=SLOTS, exit_rank=EXIT_RANK,
         if room <= 0:
             break
         if j in keeping or j in buys:
+            continue
+        # §3.7(3): at most one of a twin pair. Checked against what is being KEPT and what is
+        # already queued this session — a pair that arrives together in the top 12 would otherwise
+        # both fill, which is the case the register was written for.
+        if twin_of and any(twin_of(j, k) for k in keeping + buys):
             continue
         buys.append(j)
         room -= 1

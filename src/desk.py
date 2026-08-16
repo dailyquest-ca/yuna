@@ -22,6 +22,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import bars                                                               # noqa: E402
 import engine                                                             # noqa: E402
 from db import connect                                                    # noqa: E402
 
@@ -144,7 +145,20 @@ def sheet(cur, as_of, nav):
     held_cols = [tickers.index(t) for t in held if t in rank_of]
     unranked = [t for t in held if t not in rank_of]
 
-    sells, buys = engine.orders(ranked, held_cols, gate_on=gate_on)
+    # §3.7(3)'s twin relation, computed from the tape and handed to `engine.orders` as a callable.
+    # `bars.same_security` is the one definition — daily returns at 1e-4 with the variation floor —
+    # and it is the same function migration 050's exclusions and `concentrated.py`'s `twin_held`
+    # use. TWIN_WINDOW mirrors the sim's lookback so the live rule and the backtested rule see the
+    # same span; a shorter window would call two lines twins on a quiet fortnight.
+    lo = max(1, i - bars.TWIN_WINDOW + 1)
+
+    def _ret(j):
+        return adj[lo:i + 1, j] / adj[lo - 1:i, j] - 1.0
+
+    def twin_of(a, b):
+        return bars.same_security(_ret(a), _ret(b))
+
+    sells, buys = engine.orders(ranked, held_cols, gate_on=gate_on, twin_of=twin_of)
     sell_tk = [tickers[j] for j in sells] + unranked
     buy_tk = [tickers[j] for j in buys]
 

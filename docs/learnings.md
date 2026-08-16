@@ -358,3 +358,24 @@ is `roadmap-2026-07-31.md`.
     test from exercising a buy at all. Caught only because one assertion counted rows exactly
     (`== 2`) instead of asserting a direction. **Isolate by WHAT the row is, not by who claims to
     have written it** — the key is the identity, the author is a field.
+48. **A rule the sim enforces and the live engine does not is the most expensive kind of drift,
+    because the backtest keeps proving the wrong machine.** §3.7(3) — "dual-listed / share-class
+    twins inside the top 12: hold at most one of a pair" — was implemented in `concentrated.py` as
+    `twin_held` and nowhere in `engine.py`. Every number the cell of record was measured under
+    assumed the pair rule; the live book would have filled both lines, one company in two of five
+    slots at 1.25x weight with every cap counting it twice. `verify_run.py` B7 had already found
+    exactly that in run 589, seven times, which is what makes it a known defect rather than a
+    theory. `engine.py` exists to stop two copies of a rule becoming two rules — and it only stops
+    it for the clauses actually moved into it. **Enumerate the clauses, not the functions.**
+49. **A synthetic fixture can be secretly degenerate in exactly the dimension the new rule tests.**
+    The desk fixture gives every name one shared noise path so §3.3's vol divisor is identical
+    across the ladder — which means two names differ only by their drift gap, and that gap was
+    4e-5 against a twin tolerance of 1e-4. Every adjacent pair in that world was one company under
+    two symbols, and nothing noticed for as long as nothing tested pairs. The tell was nine
+    integration failures the moment the pair rule landed. Two lessons, and the second is the one
+    worth keeping: a fixture whose entities are secretly identical does not fail loudly, it just
+    stops testing whatever distinguishes them — so the fixture now carries its own assertion that
+    no two of its names read as one security. And the spacing that fixes it is squeezed from both
+    sides: too small and they are twins, too large and the low rungs fall through §3.2's $5 floor
+    and leave the universe. **It was chosen by measuring both bounds, not by picking a number that
+    made the failure go away.**
