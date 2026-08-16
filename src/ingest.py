@@ -416,10 +416,22 @@ def main():
                     per_name[ticker] = f"{why}: {len(bars)}"
                 conn.commit()
 
-            # ---- 4. the earnings calendar (source data, so it belongs here, not in score)
-            sync_earnings(conn, hb)
-            # ---- 4b. and by name, for everything we are about to act on (§3.3 blackout, obs 114)
-            refresh_earnings_for_watched(conn, hb, batch_size=earn_batch, max_calls=earn_calls)
+            # ---- 4. the earnings calendar — RETIRED by v1.0 (§6.3), off unless asked for
+            #
+            # §4.5: "No fundamentals, news, intraday, or calendar feeds are read by any decision."
+            # §3.3 is the reason — the rank is the entire opinion, so there is no blackout wall to
+            # populate and no arming stage to hold. §4.5 also names the product this system is
+            # about to be downgraded to (EOD Historical Data — All World), and the calendar
+            # endpoint is not on it: leaving these two calls in would fail the night on the first
+            # billing cycle after the downgrade.
+            #
+            # Kept behind a flag rather than deleted, because the earnings table still has readers
+            # in the dispatch-only tooling and re-fetching is cheaper than restoring.
+            if os.environ.get("INGEST_EARNINGS", "false").lower() in ("1", "true", "yes"):
+                sync_earnings(conn, hb)
+                refresh_earnings_for_watched(conn, hb, batch_size=earn_batch, max_calls=earn_calls)
+            else:
+                hb.detail["earnings"] = "retired by §6.3; §4.5 reads no calendar feed"
 
             # ---- 5. quarantine: a print no second source will confirm must not drive a sell (§4.1)
             with conn.cursor() as cur:

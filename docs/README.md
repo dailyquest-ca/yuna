@@ -15,7 +15,8 @@ the top. Read the marker before you act on the number.
 | | |
 | --- | --- |
 | [`yuna_plan.md`](yuna_plan.md) | **The law.** Where anything else disagrees, the plan wins. |
-| [`roadmap-2026-07-31.md`](roadmap-2026-07-31.md) | **The build order** — what is done, what drifted, what comes next. |
+| [`roadmap-2026-08-16.md`](roadmap-2026-08-16.md) | **The build order** — what is done, what drifted, what comes next. |
+| [`roadmap-2026-07-31.md`](roadmap-2026-07-31.md) | ~~Superseded~~ by the above. Plans the fundamentals engine v1.0 replaced; kept as dated evidence. |
 | [`learnings.md`](learnings.md) | **The scar tissue.** Facts this build paid for. Read before touching anything. |
 
 Nothing else in this directory is instruction. All of it is record.

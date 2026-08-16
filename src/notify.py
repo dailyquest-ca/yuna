@@ -23,7 +23,10 @@ import urllib.request
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 from db import connect, config, Heartbeat
 
-EXPECTED = {"nightly": ["stopsheet", "preopen"], "saturday": ["deepdive"]}
+# §4.1's two composed kinds for v1.0: the nightly brief and the Saturday letter. The old engine's
+# `stopsheet`, `preopen` and `deepdive` are retired with it — v1.0 has no stops to sheet, and §5.1
+# renders one brief per session rather than a pre-open and a post-close.
+EXPECTED = {"nightly": ["nightly"], "saturday": ["saturday"]}
 
 
 def fresh_composed(cur, kinds, *, hours=3):

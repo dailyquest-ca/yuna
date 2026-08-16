@@ -150,6 +150,103 @@ def test_unknown_baseline_never_reads_as_confirmed():
     assert s.breakout_confirmed([9e9], [None]) is False
 
 
+# ------------------------------------------------------- §3.2 the confirmation state machine
+#
+# The mechanic ratified 2026-07-31 and never backtested: mechanical entry, EOD verdict, freeze at
+# 50%, three sessions to confirm late, exit only on a close back below the pivot. Every run in
+# `backtest_runs` models the rule this one replaced.
+
+def test_a_confirmed_breakout_arms_the_pyramid_at_full_size():
+    out = s.confirmation_state([1.5e6], [1e6])
+    assert out["confirmed"] is True and out["pyramid_armed"] is True
+    assert out["fraction"] == 1.0
+
+
+def test_an_unconfirmed_breakout_is_pending_and_frozen_at_half():
+    """§3.2: below 1.4x is NOT an exit — the pyramid freezes at step 1 and the clock starts."""
+    out = s.confirmation_state([1.0e6], [1e6])
+    assert out["confirmed"] is None and out["pyramid_armed"] is False
+    assert out["fraction"] == 0.5
+    assert out["exit_next_open"] is False
+    assert out["sessions_left"] == 2
+
+
+def test_the_third_session_can_still_confirm_late():
+    out = s.confirmation_state([1e6, 1.1e6, 1.5e6], [1e6] * 3)
+    assert out["confirmed"] is True and out["fraction"] == 1.0
+
+
+def test_the_window_closes_after_three_sessions():
+    out = s.confirmation_state([1e6, 1e6, 1e6], [1e6] * 3)
+    assert out["confirmed"] is False and out["sessions_left"] == 0
+    assert out["fraction"] == 0.5                      # frozen for good, but still held
+
+
+def test_volume_alone_never_exits():
+    """171 trades and 4.7% of NAV in run 5 exited on this condition. It is not a rule."""
+    out = s.confirmation_state([1e6, 1e6, 1e6], [1e6] * 3, closes=[105.0], pivot=100.0)
+    assert out["confirmed"] is False
+    assert out["exit_next_open"] is False
+
+
+def test_the_hair_trigger_is_a_close_back_below_the_pivot():
+    out = s.confirmation_state([1e6, 1e6, 1e6], [1e6] * 3, closes=[105.0, 99.0], pivot=100.0)
+    assert out["exit_next_open"] is True
+
+
+def test_a_confirmed_breakout_has_no_hair_trigger():
+    """Once confirmed, price decides through the stop ladder — not through the pivot."""
+    out = s.confirmation_state([1.5e6], [1e6], closes=[99.0], pivot=100.0)
+    assert out["confirmed"] is True and out["exit_next_open"] is False
+
+
+def test_a_pending_name_below_its_pivot_waits_out_the_window():
+    """Ruled 2026-08-10: the hair-trigger arms when the window CLOSES, not at the breakout EOD.
+
+    A name inside its three sessions has not failed yet, and cutting it there forfeits every late
+    confirmation. What limits the wait is the stop, which was placed at entry.
+    """
+    args = ([1e6], [1e6])                            # one session in, light volume: pending
+    kw = dict(closes=[99.0], pivot=100.0)
+    assert s.confirmation_state(*args, **kw)["confirmed"] is None
+    assert s.confirmation_state(*args, **kw)["exit_next_open"] is False
+
+
+def test_the_discarded_reading_stays_available_to_be_priced():
+    """The rejected reading is kept behind a flag so the backtest can measure what the ruling
+    cost or saved. On the ten-year run this was the largest loss bucket — 158 trades — so it is
+    worth a number rather than an opinion."""
+    args = ([1e6], [1e6])
+    kw = dict(closes=[99.0], pivot=100.0)
+    assert s.confirmation_state(*args, **kw,
+                                hair_trigger_while_pending=True)["exit_next_open"] is True
+
+
+def test_the_stop_is_what_limits_the_wait():
+    """§3.2: initial stop = max(final-contraction low, entry - 8%), never wider. That is the
+    protection during the window, so waiting is bounded by price, not by hope."""
+    assert s.initial_stop(100.0, 80.0) == pytest.approx(92.0)      # the 8% cap binds
+    assert s.initial_stop(100.0, 96.5) == pytest.approx(96.5)      # the contraction low is tighter
+
+
+def test_a_stalled_pyramid_is_four_weeks_of_sessions_not_days():
+    assert s.stalled_pyramid(pyramid_step=1, sessions_held=19) is False
+    assert s.stalled_pyramid(pyramid_step=1, sessions_held=20) is True
+
+
+def test_a_full_pyramid_never_stalls():
+    assert s.stalled_pyramid(pyramid_step=3, sessions_held=500) is False
+
+
+def test_below_seventy_never_tickets():
+    """§3.2 Sizing. The backtest never asked: 211 of run 5's 296 trades fail this."""
+    assert s.enterable(70.0) is True
+    assert s.enterable(69.9) is False
+    assert s.enterable(15.1) is False
+    assert s.enterable(None) is False
+    assert s.enterable(float("nan")) is False
+
+
 def test_pyramid_ships_two_adds_capped_at_the_ceiling():
     orders = s.pyramid_orders(100.0)
     assert [o["trigger"] for o in orders] == pytest.approx([102.0, 104.0])
@@ -812,3 +909,45 @@ def test_an_exit_with_no_last_print_falls_back_to_market_and_says_so():
 
     blind = arming.exit_order({}, "AAA.US", inside=0.003, urgent=False)
     assert blind["order_type"] == "market" and "no last print" in blind["note"]
+
+
+# ==================================================================== A2 primitives (E-series E3)
+
+def test_a_new_high_breakout_needs_to_clear_the_prior_window_not_itself():
+    """The bar being tested must not be inside the window it is compared against, or every bar is
+    trivially its own high and the signal fires constantly."""
+    rising = list(range(100, 100 + 260))
+    assert s.new_high_breakout(rising, lookback=252) is True
+    flat = [100.0] * 260
+    assert s.new_high_breakout(flat, lookback=252) is False       # equal is not higher
+    assert s.new_high_breakout(list(range(100)), lookback=252) is False   # too short to judge
+
+
+def test_a_pullback_from_the_high_is_not_a_breakout():
+    series = list(range(100, 100 + 260)) + [200.0]
+    assert s.new_high_breakout(series, lookback=252) is False
+
+
+def test_the_chandelier_hangs_the_stop_below_the_highest_close():
+    assert s.chandelier_stop(100.0, 2.0, multiple=8.0) == 84.0
+    assert s.chandelier_stop(100.0, 2.0, multiple=5.0) == 90.0
+    assert s.chandelier_stop(100.0, 0.0) is None                  # no ATR, no stop
+    assert s.chandelier_stop(float("nan"), 2.0) is None
+
+
+def test_risk_size_makes_every_position_cost_the_same_on_a_stop_out():
+    """The M1 lesson, structural: size follows the stop distance, so a wide stop buys less. M1 had
+    positive expectancy and still lost, because conviction set the size and the stop set the loss."""
+    tight = s.risk_size(nav=200_000.0, entry=50.0, stop=48.0)     # $2 at risk
+    wide = s.risk_size(nav=200_000.0, entry=50.0, stop=40.0)      # $10 at risk
+    assert tight * 2.0 == pytest.approx(1_000.0)                   # 0.5% of NAV
+    assert wide * 10.0 == pytest.approx(1_000.0)                   # same dollars at risk
+    assert tight > wide
+
+
+def test_risk_size_refuses_a_stop_that_is_not_below_the_entry():
+    """A non-positive risk distance has no size. Inventing one is how a divide-by-zero becomes a
+    position."""
+    assert s.risk_size(nav=200_000.0, entry=50.0, stop=50.0) == 0.0
+    assert s.risk_size(nav=200_000.0, entry=50.0, stop=55.0) == 0.0
+    assert s.risk_size(nav=0.0, entry=50.0, stop=45.0) == 0.0

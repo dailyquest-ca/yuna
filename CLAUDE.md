@@ -7,16 +7,28 @@ A Python trading agent. **This repository moves real money.** Treat every change
 Read [`README.md`](README.md) first, then the three documents it names:
 
 - [`docs/yuna_plan.md`](docs/yuna_plan.md) — **the law.** Where anything else disagrees with the plan, the plan wins, including this file.
-- [`docs/roadmap-2026-07-31.md`](docs/roadmap-2026-07-31.md) — build order: what is done, what drifted, what comes next.
+- [`docs/roadmap-2026-08-16.md`](docs/roadmap-2026-08-16.md) — build order: what is done, what drifted, what comes next. (The 07-31 roadmap is superseded — it plans the retired engine.)
 - [`docs/learnings.md`](docs/learnings.md) — scar tissue. Facts this build paid for. **Read before touching anything.**
 
 Nothing joins the pipeline schedule without a plan edit. If a change would alter what runs when, that is a plan change first and a code change second.
 
-## Shared doctrine comes from a plugin
+## Shared doctrine comes from two marketplaces
 
-`dq-core`, `dq-fintech`, and `dq-invest` from [`dailyquest-ca/claude-standards`](https://github.com/dailyquest-ca/claude-standards), declared in [`.claude/settings.json`](.claude/settings.json), carry the safety hooks, operating doctrine, the no-assumed-values discipline, and the equities and investment-tax domain.
+Declared in [`.claude/settings.json`](.claude/settings.json), and they are split by what they are *about*:
 
-`dq-invest` is the one to know about here: `account-types` (why RRSP and TFSA treat US dividends differently), `investment-tax-canada` (capital gain versus business income, superficial loss, ACB in CAD), `investment-tax-us` (the cross-border traps), and `market-mechanics` (settlement, corporate actions, look-ahead bias). How those bind to this repo's plan is in [`.claude/rules/investment-tax.md`](.claude/rules/investment-tax.md).
+- **Craft** — `dq-core` and `dq-money-code` from [`dailyquest-ca/dq-ai-coding-standards`](https://github.com/dailyquest-ca/dq-ai-coding-standards): safety hooks, operating doctrine, the no-assumed-values discipline.
+- **Markets** — `market-domain` and `momentum-strategy` from [`dailyquest-ca/dq-investing`](https://github.com/dailyquest-ca/dq-investing).
+
+`market-domain` is the one to know about for correctness: `account-types` (why RRSP and TFSA treat US dividends differently), `investment-tax-canada` (capital gain versus business income, superficial loss, ACB in CAD), `investment-tax-us` (the cross-border traps), and **`market-mechanics`** (settlement, corporate actions, look-ahead bias). How those bind to this repo's plan is in [`.claude/rules/investment-tax.md`](.claude/rules/investment-tax.md).
+
+**Read `market-mechanics` before touching price data.** It names the defect that invalidated runs 18-44: the engine simulated on raw closes while volume was split-adjusted, so every split arrived as a crash. The doctrine existed and was not loaded. `src/backtest.py` now asserts against it on every run.
+
+`momentum-strategy` is the one to reach for during research: `momentum-doctrine` holds
+the sleeve's own strategy — sprint versus marathon, the measured lift of every selection gate, and
+the risk-layer scoping — and `backtest-protocol` holds the rules that decide when a number may be
+called a finding. **The strategy lives there, not in `src/signals.py`.** This repo implements it;
+it does not own it. A rule change that is not Yuna-specific belongs upstream first, with the app
+keeping only its own flavour — §3.2's exact thresholds, the engine, and the run history.
 
 `dq-stack` and `dq-web` are deliberately **not** enabled — they are TypeScript and frontend. `dq-core` carries nothing language-specific, so it applies here unchanged.
 

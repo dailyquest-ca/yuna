@@ -154,8 +154,13 @@ red build on `main`.** Recorded rather than quietly fixed, because the lesson is
    `bill_rates` and `universe_excluded` — three tables created by migrations §5 holds back. Taken
    without them, **every one of the 153 integration tests errors**, not just the new ones.
 
-All three were found by building PR 1 in a worktree on top of `origin/main` and running it against
-a fresh database. That is now the standard: **a PR in this sequence is not proposed until it has
+**4. `tests/test_concentrated.py` reads `src/backfill.py` off disk at runtime** and `exec`s its
+   `probe_dates`. Main's `backfill.py` has no such function, so the test raises `ValueError` on a
+   tree without it. Found while assembling PR 4 — and **no import graph would have shown it**,
+   because the dependency is a file read, not an import.
+
+The first three were found by building PR 1 in a worktree on top of `origin/main` and running it
+against a fresh database; the fourth by doing the same for PR 4. That is now the standard: **a PR in this sequence is not proposed until it has
 been assembled and run against the branch point it targets.**
 
 ### 4.1 One dependency the plan had missed entirely

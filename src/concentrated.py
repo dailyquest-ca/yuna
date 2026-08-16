@@ -65,6 +65,8 @@ import pathlib
 
 import numpy as np
 
+import bars as bars_mod
+
 from db import connect, dry, Heartbeat
 from backtest import SPREAD_CURVE, BENCH, PARK_BAND, param_digest
 # The discontinuity rule, imported rather than restated. `backtest.py` reasons out every constant
@@ -153,6 +155,11 @@ TRAIL_ATR = dict(mode="atr", atr_init_mult=3.0, atr_init_window=20,
                  atr_arm_r=1.0, atr_chand_mult=8.0, atr_chand_window=22)
 
 # The announced grid (WO-A4). One axis moves per cell against the centre `n12_semi`.
+# §3.7(3)'s pair test looks at a trailing year rather than all history: sameness is a property of
+# the present, and two lines that diverged a decade ago are not one security today. 252 is the
+# formation window this engine already uses everywhere else, so it introduces no new number.
+TWIN_WINDOW = 252
+
 CELLS = {
     # centre: twelve names, changed twice a year, risk-adjusted rank, whole account in the sleeve
     "n12_semi":       dict(n=12, months=6, risk_adjusted=True,  sleeve=1.00),
@@ -901,6 +908,23 @@ CELLS = {
                                  fill_at_open=True, displace=True, base_door=False, rider=False,
                                  exit_rank=12, entry_rank=2, gated=True, latch=(o, r))
        for o, r in ((1, 1), (1, 3), (1, 5), (1, 20), (3, 20), (5, 40))},
+    # WO-A22 §5(2): the cell of record with §3.7(3) enforced — one company, one slot.
+    #
+    # The audit found run 589 holding SEVEN duplicate pairs concurrently. The slot count never
+    # breached; the diversification did, and §3.7(3) already requires the LIVE engine to hold at
+    # most one of a pair. So the sim was breaking a rule the live book must keep, in the direction
+    # that flatters the sim.
+    #
+    # This is the priced version rather than a silent default. `dedupe_pairs` is OFF everywhere
+    # else so every stored cell still reproduces to the digit, and this cell is the one that says
+    # what the fix COSTS. Until it runs, "how much of §3.1 is the duplicate holdings" has no
+    # answer, and asserting the fix is free would be exactly the invented number this repo forbids.
+    "b5_12_2_L1_3_dd": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
+                            trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
+                            displace=True, base_door=False, rider=False,
+                            exit_rank=12, entry_rank=2, gated=True, latch=(1, 3),
+                            dedupe_pairs=True),
+
     **{f"b5_12_2_w{w}": dict(n=5, months=6, risk_adjusted=True, sleeve=1.00, top_by_addv=500,
                              trail=False, next_open=True, entry_rule="banded", fill_at_open=True,
                              displace=True, base_door=False, rider=False,
@@ -1520,7 +1544,7 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              latch=None, gate_rising=False,
              entry_rank=None, displace=False, base_door=True, fill_at_open=False,
              swap_gap=False, min_participation=None, gate_n=None,
-             themes=None, theme_cap=None, gate_window=200):
+             themes=None, theme_cap=None, gate_window=200, dedupe_pairs=False):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
@@ -2006,6 +2030,35 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                 here += sum(1 for b in pending_buys if theme_of(b["j"]) == t)
                 return here >= int(theme_cap)
 
+            # §3.7(3): hold at most one of a dual-listed or share-class pair. The audit found run
+            # 589 holding SEVEN such pairs at once — DINO/HFC agreeing on 100.0% of 1,405 shared
+            # sessions, BALL/BLL on 99.4% of 1,445 — so two of five slots ran one company at 1.25x
+            # the intended weight and every cap counted it twice. The slot count never breached;
+            # the DIVERSIFICATION did, which is the harm the count was standing in for.
+            #
+            # Asked at entry, against the held book only, so it costs at most `n` comparisons per
+            # candidate rather than a pairwise sweep of the pool. That is also the narrower and
+            # more honest question: whether a name may be bought is about what is held right now,
+            # not about whether a twin exists somewhere in the universe.
+            #
+            # A trailing window rather than all history, because sameness is a property of the
+            # present. BBBY_old stops printing long before BBBY does, and two lines that diverged
+            # a decade ago are not one security today.
+            def twin_held(j):
+                if not dedupe_pairs:
+                    return False
+                lo = max(1, i - TWIN_WINDOW + 1)
+                rj = adj[lo:i + 1, j] / adj[lo - 1:i, j] - 1.0
+                if not np.isfinite(rj).any():
+                    return False
+                for k in list(held) + [b["j"] for b in pending_buys]:
+                    if k == j or (k in held and slot_free(k)):
+                        continue
+                    rk = adj[lo:i + 1, k] / adj[lo - 1:i, k] - 1.0
+                    if bars_mod.same_security(rj, rk):
+                        return True
+                return False
+
             # `cap > 0` guards the fully-gated case: with a cap of zero the book is empty and
             # "displace the worst holding" has no argument to take.
             if displace and cap > 0 and len([j for j in held if not slot_free(j)]) >= cap:
@@ -2019,6 +2072,12 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                     # another in the same over-represented theme would satisfy the band rule and
                     # defeat the cap entirely — and displacement is this book's dominant exit.
                     if theme_full(j) and theme_of(j) != theme_of(worst):
+                        break
+                    # A displacing twin is the same defect arriving by the other door, and
+                    # displacement is this book's dominant exit — leaving it unguarded here would
+                    # have let every pair back in one session later.
+                    if twin_held(j):
+                        rider_blocks["twin held"] = rider_blocks.get("twin held", 0) + 1
                         break
                     if rank_of.get(j, 10 ** 9) < worst_rank:
                         queued.append(worst)
@@ -2048,6 +2107,9 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
                     if theme_full(j):
                         rider_blocks["theme cap"] = rider_blocks.get("theme cap", 0) + 1
                         continue        # step DOWN the rank to the next eligible theme
+                    if twin_held(j):
+                        rider_blocks["twin held"] = rider_blocks.get("twin held", 0) + 1
+                        continue        # one company, one slot — §3.7(3)
                     # The state door is WO-A6's own entry condition and it is NOT part of Zak's
                     # band rule, so a cell can switch it off. Leaving it welded on would have made
                     # the band ladder measure the door and the band together.

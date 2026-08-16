@@ -246,3 +246,55 @@ def verdict(*, ex_top_3_beats_benchmark, bootstrap_median_cagr, benchmark_cagr, 
     if dsr < 0.95:
         reasons.append(f"deflated Sharpe {dsr:.3f} below 0.95")
     return {"verdict": "proven" if not reasons else "unproven", "reasons": reasons}
+
+
+# ---- one company under two symbols -------------------------------------------------------------
+#
+# `verify_run.py` B7 asks this question in SQL, over the names a stored run traded. The engine has
+# to ask the same question in numpy, before it buys, and two spellings of one rule is exactly the
+# shape this repo keeps paying for — so the RULE lives here and both sides call it.
+#
+# The thresholds are `verify_run.py` B7's, unchanged: duplicates score 0.85-1.00 there and
+# genuinely different securities 0.006-0.033, so 0.85 sits inside a gap with nothing in it.
+#
+# **The plan states no number.** §3.7(3) says "hold at most one of a pair; prefer the higher-ADDV
+# line" and stops. These constants are the auditor's, adopted because the auditor is already the
+# rule of record for what counts as a pair — not because they were chosen here. That is a plan gap
+# and is recorded as one; it is not filled with a fresh invention.
+TWIN_TOL = 1e-4          # a daily return, in cents-quoted vendor copies, differs in the 5th decimal
+TWIN_MIN_OVERLAP = 30    # fewer shared sessions than this and agreement is not evidence
+TWIN_AGREE = 0.85
+
+
+def same_security(ret_a, ret_b, *, tol=TWIN_TOL, min_overlap=TWIN_MIN_OVERLAP, agree=TWIN_AGREE):
+    """Do these two daily-return series belong to one company under two symbols?
+
+    Daily RETURNS rather than closes, and a tolerance rather than equality — both are scars.
+    Migration 047 compared closes with exact float equality at a 99% bar and missed BBBY_old/BBBY,
+    which agrees on 98.72% of shared closes and is one company; 048 moved to returns and then kept
+    a 1e-9 tolerance, which measures the vendor's rounding rather than the securities. A tolerance
+    has to be looser than the noise it must survive (learnings 35).
+
+    Sessions where either series has no finite return are not shared sessions and are excluded
+    from both the numerator and the denominator, so a name that goes dark is not penalised for the
+    gap and is not credited for it either.
+    """
+    a = np.asarray(ret_a, dtype=float)
+    b = np.asarray(ret_b, dtype=float)
+    if a.shape != b.shape:
+        raise ValueError(f"return series must align: {a.shape} vs {b.shape}")
+    shared = np.isfinite(a) & np.isfinite(b)
+    n = int(shared.sum())
+    if n < min_overlap:
+        return False
+    # Agreement is only evidence if there was something to disagree ABOUT. Two series that barely
+    # move agree within any tolerance trivially — a synthetic ladder of smooth exponentials makes
+    # every adjacent rung a "twin", and in live data two low-volatility names drifting at similar
+    # rates would do the same and evict a real holding. So the pair must vary by more than the
+    # tolerance it is being judged at.
+    #
+    # No new constant: the floor IS the tolerance. Below it, "these agree to within 1e-4" and
+    # "neither of these moved by 1e-4" are the same sentence, and only one of them is a finding.
+    if float(a[shared].std()) <= tol or float(b[shared].std()) <= tol:
+        return False
+    return bool(float((np.abs(a[shared] - b[shared]) < tol).sum()) / n >= agree)

@@ -6,7 +6,7 @@ paths:
 
 # Investment tax in Yuna
 
-The general domain is in the `dq-invest` skills — `account-types`, `investment-tax-canada`, `investment-tax-us`, `market-mechanics`. This file records how those rules bind *here*, and where the plan already depends on them.
+The general domain is in the `market-domain` plugin from the [`dq-investing`](https://github.com/dailyquest-ca/dq-investing) marketplace — `account-types`, `investment-tax-canada`, `investment-tax-us`, `market-mechanics`. This file records how those rules bind *here*, and where the plan already depends on them.
 
 ## The plan encodes tax rules as strategy
 

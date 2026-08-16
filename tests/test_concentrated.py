@@ -425,6 +425,10 @@ PARENT = {
        for o, r in ((1, 1), (1, 3), (1, 5), (1, 20), (3, 20), (5, 40))},
     **{f"b5_12_2_w{w}": "b5_12_2_gate" for w in (100, 150, 250)},
     "b5_12_2_gr": "b5_12_2_gate",
+    # WO-A22: one axis — `dedupe_pairs` — off the CELL OF RECORD rather than off the gate, because
+    # the question it answers is "what does §3.7(3) cost the number in the plan", and that is only
+    # answerable against the number in the plan.
+    "b5_12_2_L1_3_dd": "b5_12_2_L1_3",
 }
 
 # An arm whose clock, exit rule, entry rule AND fill convention all differ from everything before
@@ -1997,3 +2001,68 @@ def test_a_displaced_slot_refills_the_same_morning_unless_a_gap_is_asked_for():
         f"the gap variant must sit under-invested far more often ({under_gap} vs {under_same})")
     assert under_same <= len(same) * 0.05, (
         f"the ruled path refills the same morning, so it is rarely short ({under_same} sessions)")
+
+
+# ==================== WO-A22: one company, one slot (§3.7(3)) ====================
+
+def _twinned_world():
+    """The top-ranked name, carried twice under two symbols — the DINO/HFC shape.
+
+    Both copies score identically, so a stable sort puts them adjacent at the top of the rank and
+    an unguarded book takes both. That is exactly what run 589 did seven times over.
+    """
+    d, t, adj, raw, dv, park = _ladder_world()
+    # A NOISY leader, not a smooth one. Two smooth exponentials agree within any tolerance without
+    # being the same security — that is the false positive `bars.same_security` refuses — so a
+    # fixture built from them would prove the rule fires without proving it fires for the right
+    # reason. Real duplicate listings are two copies of one noisy tape.
+    rng = np.random.default_rng(11)
+    steps = rng.normal(0.0015, 0.02, N_DAYS)
+    lead = 100.0 * np.exp(np.cumsum(steps))
+    for col in (0,):                          # replace the ladder's top rung with the noisy leader
+        adj[:, col] = lead
+        raw[:, col] = lead
+    adj = np.column_stack([adj, lead.copy()])
+    raw = np.column_stack([raw, lead.copy()])
+    dv = np.column_stack([dv, dv[:, 0].copy()])
+    return d, list(t) + ["N00B.US"], adj, raw, dv, park
+
+
+def test_without_the_pair_rule_the_book_holds_one_company_twice():
+    """The defect first, so the fix has something to be measured against. If this ever stops
+    failing to hold both, the next test proves nothing."""
+    d, t, adj, raw, dv, park = _twinned_world()
+    trades = cc.simulate(d, t, adj, raw, dv, park, exit_rank=12, entry_rank=2,
+                         displace=True, dedupe_pairs=False, **BAND)[1]
+    entered = {x["ticker"] for x in trades if "entry_date" in x}
+    assert {"N00.US", "N00B.US"} <= entered, (
+        "the unguarded book must take both copies — otherwise this fixture is not the defect")
+
+
+def test_the_pair_rule_refuses_the_second_copy_of_one_company():
+    """§3.7(3): hold at most one of a pair. Same world, same bands, `dedupe_pairs` on.
+
+    The rule is asserted on what the book HOLDS rather than on a block counter, because a counter
+    can increment while the position still gets bought.
+    """
+    d, t, adj, raw, dv, park = _twinned_world()
+    trades = cc.simulate(d, t, adj, raw, dv, park, exit_rank=12, entry_rank=2,
+                         displace=True, dedupe_pairs=True, **BAND)[1]
+    entered = {x["ticker"] for x in trades if "entry_date" in x}
+    assert not {"N00.US", "N00B.US"} <= entered, (
+        "one company may not occupy two slots — §3.7(3)")
+    assert entered & {"N00.US", "N00B.US"}, (
+        "the rule drops the SECOND copy, it does not drop the company")
+
+
+def test_the_pair_rule_does_not_evict_genuinely_different_names():
+    """The other direction, and the one that matters more. A rule that refuses everything would
+    pass the test above and destroy the book; this pins that an ordinary ladder still fills."""
+    d, t, adj, raw, dv, park = _ladder_world()
+    guarded = cc.simulate(d, t, adj, raw, dv, park, exit_rank=12, entry_rank=2,
+                          displace=True, dedupe_pairs=True, **BAND)[1]
+    plain = cc.simulate(d, t, adj, raw, dv, park, exit_rank=12, entry_rank=2,
+                        displace=True, dedupe_pairs=False, **BAND)[1]
+    g = {x["ticker"] for x in guarded if "entry_date" in x}
+    p = {x["ticker"] for x in plain if "entry_date" in x}
+    assert g == p, f"no duplicate exists in this world, so the rule must change nothing: {g ^ p}"

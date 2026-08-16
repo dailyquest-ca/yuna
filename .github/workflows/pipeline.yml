@@ -1,26 +1,35 @@
 name: pipeline
-# §4.2 (ruled 2026-08-05): **the chain has no clock; the sessions keep appointments.**
+# §4.1's nightly chain, for v1.0's engine.
 #
-#   score → check → compose → notify
+#   reconcile → score → check → compose → notify
 #
-# These four lost their crons. They hang off the ingests here, and off each other by `needs:`, so
-# the ordering is a data dependency rather than four appointments that happen to be in the right
-# sequence. Production drifted 150–195 minutes past slot every night and the nightly sequence held
-# only by luck: `score` was scheduled 90 minutes after an `ingest-daily` that was itself running
-# three hours late. **Order and currency are the guarantees; punctuality is not.**
+# **The chain has no clock; the sessions keep appointments** (ruled 2026-08-05). These jobs lost
+# their crons: they hang off the ingests here, and off each other by `needs:`, so the ordering is a
+# data dependency rather than five appointments that happen to be in the right sequence. Production
+# drifted 150–195 minutes past slot every night and the nightly sequence held only by luck.
+# **Order and currency are the guarantees; punctuality is not.**
 #
-# Every ingest triggers it (§4.2: "chained to every ingest by `needs:`"). The retry ingest at 03:00
-# exits immediately when the night is already green and still fires the chain — every job here is
-# idempotent, and `compose` refuses to publish a kind twice for one session date, so a second pass
-# costs a few minutes and buys a second chance.
+# `reconcile` runs FIRST, and that is a correctness argument rather than a reading of §4.1's table.
+# `score` reads `book` to decide what is held, and a fill Zak took this morning that has not been
+# folded leaves the book a day stale — so the engine proposes a buy of a name it already owns. This
+# repository has already paid for exactly that: four unrecorded fills on 2026-08-04 put RS.US
+# through four consecutive briefs as a new entry at the price Zak had already paid.
+#
+# Every ingest triggers the chain (§4.2). The retry ingest at 03:00 exits immediately when the
+# night is already green and still fires it — every job here is idempotent, `sheet` upserts on
+# (session, mode) and (session, ticker, action), and `compose` refuses to publish a kind twice for
+# one session date, so a second pass costs a few minutes and buys a second chance.
 #
 # `if: always()` on the tail is deliberate. When an upstream job dies the desk must still speak:
-# §4.2 gives a red `check` the power to ship nothing but the stale banner and the protective lines,
-# and §4.7 rules that a missing message is itself the alarm. Silence is the one outcome with no
-# reader.
+# §4.4 gives a red `check` the power to hold the BUYS, §5.4 makes exits unblockable, and §4.7 rules
+# that a missing message is itself the alarm. Silence is the one outcome with no reader.
+#
+# Retired from this chain by §6.3, and dispatch-only from here: the fundamentals-and-arming `score`
+# (`src/score.py`), its `check` (`src/check.py`), its `compose` (`src/compose.py`) and the fill
+# loop (`src/fills.py`). §3.3 replaced the whole apparatus with one number.
 on:
   workflow_run:
-    workflows: [ingest-daily, ingest-filings, ingest-universe]
+    workflows: [ingest-daily, ingest-universe]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -30,6 +39,9 @@ on:
       dry_run:
         description: 'compute everything, write nothing'
         default: 'false'
+      engine_mode:
+        description: '§6.4: `live` writes the record; `shadow` scores the same session alongside it'
+        default: 'live'
 
 jobs:
   slot:
@@ -38,28 +50,53 @@ jobs:
       slot: ${{ steps.pick.outputs.slot }}
     steps:
       - id: pick
-        # The weekly slot belongs to the weekly sweep, not to the calendar: `ingest-daily` fires
-        # Tue–Sat, so Saturday 02:00 UTC is Friday evening PT and composes the nightly stop sheet.
-        # The Saturday letter belongs to the chain behind `ingest-universe` / `ingest-filings`.
+        # §4.1's weekly letter belongs to the weekly sweep, not to the calendar: `ingest-daily`
+        # fires Tue–Sat, so Saturday 02:00 UTC is Friday evening PT and composes an ordinary
+        # nightly. The Saturday letter belongs to the chain behind `ingest-universe`.
         run: |
           want='${{ inputs.slot }}'
           trigger='${{ github.event.workflow_run.name }}'
           if [ -z "$want" ] || [ "$want" = "auto" ]; then
-            if [ "$trigger" = "ingest-daily" ]; then
-              want=nightly
-            elif [ "$(date -u +%u)" = "6" ]; then
-              want=saturday
-            else
-              want=nightly
-            fi
+            if [ "$trigger" = "ingest-universe" ]; then want=saturday; else want=nightly; fi
           fi
           echo "slot=$want" >> "$GITHUB_OUTPUT"
           echo "chain slot: $want (triggered by ${trigger:-dispatch})"
 
-  score:
-    # §4.2, verb two: the ONE writer of every derived number. A pure function of the database —
-    # it makes no vendor call at all. The Saturday chain runs the full weekly rank.
+  reconcile:
     needs: slot
+    if: always()
+    # §4.1's fifth verb, run before the first. It folds any broker receipt in `data/reconcile/` and
+    # compares the book against the broker's own position list. No manifest is an ordinary night.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: yuna-writes
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/reconcile.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py reconcile /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  score:
+    # §4.1's second verb: "§3.2–3.5 logic: screen, rank, gate, queue, order decisions". A pure
+    # function of the database — it makes no vendor call at all.
+    #
+    # `if: always()` so a red reconcile does not silence the desk. §5.4 makes exits unblockable and
+    # a stale book still produces correct SELLS for what it does hold; §4.4's reconciliation gauge
+    # is what turns the disagreement into a held buy.
+    needs: reconcile
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
@@ -71,19 +108,50 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/score.py 2>&1 | tee /tmp/job.out
+      - run: set -o pipefail; python src/sheet.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
-          # no SCHEDULED_UTC: this job has no appointment to be late for (§4.2)
+          ENGINE_MODE: ${{ inputs.engine_mode || 'live' }}
+          # §3.5 sizes at engine NAV / 5. Not supplied here on purpose: `sheet.engine_nav` reads
+          # `config.engine_nav`, which is a logged row with a timestamp, so a change to the number
+          # the book is sized against is auditable rather than a secret that moved.
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py score /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
+  shadow:
+    # §6.4's attestation: the live engine against the sim, on the same bars, written down. Ten
+    # sessions of this is what §6.5 gates the seed on, so it runs every night of the chain and not
+    # only when someone remembers to dispatch it.
+    #
+    # It writes only `shadow_attestations`, so it does not need the writes group and it cannot
+    # affect the sheet it is attesting.
+    needs: score
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: set -o pipefail; python src/shadow.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure()
+        run: python src/report_fail.py shadow /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
   check:
-    # §4.2, verb three: prove it is safe to speak, and write nothing but the report row.
+    # §4.4's six gauges. Writes nothing but its own report row — a checker that can edit what it
+    # checks is a participant, not a witness. A red is a RESULT and exits 0.
     needs: score
     if: always()
     runs-on: ubuntu-latest
@@ -94,10 +162,10 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/check.py 2>&1 | tee /tmp/job.out
+      - run: set -o pipefail; python src/gauges.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
+          ENGINE_MODE: ${{ inputs.engine_mode || 'live' }}
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py check /tmp/job.out
@@ -105,7 +173,9 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
   compose:
-    # §4.2, verb four, first half: write the words down, mechanically and keyless.
+    # §5.1's morning brief, rendered from the one payload read. It renders and does not decide:
+    # every number in it was written by `sheet`, checked by `gauges`, and read back through
+    # `v_session_payload`.
     needs: [slot, check]
     if: always()
     runs-on: ubuntu-latest
@@ -119,7 +189,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/compose.py 2>&1 | tee /tmp/job.out
+      - run: set -o pipefail; python src/brief.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
@@ -131,7 +201,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
   notify:
-    # §4.2, verb four, second half: prove the composed rows exist and are deliverable.
+    # Prove the composed rows exist and are deliverable. §4.7: a missing message is itself the
+    # alarm, so the one thing this job may never do is succeed quietly on nothing.
     needs: [slot, compose]
     if: always()
     runs-on: ubuntu-latest

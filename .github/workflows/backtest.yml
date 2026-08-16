@@ -1,50 +1,423 @@
 name: backtest
+# The verification instrument, on four doors (docs/backtest-plan-2026-08-10.md, Phase 5):
+#
+#   1. every logic change — the paths filter below, on pull requests and on main
+#   2. on demand        — workflow_dispatch, for "I am about to suggest a change" and for
+#                         "I just want to see that it still does what I think it does"
+#   3. behaviour git cannot see — 52 config keys live in the database; the run stamps the digest
+#                         it decided under and `check` ambers when the newest run's stamp is stale
+#   4. weekly           — the Saturday chain, so the answer is never more than seven days old
+#
+# **It reports; it does not gate on performance.** The build fails only when a CONFORMANCE clause
+# fails — an entry below the MCN floor, an exit reason §3.2 does not name, a clause no data covered.
+# A merge gate on CAGR is a standing instruction to fit the parameters to history, and it would
+# corrupt the one instrument the parked ablation grid has to be able to trust.
 on:
   workflow_dispatch:
     inputs:
       label:
         description: 'run label'
-        default: 'momentum v1'
+        default: 'law-v0'
+      variant:
+        description: 'variant recorded in params'
+        default: 'law-v0'
+      start_date:
+        description: 'window start (blank = all stored bars, 2016-08)'
+        default: ''
+      end_date:
+        description: 'window end (blank = the last bar)'
+        default: ''
       start_nav:
-        description: 'starting NAV in CAD'
-        default: '200754.38'
-      vol_mode:
-        description: 'fill_then_exit (plan §5.1) | confirm_first'
-        default: 'fill_then_exit'
-      breakeven_step:
-        description: 'pyramid step at which the stop moves to breakeven (§3.2 = 3)'
-        default: '3'
-      mcn_exit:
-        description: 'MCN below which a position exits (§3.3 = 55)'
-        default: '55'
-      min_hold_days:
-        description: 'minimum intended hold; stops always exempt (§1 = one week)'
-        default: '0'
-      dry_run:
-        description: 'simulate, write nothing'
+        description: 'starting capital, USD'
+        default: '200000'
+      hypothesis:
+        description: 'hypothesis preset — blank = law-v0 (the baseline), or h1..h6'
+        default: ''
+      hypotheses:
+        description: 'SWEEP: comma-separated presets priced against ONE tape load (e.g. a1v_b50,a1v_b100). Overrides `hypothesis` when set.'
+        default: ''
+      hair_trigger_pending:
+        description: 'exit a pending breakout that closes below its pivot (rejected reading — ruled 2026-08-10 to wait out the window). Set true only to price the ruling.'
         default: 'false'
+      dd_bar:
+        description: 'drawdown kill bar for the §2.5 verdict (E3 cells declare -0.34; blank = the arm declares none)'
+        default: ''
+      research:
+        description: 'run a research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger, `concentrated` = WO-A4 the winner-catcher, `dedupe` = the duplicate-listing scan, `verify` = audit stored runs and compute NOTHING, `census` = the exchange census, `desk` = the engine sheet for a session, read-only'
+        default: ''
+      run_ids:
+        description: 'verify only: comma-separated run ids to audit (e.g. 589,607). READ-ONLY — verify_run.py issues no INSERT, UPDATE, DELETE or COMMIT, so this cannot alter a stored run or the tape.'
+        default: ''
+      apply:
+        description: 'dedupe only: write the exclusions (default: report only)'
+        default: 'false'
+      cells:
+        description: 'concentrated only: comma-separated cells (blank = the whole announced grid)'
+        default: ''
+      park:
+        description: 'concentrated only: the park AND §2.5 benchmark (blank = SPMO.US). A pre-2015 window must name one — SPMO did not exist.'
+        default: ''
+      calendar:
+        description: 'concentrated only: the ETF whose bars ARE the market calendar (blank = VOO.US, first bar 2016-08-12). SPY.US reaches 2003.'
+        default: ''
+      audit:
+        description: 'concentrated only: run the capture audit. It reloads the whole tape PER RUN, so a wide ladder costs ~90s x cells and is what pushed the 22-cell grid past its timeout. Set false for WO-A5 probes — they are about the CAGR surface, not which pushes were caught.'
+        default: 'true'
+      dry_run:
+        description: 'compute everything, write nothing'
+        default: 'false'
+  pull_request:
+    paths:
+      - 'src/signals.py'         # the law itself
+      - 'src/backtest.py'        # the driver
+      - 'src/backtest_report.py'
+      - 'src/arming.py'          # what the differential test is measured against
+      - 'src/score.py'
+      - 'src/rank.py'
+      - 'src/fundamentals.py'
+      - 'migrations/**'          # config seeds move behaviour
+      - 'docs/yuna_plan.md'      # the law's text — a plan edit is a logic change
+      - '.github/workflows/backtest.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/signals.py'
+      - 'src/backtest.py'
+      - 'src/backtest_report.py'
+      - 'src/arming.py'
+      - 'src/score.py'
+      - 'src/rank.py'
+      - 'src/fundamentals.py'
+      - 'migrations/**'
+      - 'docs/yuna_plan.md'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Not `yuna-writes`: this job touches `backtest_*` and nothing else (§4.2), so it cannot race the
+# chain. One run per ref PER JOB is enough — a second push supersedes the first, but a blend
+# dispatch must not cancel a study dispatch riding the same file (run 64 died exactly that way).
+# `cells` is in the key for the same reason: two concentrated dispatches carrying different
+# halves of the grid are different work, and the second must not kill the first.
+concurrency:
+  # `park` and the window join the key for the same reason `cells` did: the same cell against a
+  # different park over a different window is DIFFERENT WORK, and WO-A9 dispatches exactly that —
+  # three parks against one cell list. Without them the three deep runs share a group and
+  # `cancel-in-progress` kills the first two, leaving one park's numbers and no way to notice the
+  # other two never ran.
+  group: backtest-${{ github.ref }}-${{ inputs.research || 'engine' }}-${{ inputs.hypotheses || inputs.hypothesis || 'law' }}-${{ inputs.cells }}-${{ inputs.park }}-${{ inputs.start_date }}
+  cancel-in-progress: true
+
 jobs:
-  backtest:
+  # WO-A3's research jobs live in this FILE because GitHub only registers dispatch workflows
+  # from the default branch — dispatching runs the branch's own content, but the path must be
+  # known, and this path is. One file, three dispatchable jobs, each exclusive: a research
+  # dispatch runs no backtest and a backtest dispatch runs no research.
+  blend:
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'blend'
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/backtest.py 2>&1 | tee /tmp/job.out
+      - name: run
+        id: engine
+        run: set -o pipefail; python src/blend.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          LABEL: ${{ inputs.label || 'momentum v1' }}
-          START_NAV: ${{ inputs.start_nav || '200754.38' }}
-          VOL_MODE: ${{ inputs.vol_mode || 'fill_then_exit' }}
-          BREAKEVEN_STEP: ${{ inputs.breakeven_step || '3' }}
-          MCN_EXIT: ${{ inputs.mcn_exit || '55' }}
-          MIN_HOLD_DAYS: ${{ inputs.min_hold_days || '0' }}
+          START_NAV: ${{ inputs.start_nav || '200000' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() && steps.engine.outcome == 'failure'
+        run: python src/report_fail.py blend /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  # The duplicate-listing scan lives here for the reason the comment above already gives: GitHub
+  # only registers dispatch workflows from the DEFAULT branch, and `dedupe.yml` is not on it. That
+  # left the scan built and unrunnable, and the cost of that is now measured rather than theoretical
+  # — runs 484 and 491 both held BBBY_old.US and BBBY.US at the SAME TIME in February 2018. One
+  # company, two of five slots, 40% of the book, and every cap counting it as two names.
+  dedupe:
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'dedupe'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: run
+        id: engine
+        run: set -o pipefail; python src/dedupe_scan.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SCAN_APPLY: ${{ inputs.apply || 'false' }}
+      - name: autopsy on failure
+        if: failure() && steps.engine.outcome == 'failure'
+        run: python src/report_fail.py dedupe /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  verify:
+    # Audit runs that already exist. It re-derives every headline from the stored trades and the
+    # equity curve rather than trusting the run's own summary, so it answers "is the number real"
+    # without re-running the engine that produced it — and without a NAV, a window or a cell, none
+    # of which it needs.
+    #
+    # It is READ-ONLY by construction, which is what makes it safe to point at production: there is
+    # no INSERT, UPDATE, DELETE or COMMIT anywhere in `verify_run.py`. Unlike the audit step inside
+    # the `concentrated` job, this one costs nothing and changes nothing.
+    #
+    # Every run is audited even when an earlier one fails, and the job fails at the end if any did.
+    # Auditing 589 and stopping before 607 because 589 was red is the opposite of the point.
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'verify'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: audit
+        run: |
+          test -n "${{ inputs.run_ids }}" || { echo "run_ids is required for research=verify"; exit 1; }
+          rc=0
+          for rid in $(echo "${{ inputs.run_ids }}" | tr ',' ' '); do
+            echo "::group::run $rid"
+            RUN_ID="$rid" python src/verify_run.py || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  census:
+    # Read-only. Prints what `universe.exchange` actually holds, so the NYSE/NASDAQ allow-list
+    # Zak asked for is written against the column's real contents rather than against the vendor's
+    # word — which was wrong about `currency` on exactly these names.
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'census'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python src/exchange_census.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  desk:
+    # §6.3's score job and §6.4's shadow, run against the live tape. READ-ONLY: `desk.py` issues no
+    # INSERT, UPDATE, DELETE or COMMIT, and turning a sheet into tickets is a separate step that
+    # does not exist yet — which is exactly what makes a shadow record trustworthy.
+    #
+    # `start_nav` sizes the orders. The NAMES, the ranks and the gate do not depend on it at all,
+    # so a nominal NAV produces a real sheet with illustrative quantities.
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'desk'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python src/desk.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ENGINE_NAV: ${{ inputs.start_nav || '200000' }}
+          AS_OF: ${{ inputs.end_date }}
+
+  push_study:
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'push_study'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: run
+        id: engine
+        run: set -o pipefail; python src/push_study.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure() && steps.engine.outcome == 'failure'
+        run: python src/report_fail.py push_study /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  concentrated:
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'concentrated'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: run
+        id: engine
+        run: set -o pipefail; python src/concentrated.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          START_NAV: ${{ inputs.start_nav || '200000' }}
+          CELLS: ${{ inputs.cells }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          # WO-A9's deep test. Blank reproduces the ten-year regime exactly: park SPMO, calendar
+          # VOO, the whole stored window. A 2008 run needs all three moved, because SPMO's first
+          # bar is 2015-10-12 and VOO's — which is where the market calendar comes from — is
+          # 2016-08-12.
+          PARK: ${{ inputs.park }}
+          CALENDAR: ${{ inputs.calendar }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+      - name: capture audit
+        if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true' && inputs.audit != 'false'
+        run: |
+          for rid in $(cat /tmp/run_ids.txt); do RUN_ID=$rid python src/capture_audit.py; done
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # The concentrated cells score themselves inline against the bootstrap and the cuts, but
+      # NOT against the deflated Sharpe — and a twenty-cell grid is precisely the search the
+      # deflation prices. This step runs the same §2.5 driver the engine job runs, which reads
+      # the trial ledger these runs now enter via `param_hash`.
+      - name: §2.5 bars
+        if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true'
+        run: |
+          # `bash -e` aborts the loop on the FIRST non-zero exit, so one bad run used to take
+          # every later run in the batch with it — the whole point of batching is that each run
+          # gets its own answer. Score them all, then fail at the end if any failed.
+          rc=0
+          for rid in $(cat /tmp/run_ids.txt); do
+            echo "::group::finding $rid"
+            RUN_ID=$rid python src/finding.py || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DD_BAR: ${{ inputs.dd_bar }}
+      # Every run audits itself, and a failed audit FAILS THE BUILD. `verify_run.py` never calls
+      # the engine — it re-derives the headline from the raw tape and checks each fill against the
+      # bar it claims to have filled on — so this is the one step that can disagree with the run
+      # that produced it. Per `.claude/rules/trading-code.md` a guard that finds a bad state halts
+      # rather than warning: the run rows are already written, and a red X is what says they must
+      # not be quoted. Every number in WO-A13 through WO-A15 was produced without this step.
+      - name: audit every run against the raw tape
+        if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true'
+        run: |
+          # Same batch-abort as the finding step above, and it bit for real: run 612 failing B4
+          # and B7 aborted the loop before run 613 was audited at all, so the A/B this job existed
+          # to produce came back with only the control half. Audit every run, fail at the end.
+          rc=0
+          for rid in $(cat /tmp/run_ids.txt); do
+            echo "::group::audit $rid"
+            RUN_ID=$rid python src/verify_run.py || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: autopsy on failure
+        if: failure() && steps.engine.outcome == 'failure'
+        run: python src/report_fail.py concentrated /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  backtest:
+    if: github.event_name != 'workflow_dispatch' || inputs.research == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+
+      - name: run
+        id: engine
+        run: set -o pipefail; python src/backtest.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          LABEL: ${{ inputs.label || format('ci · {0}', github.ref_name) }}
+          VARIANT: ${{ inputs.variant || 'law-v0' }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          START_NAV: ${{ inputs.start_nav || '200000' }}
+          HYPOTHESIS: ${{ inputs.hypothesis }}
+          HYPOTHESES: ${{ inputs.hypotheses }}
+          HAIR_TRIGGER_PENDING: ${{ inputs.hair_trigger_pending || 'false' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+
+      # The delta against the pinned baseline. Exits non-zero on a conformance failure only, so a
+      # red build here always means "the engine broke a rule", never "the number went down".
+      - name: report
+        id: report
+        run: python src/backtest_report.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REPORT_PATH: /tmp/report.md
+
+      # The standing rule (docs/handoff-2026-08-13.md): no arm's number is believed until a
+      # capture audit runs. `always()` because the report step above exits non-zero on a
+      # conformance failure by design — and a run that broke a clause needs its capture on the
+      # table MORE, not less. Skipped when the engine wrote nothing (dry run or engine death).
+      - name: capture audit
+        if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true'
+        run: |
+          for rid in $(cat /tmp/run_ids.txt); do RUN_ID=$rid python src/capture_audit.py; done
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      # §2.5 applied mechanically, same conditions. Neither step gates the build: the bars decide
+      # what may be CALLED a finding, not whether the code is broken — the conformance step above
+      # keeps that job.
+      - name: §2.5 bars
+        if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true'
+        run: |
+          # `bash -e` aborts the loop on the FIRST non-zero exit, so one bad run used to take
+          # every later run in the batch with it — the whole point of batching is that each run
+          # gets its own answer. Score them all, then fail at the end if any failed.
+          rc=0
+          for rid in $(cat /tmp/run_ids.txt); do
+            echo "::group::finding $rid"
+            RUN_ID=$rid python src/finding.py || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DD_BAR: ${{ inputs.dd_bar }}
+
+      - name: comment on the pull request
+        if: always() && github.event_name == 'pull_request' && hashFiles('/tmp/report.md') != ''
+        run: gh pr comment "$NUMBER" --body-file /tmp/report.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUMBER: ${{ github.event.pull_request.number }}
+
+      # Only when the ENGINE died. A conformance failure exits the report step non-zero on
+      # purpose; routing that through the autopsy wrote a `runs` row claiming the job died
+      # pre-heartbeat, seconds after the same job had finished and written its own amber.
+      - name: autopsy on failure
+        if: failure() && steps.engine.outcome == 'failure'
         run: python src/report_fail.py backtest /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

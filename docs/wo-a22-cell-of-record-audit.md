@@ -130,6 +130,66 @@ not in 041 because 041 predates finding them.
    beside the new ones so the size of the correction is on the record.
 4. **Then rule on B4's threshold**, which is a separate and smaller question.
 
+## 6. Measured — §3.7(3) costs nothing, it pays
+
+Run 612 (control) against run 613 (`dedupe_pairs=True`), same window, same tape, one axis apart.
+**The control reproduces run 589 to the digit**, which is what makes the comparison quotable
+against §3.1 — CI [31951546462](https://github.com/dailyquest-ca/yuna/actions/runs/31951546462).
+
+| | control · 612 | **pair rule · 613** | |
+| --- | --- | --- | --- |
+| CAGR, full 20yr | +26.5377% | **+26.7504%** | +0.21 pts |
+| max drawdown | −61.1937% | **−59.0493%** | 2.14 pts shallower |
+| total return | +9994.85% | **+10332.81%** | |
+| trades | 752 | 754 | +2 |
+| **B7 duplicate pairs** | **7** | **1** | |
+| deflated Sharpe | 0.214 | **0.229** | still UNPROVEN vs 0.95 |
+
+**The duplicated holdings were costing money.** That is the right sign and it should not be
+surprising: two slots on one company is concentration without compensation — the same
+single-company exposure, bought twice, displacing a fifth independent bet.
+
+So §3.1's numbers are **conservative rather than flattering**. A book obeying §3.7(3) does slightly
+better with a shallower drawdown. That is a smaller correction than either direction this document
+first entertained, and it points the other way.
+
+### 6.1 The pair that survives, and why it is the exclusion table's job
+
+`QRVO.US/RFMD.US` — 95.3% over 2,377 shared sessions, RF Micro Devices merged into Qorvo.
+
+It gets through because the entry test reads a **trailing 252-session window** and requires 30
+shared sessions inside it. At the moment the second line was taken the pair had not yet accumulated
+that overlap, so there was nothing to judge on. **That is the overlap floor working, not failing** —
+it is the same floor that stops two quiet names from being called twins and evicting a real holding.
+
+Loosening it to catch this one would trade a rare miss for a common false positive. The merger is
+squarely §3.2's "ticker renames where the vendor carries both the dead line and the live one", so
+it belongs in `universe_excluded` — added here as evidence for the 041 re-check rather than fixed
+by moving a threshold.
+
+---
+
+### 5.1 Open for ruling — §3.7(3)'s "prefer the higher-ADDV line"
+
+The engine now holds at most one of a pair. It does **not** yet implement the preference, and the
+clause has two readings that differ in what they cost:
+
+| reading | behaviour | cost |
+| --- | --- | --- |
+| **selection** | when neither line is held and both are eligible, buy the higher-ADDV one | none — it only breaks a tie the rank already had to break |
+| **replacement** | if a held line's twin has higher ADDV, sell the held one and buy the twin | a real round trip on a liquidity tiebreak, for no change in exposure |
+
+Today the engine does neither: it keeps whichever copy the rank reached first. That is
+deterministic — the sort is stable — but it is not what §3.7(3) says.
+
+**This is not resolved here.** §0.2 sends ambiguity to Zak rather than to improvisation, and the
+replacement reading generates turnover the plan nowhere else asks for. The selection reading is the
+one I would recommend, and it is a one-line change once ruled.
+
+Worth noting the practical size of it: `DINO/HFC` and `BALL/BLL` are renames where the dead line
+stops printing, so the live line wins on ADDV anyway and the two readings agree. The clause only
+bites on a genuine dual listing where both lines keep trading.
+
 **This should complete before §6.5 seeds capital.** §6.4's ten-session shadow compares live output
 against the sim's decision on same-vintage bars. §3.7(3) makes the live engine hold one of a pair;
 the sim held both. Wherever a duplicate pair sits in the top 12 during the shadow, the two will
@@ -150,3 +210,162 @@ That is the argument for landing it before the engine is rebuilt, not after.
 It also got one of them wrong, in the direction that accuses the engine of a defect it did not
 have, and that is worth as much as the finding. A check asserted in only one direction — "does it
 fire?" — will eventually fire on something legal. Both directions are pinned now.
+
+---
+
+## 7. Zak's rulings, 2026-08-16
+
+| # | ruling | consequence |
+| --- | --- | --- |
+| **1** | §3.7(3) means **selection only**, not replacement. Where one line of a pair is already held, **keep it**. | **No code change.** The engine already keeps the incumbent, so today's behaviour is now the law's behaviour. §5.1 is closed. |
+| **2** | **Adopt the corrected cell** (`dedupe_pairs=True`) as the cell of record. | §3's cell-of-record line and code stamp change once the sub-windows are in. |
+| **3** | **Adopt the corrected run's numbers** for §3.1. | Full 20yr measured: +26.7504% / −59.0493%. Both sub-windows still required — §3.1 is quoted as three or none. |
+| **4** | **Exclude the foreign listings.** *"We can only trade on the US stock market, don't care what name someone has or currency if it seems like it's US."* | Data hygiene under §3.2. See §7.1 — Zak also proposed a better mechanism than the participation threshold. |
+| **5** | **Re-verify migration 041 and apply what survives.** | 041 is never dispatched. A successor migration carries only rows re-checked against the current tape, plus the six pairs the audit found. |
+
+### 7.1 The exchange filter — Zak's question, and why it is the better instrument
+
+> *"Can't we just use like… NYSE and NASDAQ as a filter?"*
+
+**Yes, and it is strictly better than what was proposed.** The participation gate infers "this is not a US listing" from a name missing too much of SPY's calendar — a statistical proxy, needing a threshold nobody has ruled, and carrying a false-positive risk against any real US stock with a long halt.
+
+The exchange is a **fact we already store**: `universe.exchange` has existed since `001_core.sql` and `ingest.py` writes it. A filter on it needs no threshold and cannot mis-fire on a halted US name.
+
+Two things to establish before writing it, and neither is a ruling:
+
+1. **What `universe.exchange` actually holds for the seven offenders.** The vendor got `currency` wrong on exactly these names — it called roubles USD — so its `exchange` value has to be checked rather than trusted. `MGROS` does not resolve to a US listing in EODHD's own search today (nearest match is Jakarta); `PLZL` does not resolve at all.
+2. **Which exchange codes count as "the US stock market".** NYSE and NASDAQ are certain. `NYSE ARCA` and `NYSE MKT` are the same market and hold real ETFs and small caps. **OTC / PINK is the live question** — US-quoted, but thinly, and it is where a delisted foreign line would most plausibly sit. That list is a plan constant and needs Zak's word once the census is in.
+
+**Recommendation:** census first — `select exchange, count(*) from universe where kind='stock' group by 1` — then a filter on an explicit allow-list, with the participation gate kept as a **detector** rather than a gate. It is the thing that found this class in the first place, and `verify_run.py` B4 should keep firing on anything the exchange filter lets through.
+
+---
+
+## 8. The census: the exchange filter cannot be built on the column we have
+
+Run [31954402199](https://github.com/dailyquest-ca/yuna/actions/runs/31954402199), read-only.
+
+### 8.1 `universe.exchange` is the FEED, not the venue
+
+| value | rows | active |
+| --- | --- | --- |
+| `US` | 6,332 | 3,211 |
+| `TO` | 1 | 1 |
+
+That is the whole census. The column holds EODHD's **bulk-feed bucket**, not the listing venue — every
+US name, NYSE and NASDAQ and OTC alike, is simply `US`.
+
+**An NYSE/NASDAQ allow-list would keep 0 of 3,212 active stocks and drop the universe entirely.**
+The idea is right; the data as stored cannot express it. All ten flagged names read
+`exchange=US, currency=USD`, exactly as unreliable as the currency field that started this.
+
+### 8.2 And B4 has been over-flagging — two different things in one list
+
+Nine of the ten are `delisted`, and reading the names splits them cleanly:
+
+| genuinely foreign, on a `.US` ticker | real US companies that were acquired |
+| --- | --- |
+| `PLZL` Polyus (Russia) · `NVTK` Novatek (Russia) | `LDG` Longs Drug Stores (CVS, 2008) · `SUG` Southern Union (2012) |
+| `MGROS` Migros Turk · `IVL` Indorama Ventures (Thailand) | `RXDX` Prometheus Biosciences (Merck, 2023) · `AOI` Alliance One · `SGT` Sames |
+
+**A company acquired in 2008 legitimately stops printing.** B4 measures "missed >3% of the
+benchmark's sessions while active", and for a delisted name "while active" is evidently not being
+scoped to the sessions it was actually listed for — so an ordinary acquisition looks identical to a
+Moscow listing.
+
+The four on the left are exactly the four `wo-a16-foreign-listings.md` named originally. **The
+foreign-listing population is four, not seven**, and the rest is a defect in the detector.
+
+### 8.3 What this changes
+
+1. **The exchange filter needs a real venue**, which means asking EODHD for the NYSE and NASDAQ
+   constituent lists and storing the answer — an ingest change, not a filter over a column we
+   already have. Doable, and still better than a participation threshold, but it is work rather
+   than a one-line predicate.
+2. **B4 must scope "while active" to the listed window** before it is trusted again. Until it is,
+   its count overstates the problem and its list mixes two unrelated causes.
+3. **The four genuinely foreign names are a `universe_excluded` matter** and need no threshold at
+   all — they can be excluded by name, on the evidence that they trade in Moscow, Istanbul and
+   Bangkok.
+
+**Nothing here was ruled on a guess, which is the point of having run the census first.** The
+proposal in §7.1 — "filter on the column, it needs no threshold" — was wrong about what the column
+contains, and one query cost less than shipping it would have.
+
+---
+
+## 9. The reused-ticker sweep is clean — and my RXDX claim was not supported by the tape
+
+Run [31956013997](https://github.com/dailyquest-ca/yuna/actions/runs/31956013997).
+
+> `=== one ticker, two companies: dead runs longer than a quarter ===`
+> `none — no stock ticker goes dark for a quarter inside its own span`
+
+**Not one of 6,333 tickers.** The class I raised as "the worst tape defect available" is absent.
+
+### 9.1 Withdrawing the claim
+
+I wrote, in a commit message and to Zak, that `RXDX` was Ignyta until Roche bought it in 2018 and
+was then reissued to Prometheus Biosciences in 2021. **That came from outside knowledge, not from
+this tape, and the tape does not corroborate it.** If the symbol carried two companies with a
+multi-year dead period between, the sweep would have found the largest contiguous gap in the
+universe sitting on `RXDX`. It found nothing at all above a quarter.
+
+So `RXDX`'s 777 missing sessions are **scattered in runs shorter than 63 sessions**, which is the
+patchy-history shape, not a reissue. Whatever the symbol's real corporate history, our copy of it
+does not contain the gap that would make a formation window dangerous.
+
+**The lesson is the one this programme keeps paying for from the other direction.** Every previous
+correction here was a number that looked right and was wrong. This is the reverse: a defect that
+sounded right, was reasoned from recall rather than measured, and does not exist. It cost a commit
+message and one dispatch, because the sweep was written before the claim was acted on — but had it
+gone the other way it would have justified re-deriving §3.1 for nothing.
+
+### 9.2 What this leaves
+
+The tape has **three** defect shapes reaching the book, not four:
+
+| | status |
+| --- | --- |
+| duplicate listings, one company two symbols | **fixed at the engine** (§6), six pairs for the exclusion table |
+| genuinely foreign listings — `PLZL`, `NVTK`, `MGROS`, `IVL` | excluded by name, no threshold needed |
+| patchy history — `LDG` −252, `SGT` −251, `RXDX` −777 | re-fetch; these are holes in our copy, not defects in the securities |
+
+No reused tickers. **The sub-windows can run without fear of re-deriving them afterwards**, which
+was the only reason this sweep came first.
+
+---
+
+## 10. The corrected engine, all three windows
+
+| run | window | sessions | trades | CAGR | max DD | audit |
+| --- | --- | --- | --- | --- | --- | --- |
+| 617 | 2007-01-05 → 2017-08-14 | 2,671 | 425 | **+11.3542%** | −59.9318% | 13/16 |
+| 619 | 2017-08-16 → 2026-08-14 | 2,261 | 329 | **+47.0491%** | −55.2204% | **15/16 — B7 clean** |
+| 613 | 2007-01-05 → 2026-08-14 | 4,933 | 754 | **+26.7504%** | −59.0493% | 14/16 |
+
+Run 619 is the cleanest audit any run in this programme has produced: **B7 passes outright** — no
+two concurrently held names share a series — and the only failure left is B4, whose six names all
+now read `longest gap ≤ 5: scattered`, i.e. patchy history rather than a foreign calendar.
+
+### 10.1 What is NOT yet established, and must be before §3.1 is amended
+
+**Only the full-window control has been verified to reproduce §3.1.** Run 612 matched run 589 to
+the digit — 4,933 sessions, 752 trades, +26.5377%, −61.1937% — which is what makes +26.7504% a
+quotable replacement for it.
+
+The two sub-window controls (runs 616 and 618) have not been read. Until they are, the deltas
+against §3.1's **+10.66%** and **+51.28%** cannot be stated, and the second half in particular
+needs it: **+47.05% is 4.2 points BELOW the +51.28% in the plan**, and the direction is opposite to
+the other two windows.
+
+Three explanations are live and they have not been separated:
+
+1. the window is not the same one §3.1's figure came from — §3.1's second half is 2,260 sessions
+   from 2017-08-15; this is 2,261 from 2017-08-16;
+2. the dedupe rule genuinely costs return in that decade, which would be a real finding;
+3. the sub-windows do not compose with the full window under a gate — the trap WO-A17 §3.1 and
+   WO-A20 were both caught by, because the parked asset differs across windows and under a gate the
+   park IS the return for every session the book is off.
+
+**Read runs 616 and 618 before drafting the amendment.** Quoting a corrected number against an
+uncorrected control is precisely the error this document exists to have caught twice already.

@@ -310,3 +310,29 @@ is `roadmap-2026-07-31.md`.
     point it targets and run there.** A worktree at `origin/main`, the candidate files checked out
     over it, a fresh database, both suites. It took one command each and found everything above;
     reasoning about the diff had found none of it, twice.
+42. **A test that imports a library nobody pinned passes locally and errors the entire suite in
+    CI.** `test_workflows_parse.py` was added to catch a broken workflow file — a real defect that
+    had already cost a branch every runnable job. It imports `yaml`. PyYAML is in the dev image and
+    is not in `requirements.txt`, so locally it went green and in CI pytest failed at *collection*,
+    which takes the other 681 tests down with it. The guard against broken YAML was itself broken,
+    in the environment it existed to protect, for three commits — and I reported the suite green
+    each time, because I ran it where it passes rather than where it counts. **When a test adds an
+    import, the pinned dependency list is part of the change**, and "the suite is green" means the
+    suite CI runs, not the suite this machine runs.
+43. **A gauge computed off a censored number cannot report the failure it exists to catch.** §4.4
+    asks for "screen survivor count within historical band". The obvious column was
+    `engine_sessions.ranked_count` — and §3.2 caps the pool at the top 500 by ADDV, so on every
+    ordinary session that number is exactly 500 and it stays exactly 500 while the tape rots
+    underneath it. A failed ingest, a currency defect, a delisting sweep and a vendor restatement
+    all move the *uncensored* survivor count and none of them move the capped one. The gauge would
+    have read green through every one of them. **Before wiring a metric to an alarm, ask what value
+    it takes when the thing goes wrong** — if the answer is "the same value", it is decoration.
+44. **A truncate list that misses a new table is a test suite quietly sharing state with itself.**
+    The integration conftest empties every table each test writes, and the comment above it already
+    named two occasions where a missed one governed every later test *and every later pytest run*,
+    since the database outlives the process. `shadow_attestations` was the third. It was caught
+    only because §6.4's pass condition is "10 sessions", and a test that had scored one session
+    read ten — the assertion was specific enough to notice its own contamination. A test asserting
+    "more than zero" would have passed for ever. **Add the table to the truncate list in the same
+    commit that creates it**, and prefer assertions that pin an exact count over assertions that
+    pin a direction.

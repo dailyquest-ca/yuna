@@ -246,3 +246,44 @@ def test_same_session_turnover_is_not_a_slot_breach(db, migrated):
 
     assert _verdict(text, "D1 slot discipline") == "PASS", (
         f"a sell and a buy on the same session is turnover, not a slot breach:\n{text}")
+
+
+def test_b4_tells_a_foreign_calendar_apart_from_a_hole_in_the_history(db, migrated):
+    """B4 reported three unrelated defects as "probable foreign listings" and overstated the
+    population nearly two to one — it sent the reader looking for Moscow in Longs Drug Stores.
+
+    A calendar shortfall has three causes. A foreign listing misses SCATTERED sessions, because
+    Istanbul and New York disagree a few days every month. A backfill hole and a reused ticker each
+    miss ONE CONTIGUOUS block — LDG missed exactly 252 sessions and SGT 251, which is a fetch
+    boundary, and RXDX missed 777 because the symbol was Ignyta until 2018 and Prometheus from 2021.
+
+    So the discriminator is the largest contiguous run of missed sessions against the total missed.
+    This plants both shapes and asserts the report names them differently.
+    """
+    with db.cursor() as cur:
+        rid = _world(cur, lie_about_dd=False, foreign=False, overstuff=False)
+        cur.execute("select d from backtest_equity where run_id=%s order by d", (rid,))
+        days = [r[0] for r in cur.fetchall()]
+        for tk, keep in (("SCATTER.US", lambda i: i % 7),        # a few days off, every week
+                         ("BLOCK.US", lambda i: not 80 <= i < 180)):   # one solid outage
+            cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                           values (%s,%s,'stock','USD','active')""", (tk, tk))
+            for i, d in enumerate(days):
+                if keep(i):
+                    cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,
+                                     volume) values (%s,%s,%s,%s,%s,%s,%s,1000000)""",
+                                (tk, d, 40 + i, 43 + i, 39 + i, 42 + i, 42 + i))
+            cur.execute("""insert into backtest_trades (run_id,ticker,entry_date,entry_price,qty,
+                             exit_reason) values (%s,%s,%s,42.0,10,'open_at_end')""",
+                        (rid, tk, days[10]))
+    db.commit()
+    text, _ = _audit(migrated, rid)
+
+    line = next((ln for ln in text.splitlines() if "B4 listed where we think" in ln), "")
+    assert line.strip().startswith("FAIL"), f"both shapes must still fail:\n{text}"
+    assert "SCATTER.US" in line and "BLOCK.US" in line, f"both must be named:\n{line}"
+
+    scatter = line.split("SCATTER.US")[1].split(";")[0]
+    block = line.split("BLOCK.US")[1].split(";")[0]
+    assert "foreign" in scatter, f"a scattered miss reads as a calendar:\n{scatter}"
+    assert "contiguous" in block, f"one outage must NOT read as a foreign listing:\n{block}"

@@ -184,3 +184,78 @@ def test_the_benchmark_itself_would_pass_its_own_bar():
                      benchmark_cagr=0.1545, dsr=0.99, dd_bar=-0.34,
                      bootstrap_median_drawdown=-0.3399, bootstrap_p5_drawdown=-0.4632)
     assert v["verdict"] != "dead", "a bar the benchmark fails is a broken bar, not a strict one"
+
+
+# ---- one company under two symbols -------------------------------------------------------------
+
+def test_two_vendor_copies_of_one_series_are_the_same_security():
+    """The BALL/BLL shape: identical company, two symbols, differing only in vendor rounding.
+
+    Migration 047 compared closes at exact float equality and missed BBBY_old/BBBY, which agrees on
+    98.72% of shared closes and is one company. 048 moved to returns — the right invariant — and
+    then kept a 1e-9 tolerance, which measures the vendor's rounding rather than the securities.
+    A tolerance has to be looser than the noise it must survive.
+    """
+    rng = np.random.default_rng(7)
+    a = rng.normal(0, 0.02, 400)
+    b = a + rng.normal(0, 1e-6, 400)          # the same tape, quoted in cents, rounded differently
+    assert bars.same_security(a, b) is True
+
+
+def test_two_different_companies_are_not_the_same_security():
+    rng = np.random.default_rng(7)
+    a = rng.normal(0, 0.02, 400)
+    c = rng.normal(0, 0.02, 400)
+    assert bars.same_security(a, c) is False
+
+
+def test_agreement_on_too_few_shared_sessions_is_not_evidence():
+    """Two series can agree by accident over a handful of sessions. The overlap floor is what
+    stops a coincidence from evicting a real holding."""
+    rng = np.random.default_rng(7)
+    a = rng.normal(0, 0.02, 400)
+    b = a.copy()
+    b[bars.TWIN_MIN_OVERLAP - 1:] = np.nan     # perfect agreement, one session short of the floor
+    assert bars.same_security(a, b) is False
+    b2 = a.copy()
+    b2[bars.TWIN_MIN_OVERLAP + 1:] = np.nan    # the same agreement, just over it
+    assert bars.same_security(a, b2) is True
+
+
+def test_a_dark_period_is_neither_agreement_nor_disagreement():
+    """BBBY_old stops printing long before BBBY does. Sessions where either side has no return are
+    not shared sessions, so the gap must not count against the pair OR for it."""
+    rng = np.random.default_rng(7)
+    a = rng.normal(0, 0.02, 400)
+    b = a.copy()
+    b[:300] = np.nan                           # dark for most of the window, identical after
+    assert bars.same_security(a, b) is True
+    c = rng.normal(0, 0.02, 400)
+    c[:300] = np.nan                           # equally dark, and different where it prints
+    assert bars.same_security(a, c) is False
+
+
+def test_misaligned_series_raise_rather_than_compare_the_overlap():
+    """Silently truncating to the shorter array would compare two different windows and call the
+    answer a verdict. This repo's failure mode is the plausible wrong number, not the exception."""
+    with pytest.raises(ValueError, match="align"):
+        bars.same_security(np.zeros(100), np.zeros(50))
+
+
+def test_two_series_that_barely_move_are_not_twins_just_because_they_agree():
+    """The false positive a synthetic ladder exposed, and the reason the rule needs a floor.
+
+    Two smooth exponentials drifting at similar rates agree within any tolerance while being
+    different securities entirely. In live data the same shape is two low-volatility names in a
+    quiet stretch — and evicting a real holding on that is worse than holding a duplicate, because
+    it is silent and it is wrong.
+
+    Agreement is evidence only when there was something to disagree about.
+    """
+    flat_a = np.full(400, 1e-6)                # constant returns: nothing to disagree about
+    flat_b = np.full(400, 1.5e-6)
+    assert bars.same_security(flat_a, flat_b) is False
+    rng = np.random.default_rng(3)
+    moving = rng.normal(0, 0.02, 400)
+    assert bars.same_security(moving, moving.copy()) is True, (
+        "the floor must not reject a pair that genuinely moves together")
