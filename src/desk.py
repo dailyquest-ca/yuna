@@ -81,6 +81,28 @@ def held_book(cur):
     return {r[0]: float(r[1]) for r in cur.fetchall()}
 
 
+def marked_equity(cur, held, as_of):
+    """The sleeve marked at the decision close. Returns (value, [names with no mark]).
+
+    Priced by its own query rather than off the loaded tape, deliberately: a holding that has left
+    §3.2's universe — excluded, or delisted — has no column there, and marking it at zero would
+    read as a drawdown when it is a data boundary. §5.2's milestones are computed off this number.
+
+    A name with no bar at all is NOT counted and IS named. Understating the sleeve silently would
+    manufacture a drawdown; understating it loudly is a line in the brief.
+    """
+    total, unpriced = 0.0, []
+    for tk, qty in held.items():
+        cur.execute("""select close from prices where ticker = %s and d <= %s
+                        order by d desc limit 1""", (tk, as_of))
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            unpriced.append(tk)
+            continue
+        total += qty * float(row[0])
+    return total, unpriced
+
+
 def sheet(cur, as_of, nav):
     """Tonight's decision. Returns a dict; prints nothing, writes nothing.
 
@@ -141,9 +163,11 @@ def sheet(cur, as_of, nav):
         orders.append(dict(action="buy", ticker=tk, qty=qty, rank=rank_of.get(tk),
                            mark=px, addv=addv, clause="fill", why="fill",
                            participation_ok=engine.participation_ok(qty, px, addv) if qty else None))
+    equity, unpriced = marked_equity(cur, held, sessions[i])
     return dict(session=sessions[i], gate="ON" if gate_on else "OFF", gate_on=gate_on,
                 gate_green=bool(green), index_close=float(index_px[i]), index_sma=sma, nav=nav,
                 universe=len(tickers), ranked=len(ranked), screened=screened,
+                marked_equity=equity, unpriced=unpriced,
                 held=sorted(held), unranked=unranked,
                 top=[tickers[j] for j in ranked[:engine.FILL_BAND]], orders=orders,
                 ranks=[dict(ticker=tickers[j], rank=r, score=scores.get(tickers[j]),

@@ -78,8 +78,12 @@ def armed(conn, ticker, kind=None):
 
 
 def payload(conn, field):
+    # Migration 054 moved the ruling docket out of `v_session_payload`: §4.2's payload is now the
+    # nine items v1.0 names, and §3.3 leaves the engine with no bench, no hurdle and no per-name
+    # ruling. The docket itself survives while `arming.py` does, so these assertions still hold —
+    # they are about the ledger's behaviour, and only the read surface moved.
     with conn.cursor() as cur:
-        cur.execute(f"select {field} from v_session_payload")
+        cur.execute(f"select {field} from v_ruling_docket")
         return cur.fetchone()[0] or []
 
 

@@ -1,0 +1,319 @@
+"""brief — §4.1's `compose`. The morning brief, rendered from the one payload read.
+
+§5.1: "The morning brief renders: freshness · gate & latch · the order sheet · book with ranks &
+P/L · DD status vs milestones · tranche schedule status. Judgment happens in chat; arithmetic
+happens in the pipeline."
+
+That division is the whole design of this file. It renders and it does not decide: every number
+here was computed by `sheet`, checked by `gauges` and read back through `v_session_payload`. If a
+figure appears in the brief that no other job wrote, this file has overstepped.
+
+    DATABASE_URL=... python src/brief.py
+    DATABASE_URL=... DRY_RUN=true python src/brief.py     # render, print, write nothing
+
+**Nothing here places an order** (§0.2). The sheet is a proposal; Zak executes at the open.
+"""
+import json
+import os
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from db import connect, dry, Heartbeat                                     # noqa: E402
+
+# §5.2, verbatim: "Pager at −10% engine DD; informational lines at −20 / −30 / −40 / −50. **No
+# mechanical intervention exists at any level.**" The pager threshold and the informational ladder
+# are the plan's, and the absence of any action at any of them is also the plan's — chosen, in the
+# plan's own words, "with the three numbers in view".
+DD_PAGER = -0.10
+DD_MILESTONES = (-0.20, -0.30, -0.40, -0.50)
+
+
+def payload(cur):
+    cur.execute("select * from v_session_payload")
+    cols = [d[0] for d in cur.description]
+    return dict(zip(cols, cur.fetchone()))
+
+
+def _pct(x, places=1):
+    return "—" if x is None else f"{100.0 * float(x):+.{places}f}%"
+
+
+def freshness_line(p):
+    """§5.1's first line. A red check holds BUYS; §5.4 makes exits unblockable, so the sheet still
+    ships and the banner says which half of it may be acted on."""
+    c = p["check_report"]
+    if not c:
+        return "⚠️ no check has run — nothing has been proved about tonight's numbers"
+    verdict = (c.get("verdict") or c.get("status") or "?").upper()
+    mark = {"GREEN": "✓", "AMBER": "⚠", "RED": "✗"}.get(verdict, "?")
+    line = f"{mark} check {verdict}"
+    if c.get("blocks_buys"):
+        line += " — **buys held; exits stand** (§4.4, §5.4)"
+    for why in (c.get("red") or []) + (c.get("amber") or []):
+        line += f"\n    · {why}"
+    return line
+
+
+def gate_line(p):
+    g = p["gate"]
+    if not g:
+        return "gate — no session has been scored"
+    state = "ON" if g["gate_on"] else "OFF"
+    signal = "green" if g["gate_green"] else "red"
+    px, sma = g.get("index_close"), g.get("index_sma")
+    where = ""
+    if px and sma:
+        where = f" · SPY {px:,.2f} vs 200-day {sma:,.2f} ({100.0 * (px / sma - 1):+.2f}%)"
+    latch = ("1 red session turns it OFF" if g["gate_on"]
+             else "3 consecutive greens turn it ON")
+    return (f"gate **{state}** · today's signal {signal}{where}\n"
+            f"    latch: {latch} (§3.4)")
+
+
+def sheet_lines(p):
+    """§4.3's sheet. Sells first — §3.5 executes them first, and the order on the page is the
+    order at the open."""
+    rows = p["order_sheet"] or []
+    if not rows:
+        return ["**no orders** — the book already matches the rank"]
+    out = []
+    for r in rows:
+        if r["action"] == "sell":
+            out.append(f"  SELL {r['ticker']:<10} qty {float(r['qty'] or 0):>10,.0f}   "
+                       f"rank {r['rank'] or '—'}   ({r['clause']})   [{r['state']}]")
+        else:
+            qty = f"{float(r['qty']):>10,.0f}" if r["qty"] is not None else "         —"
+            mark = f"{float(r['mark']):,.2f}" if r["mark"] is not None else "—"
+            out.append(f"  BUY  {r['ticker']:<10} qty {qty}   "
+                       f"rank {r['rank']}   mark {mark}   [{r['state']}]")
+    out.append("")
+    out.append("  Zak executes at the open: sells first, then buys (§3.5). Market orders; no GTC "
+               "orders exist anywhere in this system (§4.3).")
+    return out
+
+
+def book_lines(p):
+    rows = p["book"] or []
+    if not rows:
+        return ["  (nothing held)"]
+    out = []
+    for b in rows:
+        rank = f"{b['rank']:>3}" if b.get("rank") is not None else "  —"
+        out.append(f"  {b['ticker']:<10} {float(b['qty']):>8,.0f} @ {float(b['avg_cost']):>10,.2f}"
+                   f"   last {float(b['last_close'] or 0):>10,.2f}"
+                   f"   P/L {float(b['pnl_pct'] or 0):>+6.1f}%   rank {rank}   {b['sleeve']}")
+        if b.get("rank") is None:
+            out.append("      ** no rank: this holding is outside §3.2's universe, which §3.5 "
+                       "treats as below 12 **")
+    return out
+
+
+def dd_lines(p):
+    """§5.2 — information, never action. The milestones are printed as milestones, and the sentence
+    that says nothing happens at them is printed with them, every time."""
+    n = p["nav"] or {}
+    dd = n.get("drawdown")
+    nav = f"{float(n['engine_nav']):,.2f}" if n.get("engine_nav") is not None else "**unknown**"
+    marked = (f" · marked {float(n['marked_equity']):,.2f}"
+              if n.get("marked_equity") is not None else "")
+    out = [f"  engine NAV {nav}{marked}"]
+    if dd is None:
+        out.append("  drawdown — not yet measurable (no marked equity recorded)")
+        return out
+    hit = [m for m in DD_MILESTONES if dd <= m]
+    out.append(f"  drawdown {_pct(dd)} from a peak of {float(n['peak']):,.2f}")
+    if dd <= DD_PAGER:
+        out.append(f"  ** −10% pager reached (§5.2) **")
+    if hit:
+        out.append("  milestones passed: " + ", ".join(f"{int(100 * m)}%" for m in hit))
+    out.append("  §5.2: milestones are information. No mechanical intervention exists at any "
+               "level; any intervention is Zak's explicit ruling in chat.")
+    return out
+
+
+def tranche_lines(p):
+    """§2.3's ramp. Eligibility is stated, never acted on — every draw is Zak's (§0.2)."""
+    out = []
+    for f in (p["facilities"] or []):
+        head = f.get("headroom_to_cap")
+        out.append(f"  {f['account']}: drawn {float(f['drawn'] or 0):,.2f} of a "
+                   f"{float(f['credit_limit'] or 0):,.2f} limit · cap {float(f['cap'] or 0):,.2f} "
+                   f"(§2.3, 50%) · headroom to cap {float(head or 0):,.2f}")
+    if not out:
+        out.append("  no facility balance recorded — §2.3's cap is 50% of the LIMIT, and the "
+                   "limit is Zak's to state (a `balances` row)")
+
+    gate_on = (p["gate"] or {}).get("gate_on")
+    for t in (p["tranches"] or []):
+        when = f"{'~' if t['approximate'] else ''}{t['planned_on']}"
+        if t["status"] == "drawn":
+            out.append(f"  tranche {t['seq']}: ${float(t['amount_cad']):,.0f} — drawn {t['drawn_on']}")
+        elif t["status"] == "skipped":
+            out.append(f"  tranche {t['seq']}: ${float(t['amount_cad']):,.0f} — skipped; §2.3 "
+                       f"shifts it one month, and never two tranches in one month")
+        else:
+            why = "gate ON this week" if gate_on else "**held: §2.3 requires the gate ON that week**"
+            out.append(f"  tranche {t['seq']}: ${float(t['amount_cad']):,.0f} planned {when} — {why}")
+    return out
+
+
+# §1, Zak's words: "Get to $5M as fast as possible, so I can retire and do whatever work I want —
+# with no risk." §1 names the number and not the currency. NAV is reported in CAD everywhere in
+# this system (`nav_snapshots.nav_cad`, §4.1's FX row), so the comparison is made in CAD and the
+# assumption is PRINTED beside it rather than buried — at today's rates the two readings differ by
+# about a third of the distance.
+DESTINATION = 5_000_000.0
+DESTINATION_CURRENCY = "CAD"
+
+
+def saturday_lines(cur, p):
+    """§4.1's weekly letter: "clinical: gate, rank stability, DD status, divergences, learnings,
+    NAV vs the §1 destination"."""
+    out = []
+    g = p["gate"] or {}
+
+    # Over the WHOLE record, not a window. §2.5's review checkpoint is "the first completed gate
+    # cycle (ON→OFF→ON) or 12 months, whichever comes first", so the count that matters is the one
+    # since the engine started — a rolling window would reset the very thing the checkpoint waits
+    # for, and the window length would be a number nobody ruled.
+    cur.execute("""select count(*) from (
+                     select gate_on, lag(gate_on) over (order by session_date) as prev
+                       from engine_sessions where mode='live') f
+                    where prev is not null and gate_on is distinct from prev""")
+    flips = cur.fetchone()[0]
+    out.append(f"  gate {'ON' if g.get('gate_on') else 'OFF'} · {flips} flip(s) on record")
+
+    # Rank stability across §3.5's fill band. Five sessions because a trading week is five
+    # sessions and this is the weekly letter — the length of a week, not a tuned lookback.
+    cur.execute("""select session_date, array_agg(ticker order by rank) as top
+                     from engine_ranks where mode='live' and rank <= 12
+                    group by session_date order by session_date desc limit 5""")
+    week = cur.fetchall()
+    if len(week) >= 2:
+        newest, oldest = set(week[0][1]), set(week[-1][1])
+        out.append(f"  rank stability: {len(newest & oldest)} of 12 names held the band from "
+                   f"{week[-1][0]} to {week[0][0]} · in {sorted(newest - oldest)} · "
+                   f"out {sorted(oldest - newest)}")
+    else:
+        out.append("  rank stability: fewer than two scored sessions — nothing to compare yet")
+
+    n = p["nav"] or {}
+    dd = n.get("drawdown")
+    out.append(f"  drawdown {_pct(dd) if dd is not None else 'not yet measurable'}")
+
+    # §6.4's divergences: the shadow scored the same close, and where the two disagree is the
+    # attestation the shadow exists to produce. Every one on record, with no window — §6.4's pass
+    # condition is "10/10 matches, or **every** divergence named and ruled", and a divergence that
+    # aged off the bottom of a window would be one that was never named.
+    cur.execute("""select l.session_date, l.gate_on, s.gate_on
+                     from engine_sessions l join engine_sessions s
+                       on s.session_date = l.session_date and s.mode = 'shadow'
+                    where l.mode = 'live' and l.gate_on is distinct from s.gate_on
+                    order by l.session_date""")
+    diverged = cur.fetchall()
+    out.append("  divergences (live vs shadow, on record): "
+               + (", ".join(f"{d[0]} gate {d[1]}/{d[2]}" for d in diverged) if diverged
+                  else "none on the gate"))
+
+    household = (n.get("household") or {}).get("nav_cad")
+    if household:
+        pct = 100.0 * float(household) / DESTINATION
+        out.append(f"  NAV vs the §1 destination: {float(household):,.0f} of "
+                   f"{DESTINATION:,.0f} {DESTINATION_CURRENCY} ({pct:.1f}%)")
+        out.append(f"    §1 names the number and not the currency; NAV is reported in "
+                   f"{DESTINATION_CURRENCY} throughout this system, so the comparison is made there.")
+    else:
+        out.append("  NAV vs the §1 destination: no NAV snapshot recorded")
+    return out
+
+
+def render(p):
+    g = p["gate"] or {}
+    out = [f"# Yuna · {g.get('session_date') or 'no session'}", ""]
+    out.append(freshness_line(p))
+    out += ["", gate_line(p), "", "## Order sheet (§4.3)", ""]
+    out += sheet_lines(p)
+    out += ["", "## Book (§4.2)", ""] + book_lines(p)
+    out += ["", "## NAV & drawdown (§5.2)", ""] + dd_lines(p)
+    out += ["", "## Levered layer (§2.3)", ""] + tranche_lines(p)
+
+    top = p["top12"] or []
+    if top:
+        out += ["", "## Top 12 (§3.3 — the rank is the entire opinion)", ""]
+        out.append("  " + ", ".join(f"{t['ticker']}" for t in top))
+
+    rec = p["reconciliation"] or {}
+    out += ["", "## Reconciliation (§4.4)", "",
+            f"  last receipt {rec.get('last_receipt') or '—'} · "
+            f"last attested {rec.get('last_attested') or 'never'} · "
+            f"{rec.get('awaiting_receipt') or 0} approved ticket(s) awaiting a receipt"]
+
+    learn = p["learnings"] or []
+    if learn:
+        out += ["", "## Learnings in flight (§5.3)", ""]
+        for l in learn:
+            out.append(f"  [{l['status']}] {l['key']} — {l.get('hypothesis') or ''}")
+
+    out += ["", "---", "Yuna proposes; Zak decides (§0.2). Nothing in this brief has been ordered."]
+    return "\n".join(out)
+
+
+def main():
+    # §4.1: "Weekly: the Saturday letter." The slot comes from the chain, and `or` rather than a
+    # default argument — a dead upstream job hands this down as an empty string.
+    slot = (os.environ.get("COMPOSE_SLOT") or "nightly").strip().lower()
+    with connect() as conn, Heartbeat(conn, "compose", dry_run=dry()) as hb:
+        with conn.cursor() as cur:
+            p = payload(cur)
+            report = render(p)
+            if slot == "saturday":
+                report += "\n\n## The week (§4.1)\n\n" + "\n".join(saturday_lines(cur, p))
+        print(report)
+
+        g = p["gate"] or {}
+        session = g.get("session_date")
+        hb.detail.update(session=str(session) if session else None, slot=slot,
+                         gate="ON" if g.get("gate_on") else "OFF",
+                         orders=len(p["order_sheet"] or []),
+                         held=len(p["book"] or []))
+        if session is None:
+            # `briefs.session_date` is NOT NULL and there is no honest value for it here. A brief
+            # dated today about a session that was never scored would be a record of a night that
+            # did not happen, so the render prints and nothing is stored.
+            hb.amber("no engine session has been scored — the brief was rendered but not stored, "
+                     "because a brief needs the session date it describes")
+        elif not dry():
+            with conn.cursor() as cur:
+                # §4.2: `compose` refuses to publish a kind twice for one session date, so the
+                # retry chain costs a few minutes and buys a second chance rather than a duplicate.
+                cur.execute("""insert into briefs (kind, session_date, freshness, summary, body,
+                                                   detail)
+                               select %s, %s, %s, %s, %s, %s
+                                where not exists (select 1 from briefs
+                                                   where kind = %s and session_date = %s)
+                               returning id""",
+                            (slot, session, freshness_line(p).splitlines()[0],
+                             f"gate {'ON' if g.get('gate_on') else 'OFF'} · "
+                             f"{len(p['order_sheet'] or [])} order(s)",
+                             report, json.dumps({"composed": True}), slot, session))
+                wrote = cur.fetchone()
+            conn.commit()
+            hb.rows = 1 if wrote else 0
+            if not wrote:
+                hb.detail["skipped"] = f"a nightly brief for {session} already exists"
+
+        if not p["check_report"]:
+            hb.amber("no check has run — the brief carries no proof that tonight's numbers hold")
+        elif p["check_report"].get("blocks_buys"):
+            hb.amber("check is red: the brief ships the sheet with its buys held (§4.4, §5.4)")
+
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a") as fh:
+            fh.write(report + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

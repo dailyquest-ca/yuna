@@ -1,4 +1,15 @@
 name: ingest-filings
+# **RETIRED FROM THE SCHEDULE by §6.3 (2026-08-16). Dispatch only.**
+#
+# §4.5: "No fundamentals, news, intraday, or calendar feeds are read by any decision." v1.0's
+# engine is §3.3's one number, and §3.3 says the rank is the entire opinion — so nothing this job
+# writes reaches a decision any more. Its cron is removed rather than the job, because §4.5 also
+# names the product this system downgrades to once the legacy jobs are retired (EOD Historical
+# Data — All World), and a weekly fundamentals sweep against a plan that no longer carries the
+# endpoint would fail every Saturday for a feed nobody reads.
+#
+# Everything below this line describes the retired behaviour and is kept for the dispatch path.
+#
 # §4.2, verb one, filings slice: new filings -> fundamentals fields re-extracted -> effective
 # shares frozen (§3.1). Runs with the weekly sweep and on filing detection.
 #
@@ -17,8 +28,6 @@ name: ingest-filings
 # with zero vendor calls — which is how a law change to the extraction (the FX restatement, SBC net
 # of FCF) re-prices the whole archive instead of buying the same facts twice.
 on:
-  schedule:
-    - cron: '0 11 * * 6'   # Sat 11:00 UTC — after ingest-universe, before score's weekly rank
   workflow_dispatch:
     inputs:
       dry_run:
