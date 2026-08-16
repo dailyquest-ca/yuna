@@ -285,11 +285,13 @@ def classify_breakouts(conn, hb, bars, sessions, multiple):
             if idx is None:
                 continue
             window = b[idx:idx + sessions]
-            ok = sg.breakout_confirmed([w["vol"] for w in window],
-                                       [volume_baseline(b, idx + j) for j in range(len(window))],
-                                       multiple=multiple)
-            expired = len(b) - idx >= sessions
-            new_state = True if ok else (False if expired else None)
+            # One state machine, shared with the backtest (§3.2). The hair-trigger arms when the
+            # window closes, not while the name is still pending (ruled 2026-08-10) — which is the
+            # timing `arm_exits` already used, now written down in one place instead of two.
+            state = sg.confirmation_state([w["vol"] for w in window],
+                                          [volume_baseline(b, idx + j) for j in range(len(window))],
+                                          sessions=sessions, multiple=multiple)
+            new_state = state["confirmed"]
             if not dry():
                 cur.execute("""update book set confirmed=%s, confirm_deadline=%s, updated_at=now()
                                where id=%s""",

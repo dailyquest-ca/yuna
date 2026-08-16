@@ -434,19 +434,11 @@ def extract(ticker, r, quote_ccy=None, fx=None):
     gw_old = num((bs_y.get(ys[1]) or {}).get("goodWill")) if n_years > 1 else None
     gw_jump = bool(gw_new and gw_old and gw_old > 0 and gw_new / gw_old > 1.25)
 
-    # ---- M4 (§3.2)
+    # ---- M4 (§3.2). The arithmetic lives in signals so the backtest measures this same rule.
     hist = (r.get("Earnings") or {}).get("History") or {}
     eps = {k: num((hist[k] or {}).get("epsActual")) for k in desc(hist)}
-    reported = [(k, v) for k, v in eps.items() if v is not None]
-    yoy = []
-    for i, (k, v) in enumerate(reported[:8]):
-        if i + 4 < len(reported):
-            base = reported[i + 4][1]
-            yoy.append((v / base - 1) if base and base > 0 else None)
-    y0 = yoy[0] if yoy else None
-    y1 = yoy[1] if len(yoy) > 1 else None
-    m4 = bool((y0 is not None and y0 >= 0.25) or
-              (y0 is not None and y1 is not None and y0 > y1 and y0 >= 0.15))
+    m4_out = sg.m4_acceleration([v for v in eps.values() if v is not None])
+    y0, y1, m4 = m4_out["yoy_latest"], m4_out["yoy_prev"], m4_out["passes"]
 
     have = sum(x is not None for x in (engine, cash_conv, mcap))
     # §3.0, hardened 2026-08-01 and again 2026-08-07: a foreign issuer is compounder-eligible only

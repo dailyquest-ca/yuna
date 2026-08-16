@@ -3,7 +3,7 @@
 Kept deliberately thin — the jobs stay readable, and the heartbeat contract (one runs row
 per job, green | amber | red, tracebacks embedded on death) lives in exactly one place.
 """
-import bisect, os, sys, json, time, traceback, urllib.request, urllib.error
+import bisect, os, sys, json, hashlib, time, traceback, urllib.request, urllib.error
 import datetime as dt
 import psycopg
 
@@ -40,6 +40,27 @@ def config(cur, key, default=None):
     cur.execute("select value from config where key=%s order by set_at desc limit 1", (key,))
     row = cur.fetchone()
     return row[0] if row else default
+
+
+# The config rows that decide what the machine *does*, as opposed to how it talks or how often it
+# fetches. A backtest is only evidence about the machine these describe.
+DECISION_KEYS = ("score_thresholds", "sleeve_ceiling", "momentum_max_names",
+                 "holdthrough_cushion", "blackout_trading_days", "entry_limit_over_pivot",
+                 "mcn_risk_budget", "max_positions")
+
+
+def config_digest(cur, keys=DECISION_KEYS):
+    """A short, stable digest of the config a decision was made under.
+
+    Behaviour lives in the database as well as in git: change a threshold and the machine behaves
+    differently with no commit, no diff and nothing for a paths-filtered CI trigger to notice.
+    Every backtest run stamps this, and `check` ambers when the newest run's stamp no longer
+    matches today's — so "the rules moved and nothing re-tested them" is a line in the brief
+    rather than a silence. One function, so the stamp and the comparison cannot drift apart.
+    """
+    values = {k: config(cur, k, None) for k in keys}
+    blob = json.dumps(values, sort_keys=True, default=str).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
 
 
 def key():
@@ -290,6 +311,33 @@ def wal_bytes(cur):
         return None                      # never let a diagnostic break the job it protects
 
 
+def wal_ceiling_floor(cur):
+    """The lowest ceiling that is not permanently tripped, derived from Postgres's own settings.
+
+    **A ceiling below `min_wal_size` can never be satisfied.** Postgres retains at least
+    `min_wal_size` of recycled segments by design and is permitted to run to `max_wal_size` between
+    checkpoints — here 1 GB and 4 GB. A guard set under that range does not protect anything; it
+    reports the database's normal resting state as an emergency and stops every bulk job a few
+    minutes in, no matter how long the caller waits.
+
+    That is exactly what happened to WO-A9's delisted census: four separate passes, each stopping
+    after ~4 minutes against ceilings of 900-1500 MB while pg_wal sat at its normal 1,776 MB. The
+    census was never blocked by the database.
+
+    The number that means "the checkpointer is genuinely losing" is therefore ABOVE `max_wal_size`,
+    not below it — that is the level Postgres itself starts forcing checkpoints to hold. Returns
+    `max_wal_size` plus a margin; callers should treat it as the minimum sane ceiling, not a target.
+    """
+    try:
+        cur.execute("select setting::bigint from pg_settings where name = 'max_wal_size'")
+        row = cur.fetchone()
+        if not row:
+            return None
+        return int(row[0]) * 1024 * 1024 * 5 // 4        # max_wal_size + 25%
+    except Exception:
+        return None
+
+
 def wait_for_wal(conn, *, ceiling_bytes, max_wait_s=180, poll_s=10):
     """Let the checkpointer catch up before writing more. Returns True if it is safe to continue.
 
@@ -297,6 +345,14 @@ def wait_for_wal(conn, *, ceiling_bytes, max_wait_s=180, poll_s=10):
     how long it takes. Pausing costs minutes. Not pausing cost a night.
     """
     waited = 0
+    with conn.cursor() as cur:
+        floor = wal_ceiling_floor(cur)
+    if floor and ceiling_bytes < floor:
+        # Refuse to enforce a ceiling the database can never satisfy. Silently honouring it makes
+        # every bulk job stop a few minutes in and report WAL pressure that is not there.
+        print(f"  wal guard: ceiling {ceiling_bytes / 1048576:.0f} MB is below max_wal_size + 25% "
+              f"({floor / 1048576:.0f} MB) — Postgres rests in that range by design; raising to it")
+        ceiling_bytes = floor
     while True:
         with conn.cursor() as cur:
             now = wal_bytes(cur)
