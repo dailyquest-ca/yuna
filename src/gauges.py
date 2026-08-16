@@ -209,6 +209,12 @@ def sheet_arithmetic(cur, stored):
         if nav is None:
             bad.append(f"{tk}: sized at {qty:g} against a session that recorded no NAV")
             continue
+        if mark is None or float(mark) <= 0:
+            # A sized buy with no mark cannot have come from §3.5, which sizes at the decision
+            # close. Reported rather than raised: this job's whole purpose is to say what is wrong,
+            # and a traceback here takes down the proof instead of delivering it.
+            bad.append(f"{tk}: sized at {qty:g} with no decision close to size against")
+            continue
         want = engine.position_size(nav, float(mark))
         if int(qty) != want:
             bad.append(f"{tk}: qty {qty:g} but §3.5 gives int({nav:g}/{engine.SLOTS} // "

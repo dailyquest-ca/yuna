@@ -124,7 +124,7 @@ def dd_lines(p):
     hit = [m for m in DD_MILESTONES if dd <= m]
     out.append(f"  drawdown {_pct(dd)} from a peak of {float(n['peak']):,.2f}")
     if dd <= DD_PAGER:
-        out.append(f"  ** −10% pager reached (§5.2) **")
+        out.append("  ** −10% pager reached (§5.2) **")
     if hit:
         out.append("  milestones passed: " + ", ".join(f"{int(100 * m)}%" for m in hit))
     out.append("  §5.2: milestones are information. No mechanical intervention exists at any "
