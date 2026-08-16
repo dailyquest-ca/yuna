@@ -1,10 +1,24 @@
 name: migrate
+# Dispatch-only, and deliberately so: schema changes land when someone decides they should, never
+# on a clock. `migrate.py` applies each file in its own transaction and stops on the first error,
+# so a bad migration leaves the ones before it applied and the ones after it untouched.
+#
+# `dry_run` lists what is pending and writes nothing. The runner has always read `DRY_RUN` — §4.2
+# gives every job one — and this workflow simply never passed it, so the only way to find out what
+# a dispatch would do to production was to do it.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'list the pending migrations and apply nothing'
+        default: 'false'
 jobs:
   migrate:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: yuna-writes
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -15,3 +29,4 @@ jobs:
         run: python src/migrate.py
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
