@@ -130,6 +130,45 @@ not in 041 because 041 predates finding them.
    beside the new ones so the size of the correction is on the record.
 4. **Then rule on B4's threshold**, which is a separate and smaller question.
 
+## 6. Measured — §3.7(3) costs nothing, it pays
+
+Run 612 (control) against run 613 (`dedupe_pairs=True`), same window, same tape, one axis apart.
+**The control reproduces run 589 to the digit**, which is what makes the comparison quotable
+against §3.1 — CI [31951546462](https://github.com/dailyquest-ca/yuna/actions/runs/31951546462).
+
+| | control · 612 | **pair rule · 613** | |
+| --- | --- | --- | --- |
+| CAGR, full 20yr | +26.5377% | **+26.7504%** | +0.21 pts |
+| max drawdown | −61.1937% | **−59.0493%** | 2.14 pts shallower |
+| total return | +9994.85% | **+10332.81%** | |
+| trades | 752 | 754 | +2 |
+| **B7 duplicate pairs** | **7** | **1** | |
+| deflated Sharpe | 0.214 | **0.229** | still UNPROVEN vs 0.95 |
+
+**The duplicated holdings were costing money.** That is the right sign and it should not be
+surprising: two slots on one company is concentration without compensation — the same
+single-company exposure, bought twice, displacing a fifth independent bet.
+
+So §3.1's numbers are **conservative rather than flattering**. A book obeying §3.7(3) does slightly
+better with a shallower drawdown. That is a smaller correction than either direction this document
+first entertained, and it points the other way.
+
+### 6.1 The pair that survives, and why it is the exclusion table's job
+
+`QRVO.US/RFMD.US` — 95.3% over 2,377 shared sessions, RF Micro Devices merged into Qorvo.
+
+It gets through because the entry test reads a **trailing 252-session window** and requires 30
+shared sessions inside it. At the moment the second line was taken the pair had not yet accumulated
+that overlap, so there was nothing to judge on. **That is the overlap floor working, not failing** —
+it is the same floor that stops two quiet names from being called twins and evicting a real holding.
+
+Loosening it to catch this one would trade a rare miss for a common false positive. The merger is
+squarely §3.2's "ticker renames where the vendor carries both the dead line and the live one", so
+it belongs in `universe_excluded` — added here as evidence for the 041 re-check rather than fixed
+by moving a threshold.
+
+---
+
 ### 5.1 Open for ruling — §3.7(3)'s "prefer the higher-ADDV line"
 
 The engine now holds at most one of a pair. It does **not** yet implement the preference, and the
