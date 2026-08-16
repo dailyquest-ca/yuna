@@ -11,12 +11,33 @@ nothing was written to production to produce this.
 
 ## 1. The answer, in one line
 
-**The arithmetic is real. The book that produced it is not the book §3.6 describes.**
+**The arithmetic is real, the slot count is real, and one defect survives: the book held the same
+company under two symbols.**
 
 | run 589 · `b5_12_2_L1_3` · 2007-01-05 → 2026-08-14 · 4933 sessions · 752 trades | |
 | --- | --- |
-| **13 passed** | every headline, the cash identity, every fill, every session, and the tape |
-| **3 failed** | all three are about **which names were in the book**, none about the numbers |
+| **14 passed** | every headline, the cash identity, every fill, every session, the tape, **and slot discipline** |
+| **2 failed** | B7 duplicate listings — real. B4 foreign listings — real, known, unruled. |
+
+> ### Correction, 2026-08-16 — the slot breach was the auditor's, not the engine's
+>
+> This document first reported **"7 concurrent names on 2018-01-05 against `Slots = 5`"** and raised
+> the possibility of 140% of NAV deployed. **That was wrong, and the fault was in `verify_run.py`.**
+>
+> D1 counted a name as live on its exit date *and* on its entry date, which double-counts ordinary
+> same-session turnover: §3.5 sequences sells before buys inside the same morning, and
+> `concentrated.py:1603-1605` books the exit and drops the position from `held` on that date. Sell
+> one name at the open, buy another at the open, and a five-slot book momentarily reads as six.
+>
+> Counting positions held at the **close** — which is what `backtest_equity.positions` records and
+> what §3.6 governs — the sweep returns **max 5 concurrent names, engine reported 5.** The engine
+> and its own counter agree, on every one of 4,933 sessions.
+>
+> **The leverage question is therefore answered: no.** The book never held a sixth position, so it
+> never deployed more than 100% of NAV. §3.1's numbers are not inflated by unintended leverage.
+>
+> Two tests now pin both directions — a two-session breach must still FAIL, and same-session
+> turnover must PASS. A check that had only ever been asserted in one direction is how this got in.
 
 ---
 
@@ -47,34 +68,27 @@ result, the tape underneath it is sound, and the money adds up.
 
 ---
 
-## 3. What failed — one defect, wearing three hats
+## 3. What failed
 
 | check | finding |
 | --- | --- |
-| **D1 slot discipline** | trade list shows **7 concurrent names on 2018-01-05**; engine reported max 5 |
+| ~~**D1 slot discipline**~~ | **withdrawn — the check was wrong.** See the correction in §1. Max 5, every session swept. |
 | **B7 one company, one slot** | **7 pairs** held concurrently are one security under two symbols: `DINO/HFC` (100.0% of 1405 shared sessions), `TBSI/TBSIQ` (100.0% of 1675), `BALL/BLL` (99.4% of 1445), `BBBY_old/BBBY` (97.7% of 2273), `VVUS/VVUSQ` (96.1% of 3853), and two more |
 | **B4 listed where we think** | **7 traded names** miss >3% of the benchmark's sessions while active — probable foreign listings: `RXDX` (946/1723), `LDG` (1146/1398), `SGT` (1147/1398), `NBIS` (3164/3829), `AOI` (3463/3811), `MGROS` (920/960) |
 
-### 3.1 D1 and B7 are very likely the same bug
+### 3.1 B7 is the defect that survives, and it is a real one
 
-Seven concurrent tickers in a five-slot book is a violation of §3.6's `Slots = 5`. But B7 says
-seven *pairs* of tickers in this run are one company each. **If two duplicate pairs were live on
-2018-01-05, then "7 names" is 5 companies in 7 tickers** — the slot count was right in companies
-and wrong in symbols.
+Seven pairs, each one company under two symbols, **held at the same time**. `DINO/HFC` agree on
+100.0% of 1,405 shared sessions; `BALL/BLL` on 99.4% of 1,445; `BBBY_old/BBBY` on 97.7% of 2,273.
 
-That is a hypothesis, not a finding, and it is the first thing to test. It matters because the two
-readings have very different consequences:
+The slot count was never breached, which means the harm is not leverage — it is **concentration**.
+When two of five slots hold one company, the book is running **four distinct bets, not five**, at
+1.25× the intended weight in that name. §3.8 already says five vol-adjusted momentum slots are
+~2.5 independent bets; this makes the real number lower still, and unevenly across the record.
 
-- **If it is only miscounting:** the book held 5 companies, and §3.7(3)'s live rule — "hold at most
-  one of a pair; prefer the higher-ADDV line" — already covers it. The modeled numbers are close to
-  honest and the defect is cosmetic.
-- **If the seventh position carried its own capital:** §3.5 sizes every position at NAV ÷ 5, so
-  seven positions is **140% of NAV deployed**. That is unintended leverage, and it inflates both the
-  return and the drawdown. The cash identity passing does not rule this out — it proves the money was
-  *tracked*, not that the exposure was *authorised*.
-
-**The distinguishing test is cheap:** sum position value on 2018-01-05 and divide by NAV. One
-query against the stored trades.
+It also front-runs a live rule. §3.7(3) requires holding at most one of a pair, preferring the
+higher-ADDV line — so the modelled numbers were produced by a book breaking a rule the live engine
+is required to keep. That is a sim-vs-live divergence in the direction that flatters the sim.
 
 ### 3.2 B4 is a known class and is not new
 
@@ -90,9 +104,11 @@ is built; its threshold has never been ruled. §3.2 of the new plan makes this s
 **It does not impeach §3.1's arithmetic.** Nothing in the audit suggests the CAGR, the drawdown or
 the trade count were computed wrongly. They are exactly what the stored run contains.
 
-**It does question what §3.1 is a number *about*.** A twenty-year record produced by a book that
-sometimes held seven positions is not a record of the five-slot engine §3.6 defines, whatever the
-arithmetic. §3.1's own framing — "the engine's modeled record" — presumes the model is the engine.
+**It does question what §3.1 is a number *about*, though far less than first reported.** The slot
+count holds. What does not hold is the assumption that five slots meant five companies: on the
+sessions where a duplicate pair was live, the record is of a four-bet book carrying a double weight,
+which is not the engine §3.6 defines. That is a smaller correction than leverage would have been,
+and it is still a correction.
 
 **The fix is mostly already written and deliberately held back.** Migration 041 excludes
 `SGI/TPX`, `PENG_old/SGH`, `GEFB/GEF-B` and others by exactly this reasoning, and §3.2 of the new
@@ -105,8 +121,8 @@ not in 041 because 041 predates finding them.
 
 ## 5. Recommended sequence
 
-1. **Run the 140%-deployment test** on 2018-01-05. One query. It decides whether this is cosmetic
-   or material, and nothing else should be decided before it.
+1. ~~Run the 140%-deployment test.~~ **Done — and it was the check that was broken, not the
+   engine.** No position was ever bought with money the design did not have.
 2. **Fix the deduplication at the engine, not only in the exclusion table.** An exclusion list is a
    patch that goes stale; `verify_run.py` B7 already detects the general case, so the engine can
    refuse to hold two symbols the scan calls one company.
@@ -115,9 +131,10 @@ not in 041 because 041 predates finding them.
 4. **Then rule on B4's threshold**, which is a separate and smaller question.
 
 **This should complete before §6.5 seeds capital.** §6.4's ten-session shadow compares live output
-against the sim's decision on same-vintage bars; if the sim can hold seven names and the live
-engine holds five, the shadow will diverge by construction and the divergence will be blamed on
-the pipeline.
+against the sim's decision on same-vintage bars. §3.7(3) makes the live engine hold one of a pair;
+the sim held both. Wherever a duplicate pair sits in the top 12 during the shadow, the two will
+disagree by construction — and the divergence will be blamed on the pipeline rather than on the
+exclusion table it actually comes from.
 
 ---
 
@@ -129,3 +146,7 @@ without re-running anything, by re-deriving the numbers from the stored trades i
 the run's summary.
 
 That is the argument for landing it before the engine is rebuilt, not after.
+
+It also got one of them wrong, in the direction that accuses the engine of a defect it did not
+have, and that is worth as much as the finding. A check asserted in only one direction — "does it
+fire?" — will eventually fire on something legal. Both directions are pinned now.

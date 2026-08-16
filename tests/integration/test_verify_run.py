@@ -205,3 +205,44 @@ def test_a_breach_shorter_than_the_old_sampling_stride_is_still_caught(db, migra
     assert str(brief) in text, f"the report must name the session it broke on:\n{text}"
     assert "of NAV at cost" in text, (
         f"a slot breach must report what it cost, not only that it happened:\n{text}")
+
+
+def test_same_session_turnover_is_not_a_slot_breach(db, migrated):
+    """The bug that made D1 accuse the engine of something it never did.
+
+    Run 589 reported "7 concurrent names, engine reported max 5" and it was the CHECK that was
+    wrong. Counting a name as live on its exit date and on its entry date double-counts ordinary
+    turnover: §3.5 sequences sells before buys inside the same morning, and `concentrated.py`
+    books the exit and drops the position from `held` on that same date. Sell one name at the open
+    and buy another at the open and a five-slot book momentarily reads as six.
+
+    So this plants exactly that shape — one name leaving on the session another arrives — and
+    asserts D1 stays quiet. It is the counterpart to the short-breach test above: that one proves
+    the check still fires, this one proves it does not fire on the legal case. A check is only
+    worth having if both hold.
+    """
+    with db.cursor() as cur:
+        rid = _world(cur, lie_about_dd=False, foreign=False, overstuff=False)
+        cur.execute("select d from backtest_equity where run_id=%s order by d", (rid,))
+        days = [r[0] for r in cur.fetchall()]
+        swap = days[120]
+        # OUT on `swap`, and IN on `swap` — the same session, which is a displacement, not a breach
+        cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                       values ('SWAP.US','the replacement','stock','USD','active')""")
+        for i, d in enumerate(days):
+            cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                           values ('SWAP.US',%s,%s,%s,%s,%s,%s,1000000)""",
+                        (d, 20 + i, 23 + i, 19 + i, 22 + i, 22 + i))
+        cur.execute("""insert into backtest_trades (run_id,ticker,entry_date,entry_price,qty,
+                         exit_date,exit_price,exit_reason)
+                       values (%s,'AAA.US',%s,100.0,50,%s,101.0,'rank_band')""",
+                    (rid, days[60], swap))
+        cur.execute("""insert into backtest_trades (run_id,ticker,entry_date,entry_price,qty,
+                         exit_date,exit_price,exit_reason)
+                       values (%s,'SWAP.US',%s,140.0,50,%s,141.0,'rank_band')""",
+                    (rid, swap, days[180]))
+    db.commit()
+    text, _ = _audit(migrated, rid)
+
+    assert _verdict(text, "D1 slot discipline") == "PASS", (
+        f"a sell and a buy on the same session is turnover, not a slot breach:\n{text}")
