@@ -3,7 +3,7 @@
 *This repository is the machine. The plan is the law — it rides along verbatim at [`docs/yuna_plan.md`](docs/yuna_plan.md); where this README and the plan disagree, the plan wins.*
 
 **Three documents, and only three.** [`docs/yuna_plan.md`](docs/yuna_plan.md) is the law.
-[`docs/roadmap-2026-07-31.md`](docs/roadmap-2026-07-31.md) is the build order — what is done, what
+[`docs/roadmap-2026-08-16.md`](docs/roadmap-2026-08-16.md) is the build order — what is done, what
 drifted from the law, what gets built next and in which order. [`docs/learnings.md`](docs/learnings.md)
 is the scar tissue: facts this build paid for, worth reading before touching anything.
 

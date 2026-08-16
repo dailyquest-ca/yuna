@@ -7,7 +7,7 @@ A Python trading agent. **This repository moves real money.** Treat every change
 Read [`README.md`](README.md) first, then the three documents it names:
 
 - [`docs/yuna_plan.md`](docs/yuna_plan.md) — **the law.** Where anything else disagrees with the plan, the plan wins, including this file.
-- [`docs/roadmap-2026-07-31.md`](docs/roadmap-2026-07-31.md) — build order: what is done, what drifted, what comes next.
+- [`docs/roadmap-2026-08-16.md`](docs/roadmap-2026-08-16.md) — build order: what is done, what drifted, what comes next. (The 07-31 roadmap is superseded — it plans the retired engine.)
 - [`docs/learnings.md`](docs/learnings.md) — scar tissue. Facts this build paid for. **Read before touching anything.**
 
 Nothing joins the pipeline schedule without a plan edit. If a change would alter what runs when, that is a plan change first and a code change second.
