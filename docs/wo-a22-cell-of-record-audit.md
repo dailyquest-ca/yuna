@@ -332,3 +332,40 @@ The tape has **three** defect shapes reaching the book, not four:
 
 No reused tickers. **The sub-windows can run without fear of re-deriving them afterwards**, which
 was the only reason this sweep came first.
+
+---
+
+## 10. The corrected engine, all three windows
+
+| run | window | sessions | trades | CAGR | max DD | audit |
+| --- | --- | --- | --- | --- | --- | --- |
+| 617 | 2007-01-05 → 2017-08-14 | 2,671 | 425 | **+11.3542%** | −59.9318% | 13/16 |
+| 619 | 2017-08-16 → 2026-08-14 | 2,261 | 329 | **+47.0491%** | −55.2204% | **15/16 — B7 clean** |
+| 613 | 2007-01-05 → 2026-08-14 | 4,933 | 754 | **+26.7504%** | −59.0493% | 14/16 |
+
+Run 619 is the cleanest audit any run in this programme has produced: **B7 passes outright** — no
+two concurrently held names share a series — and the only failure left is B4, whose six names all
+now read `longest gap ≤ 5: scattered`, i.e. patchy history rather than a foreign calendar.
+
+### 10.1 What is NOT yet established, and must be before §3.1 is amended
+
+**Only the full-window control has been verified to reproduce §3.1.** Run 612 matched run 589 to
+the digit — 4,933 sessions, 752 trades, +26.5377%, −61.1937% — which is what makes +26.7504% a
+quotable replacement for it.
+
+The two sub-window controls (runs 616 and 618) have not been read. Until they are, the deltas
+against §3.1's **+10.66%** and **+51.28%** cannot be stated, and the second half in particular
+needs it: **+47.05% is 4.2 points BELOW the +51.28% in the plan**, and the direction is opposite to
+the other two windows.
+
+Three explanations are live and they have not been separated:
+
+1. the window is not the same one §3.1's figure came from — §3.1's second half is 2,260 sessions
+   from 2017-08-15; this is 2,261 from 2017-08-16;
+2. the dedupe rule genuinely costs return in that decade, which would be a real finding;
+3. the sub-windows do not compose with the full window under a gate — the trap WO-A17 §3.1 and
+   WO-A20 were both caught by, because the parked asset differs across windows and under a gate the
+   park IS the return for every session the book is off.
+
+**Read runs 616 and 618 before drafting the amendment.** Quoting a corrected number against an
+uncorrected control is precisely the error this document exists to have caught twice already.
