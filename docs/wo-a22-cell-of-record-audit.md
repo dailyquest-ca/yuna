@@ -130,6 +130,27 @@ not in 041 because 041 predates finding them.
    beside the new ones so the size of the correction is on the record.
 4. **Then rule on B4's threshold**, which is a separate and smaller question.
 
+### 5.1 Open for ruling — §3.7(3)'s "prefer the higher-ADDV line"
+
+The engine now holds at most one of a pair. It does **not** yet implement the preference, and the
+clause has two readings that differ in what they cost:
+
+| reading | behaviour | cost |
+| --- | --- | --- |
+| **selection** | when neither line is held and both are eligible, buy the higher-ADDV one | none — it only breaks a tie the rank already had to break |
+| **replacement** | if a held line's twin has higher ADDV, sell the held one and buy the twin | a real round trip on a liquidity tiebreak, for no change in exposure |
+
+Today the engine does neither: it keeps whichever copy the rank reached first. That is
+deterministic — the sort is stable — but it is not what §3.7(3) says.
+
+**This is not resolved here.** §0.2 sends ambiguity to Zak rather than to improvisation, and the
+replacement reading generates turnover the plan nowhere else asks for. The selection reading is the
+one I would recommend, and it is a one-line change once ruled.
+
+Worth noting the practical size of it: `DINO/HFC` and `BALL/BLL` are renames where the dead line
+stops printing, so the live line wins on ADDV anyway and the two readings agree. The clause only
+bites on a genuine dual listing where both lines keep trading.
+
 **This should complete before §6.5 seeds capital.** §6.4's ten-session shadow compares live output
 against the sim's decision on same-vintage bars. §3.7(3) makes the live engine hold one of a pair;
 the sim held both. Wherever a duplicate pair sits in the top 12 during the shadow, the two will
