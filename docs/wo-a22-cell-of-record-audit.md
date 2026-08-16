@@ -210,3 +210,30 @@ That is the argument for landing it before the engine is rebuilt, not after.
 It also got one of them wrong, in the direction that accuses the engine of a defect it did not
 have, and that is worth as much as the finding. A check asserted in only one direction — "does it
 fire?" — will eventually fire on something legal. Both directions are pinned now.
+
+---
+
+## 7. Zak's rulings, 2026-08-16
+
+| # | ruling | consequence |
+| --- | --- | --- |
+| **1** | §3.7(3) means **selection only**, not replacement. Where one line of a pair is already held, **keep it**. | **No code change.** The engine already keeps the incumbent, so today's behaviour is now the law's behaviour. §5.1 is closed. |
+| **2** | **Adopt the corrected cell** (`dedupe_pairs=True`) as the cell of record. | §3's cell-of-record line and code stamp change once the sub-windows are in. |
+| **3** | **Adopt the corrected run's numbers** for §3.1. | Full 20yr measured: +26.7504% / −59.0493%. Both sub-windows still required — §3.1 is quoted as three or none. |
+| **4** | **Exclude the foreign listings.** *"We can only trade on the US stock market, don't care what name someone has or currency if it seems like it's US."* | Data hygiene under §3.2. See §7.1 — Zak also proposed a better mechanism than the participation threshold. |
+| **5** | **Re-verify migration 041 and apply what survives.** | 041 is never dispatched. A successor migration carries only rows re-checked against the current tape, plus the six pairs the audit found. |
+
+### 7.1 The exchange filter — Zak's question, and why it is the better instrument
+
+> *"Can't we just use like… NYSE and NASDAQ as a filter?"*
+
+**Yes, and it is strictly better than what was proposed.** The participation gate infers "this is not a US listing" from a name missing too much of SPY's calendar — a statistical proxy, needing a threshold nobody has ruled, and carrying a false-positive risk against any real US stock with a long halt.
+
+The exchange is a **fact we already store**: `universe.exchange` has existed since `001_core.sql` and `ingest.py` writes it. A filter on it needs no threshold and cannot mis-fire on a halted US name.
+
+Two things to establish before writing it, and neither is a ruling:
+
+1. **What `universe.exchange` actually holds for the seven offenders.** The vendor got `currency` wrong on exactly these names — it called roubles USD — so its `exchange` value has to be checked rather than trusted. `MGROS` does not resolve to a US listing in EODHD's own search today (nearest match is Jakarta); `PLZL` does not resolve at all.
+2. **Which exchange codes count as "the US stock market".** NYSE and NASDAQ are certain. `NYSE ARCA` and `NYSE MKT` are the same market and hold real ETFs and small caps. **OTC / PINK is the live question** — US-quoted, but thinly, and it is where a delisted foreign line would most plausibly sit. That list is a plan constant and needs Zak's word once the census is in.
+
+**Recommendation:** census first — `select exchange, count(*) from universe where kind='stock' group by 1` — then a filter on an explicit allow-list, with the participation gate kept as a **detector** rather than a gate. It is the thing that found this class in the first place, and `verify_run.py` B4 should keep firing on anything the exchange filter lets through.
