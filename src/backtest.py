@@ -1,491 +1,2589 @@
-"""backtest — Phase E. Run the momentum sleeve forward over our own bar history.
+"""backtest — the momentum sleeve replayed under the law, using the law's own code.
 
-The plan is explicit (§4.8) that only the momentum side can be tested honestly: it needs
-adjusted prices and nothing else. The compounder side cannot, because we hold exactly one
-fundamentals snapshot per name and using today's filing at a past date is the first of the
-two classic sins. So this simulates L0 → L1-M → L2 → L3 for momentum only, and the
-compounder pipeline stays forward-validated by the shadow book.
+This job is a **driver**, not a second implementation. Every rule it applies is a call into
+`signals.py`, the same module `arming.py` calls tonight: one market gate, one trend template, one
+base detector, one confirmation state machine, one stop ladder, one sizing formula. Before this
+rewrite the backtest re-derived all of them by hand, and the private copy had drifted in nine
+places — four MCN setup sub-scores against the law's three, pyramid adds at +2.5%/+4.5% against
++2%/+4%, no add ceiling, no MCN floor, a `volume unconfirmed` exit the plan deleted, and no
+blackout at all. 211 of run 5's 296 trades were entries §3.2 forbids outright. A backtest that
+measures a sincere restatement of the rules measures nothing.
 
-Known biases, stated up front rather than buried in the result:
+What it models, per the 2026-08-10 rulings:
 
-  * SURVIVORSHIP. The L0 census is today's listings. Names that delisted inside the window
-    are absent, so the tape we test on is the tape that survived. This flatters everything.
-  * NO M4. Point-in-time quarterly EPS is not stored, so the earnings-acceleration gate is
-    off and L1-M is wider here than it would be live.
-  * NO EARNINGS BLACKOUT. Historical report dates are not stored either, so entries that
-    §3.3 would have blocked are taken here.
-  * WARM-UP. The trend template needs 221 bars and the 52-week window needs 252, so the
-    first tradeable day is ~280 bars in — roughly the last two years of a three-year window.
-  * FILLS are modelled, not observed: a stop-limit fills at the pivot unless the day opened
-    above it, in which case it fills at the open, and not at all above the limit. Slippage
-    beyond that, and FX conversion cost, are not charged.
+  * **USD-native.** US listings only; no FX translation and no conversion fee. NAV starts in USD.
+  * **VOO is the benchmark**, on adjusted closes — total return, dividends included. The sleeve's
+    own P&L is price-only, so the comparison is biased *against* us, which is the safe direction;
+    the magnitude is reported as `stats.dividend_bps` rather than left to the imagination.
+  * **Delisted names are retained.** L0 membership is derived from bars at each date, never from
+    today's `universe.status`, so a name that died in 2019 is in the census until the day its bars
+    stop — and a position holding it exits on the `delisted` rule instead of being marked forever.
+  * **Costs.** Half-spread by ADDV bucket, per side; commission zero (Wealthsimple). Gross and net
+    both recorded on every trade.
+  * **Fixed 280-bar tails.** No rule reads deeper than 266 bars, so the driver hands each call a
+    280-bar window and the cost per rank date is constant in the length of the test.
+    `tests/test_tail_equivalence.py` pins that the tail and the full series agree.
 
-Everything else — M1's latch, the trend template, the base scan, MCN with its t−10 windows,
-the pyramid, the 8% cap, the ratchet, the euphoria rule, the sleeve ceiling — is the same
-arithmetic the live jobs run.
+Biases that remain, stated on every run rather than buried: the vendor serves the current version
+of a past statement, so a restatement is seen earlier than the market saw it; industry mappings are
+today's; and the L0 census is reconstructed from bars rather than from a stored point-in-time
+listing, so a name whose bars we never pulled is still absent.
 """
-import os, sys, json, math, datetime as dt
+import os, sys, json, bisect, hashlib, pathlib, time, datetime as dt
 import numpy as np
 import pandas as pd
-import psycopg
-from db import connect, config, dry, Heartbeat
+from db import connect, config, config_digest, dry, Heartbeat
+import signals as sg
 
-START_NAV = float(os.environ.get("START_NAV", "200754.38"))
-LABEL = os.environ.get("LABEL", "momentum v1")
-WARMUP = 280
+START_NAV = float(os.environ.get("START_NAV", "200000"))       # USD (ruled 2026-08-10)
+LABEL = os.environ.get("LABEL", "law-v0")
+VARIANT = os.environ.get("VARIANT", "law-v0")
+LAW_STAMP = os.environ.get("LAW_STAMP", "2026-08-09")
+START_DATE = os.environ.get("START_DATE") or None
+END_DATE = os.environ.get("END_DATE") or None
+HAIR_TRIGGER_PENDING = os.environ.get("HAIR_TRIGGER_PENDING", "false").lower() in ("1", "true", "yes")
+HYPOTHESIS = os.environ.get("HYPOTHESIS", "").strip()
 
-# ---- variant knobs. Defaults reproduce the plan exactly; every deviation is a hypothesis
-# about the friction the baseline exposed, not a change to §3.2, which is FINAL.
-VOL_MODE = os.environ.get("VOL_MODE", "fill_then_exit")   # fill_then_exit (§5.1) | confirm_first
-BREAKEVEN_STEP = int(os.environ.get("BREAKEVEN_STEP", "3"))   # §3.2: breakeven at full size
-MCN_EXIT = float(os.environ.get("MCN_EXIT", "55"))            # §3.3 exit-review threshold
-MIN_HOLD = int(os.environ.get("MIN_HOLD_DAYS", "0"))          # §1: one-week intended hold
+# The 2026-08-10 hypothesis set. Every default below is the law; a variant is opt-in, recorded in
+# `params.hypothesis`, and changes nothing about law-v0 — which stays the baseline until a run
+# earns the change. The presets stage the way the changes depend on each other: risk widening is
+# pointless while unconfirmed breakouts are still being bought, and pressing is dangerous until
+# expectancy turns.
+LAW = dict(park_idle=False,            # K1  — idle capital sits in cash, earning nothing
+           cash_target=None,           # K2  — the cash fraction the park rebalances toward
+           park_tilt=None,             # K3  — the fraction of the PARK held in the momentum ETF
+                                       #       rather than the core index. The park is where most
+                                       #       of the account actually lives (A1V ran 74% parked),
+                                       #       so its vehicle decides more of the return than the
+                                       #       sleeve does: E4 measured VOO at 15.50% CAGR against
+                                       #       the 80/20 VOO/SPMO blend at 16.53% over the same
+                                       #       window. None = the core index alone (A1V's park).
+           # A2 (E-series E3). All None/absent under the law — §3.2 sizes on conviction, stops on
+           # the contraction low, and enters on a pivot. A2 replaces all three and says so.
+           entry_new_high=None,        # A2a — enter on an N-session high instead of a base pivot
+           atr_window=None,            # A2b — ATR window for the initial stop (A2: 20, law: 14)
+           risk_per_trade=None,        # A2c — fixed fraction of NAV risked to the stop
+           chandelier_mult=None,       # A2d — trail at highest-close less N ATRs
+           chandelier_atr_window=None, # A2e — ATR window for that trail (A2: 22)
+           mq_vol_divisor=True,        # S1  — momentum quality divided by volatility
+           mcn_drop_atr=False,         # S2  — ATR-tightness inside the ranking
+           m4_swing=False,             # S3  — loss-to-profit swing scores no growth rate
+           confirm_before_entry=False, # E1  — mechanical fill at the pivot, volume judged after
+           atr_stop_mult=None,         # R1  — fixed 8% cap, floored at the contraction low
+           max_stop=0.08,
+           breakeven_r=None,           # R2  — breakeven at full pyramid size
+           breakeven=True,             # B1  — a breakeven rung exists at all
+           breakeven_on_full_size=True,# B4  — full pyramid size trips it, per §3.2
+           breakeven_giveback=0.0,     # B5  — how much of the initial risk the rung leaves under
+           euphoria=True,              # B2  — >2sd above the 50-day tightens the trail to 5%
+           trail_from=0.15, trail=0.10,# R3  — 10% trail from +15%
+           press_on_next_base=False,   # P1  — a stalled pyramid only ever exits
+           press_grace=20,             #       sessions the next base has to show up in
+           stagnation_days=None,       # H4  — resolve a position that stops making new highs
+           template_exit=True,         # T1  — sell when M2 stops passing
+           entry_fraction=0.5,         # Z1  — §3.2's first tranche: half now, the rest on the way
+           band_hi=None,               # Z2  — the position ceiling, as a fraction of NAV
+           budget_lo=None, budget_hi=None,  #  — risk budget, ordinary / full conviction
+           sleeve_cap_pct=None,        # Z3  — the sleeve's ceiling, as a fraction of NAV
+           trim_at=None,               # M1  — unrealised gains at which to sell a slice
+           trim_frac=0.25,             #     — how much of the full position each slice is
+           runner_immunity=False,      #     — what is left after a trim rides on the stop alone
+           stop_ladder=True,           # §3.2 — the breakeven rung, the 10% trail from +15% and
+                                       #        the euphoria tightening. An arm carrying its own
+                                       #        stop regime declares this OFF; the bypass used to
+                                       #        key on `chandelier_mult` alone, so A3 — which has
+                                       #        a level stop and no trail — silently ran the
+                                       #        law's 10% trail behind every position and clipped
+                                       #        each winner 10% off its high (runs 65 and 67:
+                                       #        ride 39% and 40% against A2's 80%).
+           score_exit=True,            # §3.2 — sell when MCN falls below the hold floor. A2/A3
+           earnings_exit=True,         #      — the earnings wall; and the §3.3 crash-protocol
+           gate_off_exit=True,         #        exit. All three are the law; an arm that replaces
+                                       #        its exits declares them OFF, and the conformance
+                                       #        table names every suppressed one. Run 58: these
+                                       #        three plus the template closed 79% of an arm
+                                       #        whose spec names none of them — the `forever`
+                                       #        flag never engaged because it is conditioned on
+                                       #        completing a trim ladder A2 does not carry.
+           heat_cap=None,              # H1  — total open risk, as a fraction of NAV
+           pyramid_spacing=None,       # A1  — average in: tranche spacing, equal thirds
+           pyramid_tranches=3,
+           strength_at=None,           # A2  — gain at which a position has "proven strength"
+           strength_trail=None,        #     — the trail it earns by proving it
+           forever=False,              # A3  — past the last rung, only the financials can sell it
+           screen=None,                # C1  — 'deep_recovery' replaces M2+M3 with the census screen
+           require_m4=True,            #     — M4 has a lift of 0.76; a variant may decline it
+           screen_exit=False,          # C2  — sell when the screen stops passing (no longer cheap)
+           screen_exit_min_gain=None,  #     — but only from profit, not when the 52w high ages out
+           dead_needs_worsening=False, # C3  — a forever hold needs the loss DEEPENING, not merely
+                                       #       negative: 41% of winners are unprofitable at entry
+           momentum_exit_r3=None,      # C4  — sell when the trailing quarter stops being up
+           runner_trail=None,          # M2  — the trail the runner rides on, if not the position's
+           runner_no_euphoria=False,   #     — whether the runner is exempt from the 5% tightening
+           depth_atr_mult=None,        # D1  — base depth allowance scaled to the name's own ATR
+           off_high_atr_mult=None,     # D2  — 52-week-high tolerance scaled the same way
+           min_base_age=25,            # D3  — sessions a base runs before its pivot is tradeable
+           reentry_window=None,        # X1  — buy back on a new N-session closing high
+           reentry_cooloff=5,          #       sessions after an exit before a name is buyable
+           exclude_names=(),           # E1  — names the run refuses to enter, through any door.
+                                       #       (E-series E1, the Micron question — not 2026-08-10's
+                                       #       E1 label on `confirm_before_entry` above.)
+           slot_order=None,            # E3  — what orders competing candidates into scarce slots.
+                                       #       None = MCN descending (§3.2's queue, the law).
+                                       #       Zak's 2026-08-13 ruling for A2: 'breakout_fcfs' —
+                                       #       each day's fresh signals claim free slots in ADDV
+                                       #       order, so across days the earliest breakout wins.
+                                       #       'trend_vol' is the pre-registered alternative arm:
+                                       #       calmest trend (lowest ATR fraction) first.
+                                       #       'vol_desc' is A3's measured centre: LOUDEST first —
+                                       #       the push study's completion lift is 1.74x in the
+                                       #       top volatility quartile against 0.59x in the
+                                       #       bottom, and per-episode EV runs +0.91% vs +0.16%.
+           level_stop_sessions=None,   # A3c — how long the level stop governs before the trail
+                                       #       takes over. The handover is TIME and it is
+                                       #       measured: of breakouts still above their level at
+                                       #       session 10, 19.3% complete against a 3.86% base —
+                                       #       because 84% of failures are gone by then (54,202
+                                       #       -> 8,546) while 94% of pushes are still alive
+                                       #       (2,178 -> 2,038). None = the level governs for the
+                                       #       whole life of the position (A3b).
+           level_stop=False,           # A3  — the breakout level IS the stop: exit on a CLOSE
+                                       #       below the entry level, acted next open. The push
+                                       #       ledger's own structure — 93% of breakouts die
+                                       #       within ~10 sessions at -1% to -3%, and the 4% that
+                                       #       run +50% never close below the level on the way.
+           size_nav_frac=None,         # A3  — equal weight, one Nth of NAV per slot. A level
+                                       #       stop has no stop distance to size from, and M1's
+                                       #       lesson (conviction chose size, the stop chose the
+                                       #       loss) is honored by having no size choice at all.
+           vol_target=None,            # A3  — Barroso-Santa-Clara governor (WO-17, revived by
+                                       #       WO-A3 §3): entry sizes scale by target/realized
+           vol_window=126,             #       account vol over the trailing 6 months. 12% and
+                                       #       126 sessions are the paper's own constants.
+           entry_mcn_floor=True,       #     — §3.2's "MCN < 70 never tickets". E3's door is
+                                       #       "breakout + M2" and names no score, so A2 switches
+                                       #       the floor off; run 56 logged 752,675 refusals of
+                                       #       candidates the spec's own text admits.
+           max_names=None)             # P2  — from config (4)
+
+PRESETS = {
+    # H1 · selection + entry. Does expectancy cross zero once we stop screening for quiet names
+    # and stop paying to discover that a breakout had no volume?
+    "h1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True),
+    # H2 · H1 plus room to breathe. Does the tail show up once the stop stops firing first?
+    # The multiplier is 5, not the conventional 2.5: ATR(14) on our own names runs 2.86% of price
+    # at the median, so 2.5x reproduces the law's 7.57% stop almost exactly and would have tested
+    # nothing. 5x gives ~14% on a median name and hits the 20% cap on the volatile ones — which is
+    # the range that survives a 125-session hold.
+    "h2": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25),
+    # H3 · H2 plus pressing. Does adding to what already works, across more names, pay?
+    "h3": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               press_on_next_base=True, max_names=10),
+    # H4 · H2 plus the profit-taking the stall clock was doing by accident. The grid showed E1
+    # deletes law-v0's only profitable bucket as a side effect of completing the pyramid; this
+    # puts it back on a rule that does not depend on position size, and keeps runners because a
+    # name still making new highs never triggers.
+    "h4": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20),
+    # H5 · H4 plus eligibility scaled to how much the name actually moves. Everything above this
+    # line changes what we do with a position; this changes which names can produce one at all.
+    # The funnel decomposition found the winners were excluded before ranking ever saw them: a name
+    # that produces a +100% year corrects 42% on the way, so §3.2's flat 25% depth clause gives it
+    # a valid base on 5.9% of days against 29.3% at 40%. The multiplier is 8, chosen against the
+    # measured median ATR of 2.86%: a median name gets 8 x 2.86% = 22.9%, below the 25% floor, so
+    # it keeps the law exactly, and only a genuinely volatile name is given more.
+    #
+    # `min_base_age` is in here to close Zak's question about the 25-session minimum rather than
+    # because it is expected to matter — measured, shortening it to 12 moves the winners' base
+    # frequency from 5.9% to 6.8% while depth moves it to 29.3%. Depth is worth twenty-three
+    # points and base length is worth one. If H5 wins, ablate the base age first.
+    "h5": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20,
+               depth_atr_mult=8.0, off_high_atr_mult=8.0, min_base_age=12),
+    # H6 · H5 plus a way back in. §3.2 has none: once we exit, the name needs a fresh valid base,
+    # which for something correcting 42% takes months it does not have — and of 200 stopped-out
+    # positions, 96% traded back above the exit inside 60 days and the average best subsequent move
+    # was +26.8%. The trigger is deliberately NOT our exit price, which is our history rather than
+    # the stock's: it is a new 20-session closing high, the market's own statement that the move
+    # resumed, on a name that still passes M2, M4 and the MCN floor.
+    "h6": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20,
+               depth_atr_mult=8.0, off_high_atr_mult=8.0, min_base_age=12,
+               reentry_window=20, reentry_cooloff=5),
+    # H5 came back at -1.79% against H4's +0.04% — 150 extra trades, a worse average loss, and
+    # **the identical best trade**, so the widening produced no new right tail at all. It bundles
+    # three changes, and the pre-run measurement only ever tested them on the numerator (do the
+    # winners get a valid base?) and never on the denominator (how much junk does each admit?).
+    # These four ablate H5 one clause at a time, each against H4 rather than against H5.
+    "d1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, depth_atr_mult=8.0),
+    "d2": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, off_high_atr_mult=8.0),
+    "d3": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, min_base_age=12),
+    # X1 on the best base rather than on the worst. H6 measures re-entry on top of a widening that
+    # lost money; this measures it on H4, which is the run we would actually adopt.
+    "x1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, reentry_window=20, reentry_cooloff=5),
+    # T1 · H4 without the trend-template exit. It is H4's worst per-trade bucket — 29 exits at
+    # -5.48% for -$8,272 — and §2's forward returns showed twice that the names it sells go on to
+    # beat the market. Unlike every other variant this DELETES a §3.2 rule rather than widening
+    # one, so `template_exit` is declared in the conformance table: a run that silently stopped
+    # enforcing a clause is the exact failure that table exists to catch.
+    #
+    # Nothing replaces it yet. The question this answers is what the clause costs, not what should
+    # stand in its place — a position still has the volatility stop, the 25% trail from +30%, the
+    # MCN floor and the 20-session stagnation clock between it and forever.
+    "t1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, template_exit=False),
+    # ---- the duration set. Five variants have now tried to put MORE names in the book and every
+    # one lost money, while the only profitable bucket in the entire grid is `stagnant` — the one
+    # that holds 36 sessions. Average hold across every run is 10-13 sessions. A +100% year takes
+    # 250. So these three stop asking what we buy and ask what cuts the hold short.
+    #
+    # B1 · no breakeven rung. 109 of H4's 252 exits are `stop`, at 9.4 sessions and -0.49% — the
+    # signature of a position that earned +1R, ratcheted to breakeven, and got scratched by an
+    # ordinary pullback. Zak: "allow a little volatility as the buy gets moving."
+    "b1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven=False),
+    # B2 · no euphoria tightening. §3.2 cuts the trail to 5% when a close sits >2sd above its own
+    # 50-day — which is the *definition* of the names we are trying to catch. A stock in the leg
+    # that makes a +100% year is euphoric by this test for weeks at a time, and a 5% trail on a
+    # name whose ATR is 5% exits on an ordinary two-day pullback.
+    "b2": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, euphoria=False),
+    # B3 · give the stall clock twice as long. `stagnant` is the grid's only profit centre (+17.20%
+    # over 36.3 sessions) and it is a profit-*taking* rule, so the obvious question is whether it
+    # is taking profit too early on the names that were still going.
+    "b3": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=40),
+    # ---- B1 was the most informative run in the grid and it cut both ways. Deleting the
+    # breakeven rung DOUBLED the average hold (11.9 -> 23.9 sessions) and more than doubled the
+    # win rate (16.7% -> 37.2%), so the diagnosis was right: that rung is what caps the hold. But
+    # the average loss went -2.83% -> -7.60%, because every loser then runs the full volatility
+    # stop, and that swamped the gain (payoff 4.36:1 -> 1.42:1).
+    #
+    # The rung is not the problem. A rung sitting *exactly at cost* is: price oscillates around
+    # entry, so a stop parked there is a magnet — 38 of H4's 43 `gap` exits are shallow scratches
+    # 6.4 sessions in, and 109 `stop` exits average -0.49% at 9.4 sessions. Both are this.
+    # B4 and B5 interpolate between H4 and B1 from the two directions that exist.
+    #
+    # B4 · earn it first. Keep the rung, drop the sizing trigger, and require 3x the initial risk
+    # before the stop moves to cost. §3.2 trips it on full pyramid size, which under E1 nearly
+    # every position reaches — so the rung currently fires on positions that have earned nothing.
+    "b4": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=3.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_on_full_size=False),
+    # B5 · halve the risk instead of erasing it. Same triggers as H4, but the rung sits half the
+    # initial risk under cost rather than on it, so an ordinary pullback through entry costs
+    # nothing and the downside is still cut by half.
+    "b5": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5),
+    # ---- the capital regime, ruled by Zak 2026-08-11. Thirteen runs established that no rule
+    # change closes the gap to VOO, because the sleeve is ~90% in cash: §3.2's risk budget is
+    # 0.7-0.9% of NAV and the position band tops out at 12%, so against a 20% volatility stop a
+    # position is 3.5-6.4% of NAV and the book averages 1.3-1.8 names. VOO is 100% invested.
+    #
+    # "to be fair we should say 100k USD is the amount and we can use all of it... with up to 25%
+    # on high conviction... and that's vs. 100% in VOO." So the sleeve gets the whole account: the
+    # budgets are raised until a full-conviction name reaches the 25% ceiling against its own
+    # stop, the sleeve cap goes to 100%, and E1's confirmation makes §3.2's half-now first tranche
+    # a hedge against a risk that no longer exists.
+    #
+    # `breakeven_on_full_size=False` is forced by `entry_fraction=1.0`, not chosen. A position that
+    # opens full is marked step 3, which trips §3.2's "breakeven at full pyramid size" on its FIRST
+    # session — so B5's rung, whose whole value is that it sits below cost and only after the
+    # position has earned +1R, would instead become an initial stop of half the intended width
+    # applied before the position has earned anything. Run 33 is what that costs: the `stop` bucket
+    # alone was -$81,536 of a -$30,036 total, on 95 exits at -3.48% against an intended ~10%.
+    "z1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0, max_names=5, breakeven_on_full_size=False),
+    # M1 · Zak's own ladder, on top of the capital regime: sell a quarter at +50%, a quarter at
+    # +100%, and let the remaining half ride "until the stock completely dies". The rungs are
+    # resting limit sells at avg cost x (1 + level). The ride is implemented as immunity from the
+    # housekeeping exits — template, MCN floor, stall clock, stagnation clock — since those are
+    # how a position that is merely *resting* gets closed, and a trimmed position is not resting.
+    # It keeps its stop, the gate, and delisting. That reading of "completely dies" is an
+    # assumption, and it is the first thing to revisit if the runner bucket bleeds.
+    "m1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0, max_names=5, breakeven_on_full_size=False,
+               trim_at=(0.50, 1.00), trim_frac=0.25, runner_immunity=True),
+    # M2 · let the runner actually run. Run 33's ladder worked exactly as Zak described it — MU
+    # trimmed at +49.9% and +99.9%, AVAV at +49.8% and +99.7% — and then **all three runners
+    # stopped out two to four sessions after their second trim**: MU at +91.7%, AVAV at +102.7%,
+    # CAMT at +9.9%. Not the housekeeping exits, which runner immunity had already switched off.
+    # The euphoria rung. A name up 100% is by construction far above its own 50-day, so the trail
+    # cuts to 5%, and 5% is one ordinary session for it.
+    #
+    # B2 showed that tightening pays on an ordinary position and it stays on for those. A runner is
+    # different in kind: two rungs of profit are already banked, so the question is no longer how
+    # much of this gain survives but how far the name can go. It rides a 35% trail and is exempt
+    # from the tightening.
+    "m2": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0, max_names=5, breakeven_on_full_size=False,
+               trim_at=(0.50, 1.00), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True),
+    # M3 · M2 with a cap on total open risk. Run 34 is the argument: average trade **+1.27%**,
+    # win rate 39.6%, average hold 24.5 sessions — a real edge by every per-trade measure — and a
+    # **-53.5% drawdown**. That gap is not a bad strategy, it is over-betting a good one. The
+    # sleeve cap limits how much is invested and nothing limited how much could be lost: a 25%
+    # position behind a 20% stop risks 5% of NAV, and the book holds four or five of them.
+    #
+    # 6% is one full-conviction name's worth of risk plus change — so the book can carry one 25%
+    # position at full stop width, or several whose stops have already ratcheted up. It makes the
+    # heat, not the cash, the binding constraint, which is the right way round.
+    "m3": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0, max_names=5, breakeven_on_full_size=False,
+               trim_at=(0.50, 1.00), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True, heat_cap=0.06),
+    # ---- C · the census screen. §9 of the findings: M3's depth clause has a lift of 0.04 against
+    # the population that actually produces 70% moves, M2's off-high clause 0.64, the moving-average
+    # stack 0.97, and M4 0.76 — every gate anti-predictive, in all ten years, on hit rate and on
+    # forward return. The set they admit returned +1.12% per six months, which is what nineteen
+    # runs produced from it. C1 replaces M2 and M3 with the four census conditions, drops M4, and
+    # enters on a new 20-session closing high because a name 50% off its low has no §3.2 base.
+    #
+    # Everything else is A1's machinery, which the drawdown table says should finally fit: on this
+    # population a 20% stop removes 47% of the losers and 20% of the winners, where on §3.2's it
+    # fired on the winners first.
+    "c1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.30, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0 / 3.0, pyramid_spacing=0.05, pyramid_tranches=3,
+               max_names=5, breakeven_on_full_size=False, heat_cap=0.06,
+               trim_at=(0.35, 0.75), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True,
+               strength_at=0.25, strength_trail=0.40,
+               screen="deep_recovery", require_m4=False),
+    # C2 · the exit test. C1 sold on the screen (accidentally) and made +$4,624; C1b never did and
+    # lost $8,459. The screen failing is real information — but it fires for two different reasons,
+    # and only one of them is a reason to sell. Take the money when the position has actually made
+    # some; ignore it when the 52-week high merely rolled out of the window.
+    "c2": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.30, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0 / 3.0, pyramid_spacing=0.05, pyramid_tranches=3,
+               max_names=5, breakeven_on_full_size=False, heat_cap=0.06,
+               trim_at=(0.35, 0.75), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True,
+               strength_at=0.25, strength_trail=0.40,
+               screen="deep_recovery", require_m4=False,
+               screen_exit=True, screen_exit_min_gain=0.10, dead_needs_worsening=True),
+    # C3 · the control. Same, with no gain requirement — this is what run 39 did by accident, now
+    # done on purpose, so the min-gain gate can be priced against it rather than against a bug.
+    "c3": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.30, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0 / 3.0, pyramid_spacing=0.05, pyramid_tranches=3,
+               max_names=5, breakeven_on_full_size=False, heat_cap=0.06,
+               trim_at=(0.35, 0.75), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True,
+               strength_at=0.25, strength_trail=0.40,
+               screen="deep_recovery", require_m4=False,
+               screen_exit=True, screen_exit_min_gain=None, dead_needs_worsening=True),
+    # C4 · the screen exit, reduced to the only clause that carries information. No gain gate, no
+    # dependence on a 252-day window rolling over: sell when the trailing quarter stops being up.
+    "c4": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.30, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               entry_fraction=1.0 / 3.0, pyramid_spacing=0.05, pyramid_tranches=3,
+               max_names=5, breakeven_on_full_size=False, heat_cap=0.06,
+               trim_at=(0.35, 0.75), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True,
+               strength_at=0.25, strength_trail=0.40,
+               screen="deep_recovery", require_m4=False,
+               dead_needs_worsening=True, momentum_exit_r3=0.10),
+    # ---- A · Zak's compounder reading of the momentum sleeve (2026-08-11): "what if our biggest
+    # winners that made it to +100%... we never sold. We just kept them long-term?"
+    #
+    # Four changes, and the last one is a change of kind rather than of degree.
+    #   A1  average in over three equal tranches 5% apart, against §3.2's 50/25/25 at +0/+2/+4%
+    #   A2  proven strength (+25%) earns a 40% trail and exemption from the euphoria cut
+    #   A3  trim rungs move in, to +35% and +75%, so more names reach them
+    #   A4  past the last rung the position stops being a trade: every §3.2 exit is a PRICE exit,
+    #       and the premise is that price no longer speaks, so the stop, the trail, the template,
+    #       the score, the clocks and the market gate all go. Only `profitability_dead` — two
+    #       consecutive reported quarters at or below zero — and delisting can sell it.
+    #
+    # A4 is the one to watch. It removes the crash protocol from a live position, so a forever hold
+    # carries a 2008-shaped drawdown by construction. That is the trade Zak is proposing and the
+    # measurement is whether the compounding beats it.
+    "a1": dict(mq_vol_divisor=False, mcn_drop_atr=True, m4_swing=True, confirm_before_entry=True,
+               atr_stop_mult=5.0, max_stop=0.20, breakeven_r=1.0, trail_from=0.30, trail=0.25,
+               stagnation_days=20, breakeven_giveback=0.5,
+               budget_lo=0.025, budget_hi=0.05, band_hi=0.25, sleeve_cap_pct=1.0,
+               # a third at the breakout and a third at each of +5% and +10% — averaging in is the
+               # point, so this cannot open full the way z1/m1..m3 do
+               entry_fraction=1.0 / 3.0, pyramid_spacing=0.05, pyramid_tranches=3,
+               max_names=5, breakeven_on_full_size=False, heat_cap=0.06,
+               trim_at=(0.35, 0.75), trim_frac=0.25, runner_immunity=True,
+               runner_trail=0.35, runner_no_euphoria=True,
+               strength_at=0.25, strength_trail=0.40, forever=True),
+
+}
+
+# A1, with the capital layer Zak ruled on 2026-08-12: "we only have 10% cash available at any time,
+# rest is in VOO if it isn't being used by momentum." Derived from `a1` rather than copied, so the
+# two cannot drift apart and the only difference is the capital rule under test.
+#
+# Momentum keeps FIRST CALL on the money. The park is where idle capital waits, not a position
+# competing for slots, so an entry that cannot be funded from cash sells the index to fund itself.
+# Without that, the 10% floor would quietly starve the sleeve — every entry guard in the day loop
+# already skips a name it cannot afford — and the run would measure the starvation, not the rule.
+PRESETS["a1v"] = dict(PRESETS["a1"], park_idle=True, cash_target=0.10)
+
+# A2 — trend-holding at breadth (E-series E3 centre spec). NOT derived from a1: the two share only
+# the chassis, and inheriting a1's base-entry, conviction-sizing and trim ladder then switching each
+# one off would leave the differences implicit. Every line here is the work order's.
+#
+# The shape of the bet is different from everything run so far. A1 held five names chosen by
+# conviction; A2 wants thirty chosen by price alone, each risking the same half-percent, held on a
+# very wide trail until the trend actually breaks. The external evidence is the argument: <7% of
+# trades produce the cumulative profits in a 66,000-trade sample, so the binding constraint is
+# breadth and holding, not selectivity. 96 trades was never going to converge on anything.
+PRESETS["a2"] = dict(
+    park_idle=True, cash_target=0.10,           # §2.1 chassis, standard on every E-run
+    entry_new_high=252, atr_window=20,          # A2a/A2b — 252-day high, ATR(20) stop
+    atr_stop_mult=3.0, max_stop=None,           # 3xATR, and NO flat cap — the ATR is the stop
+    risk_per_trade=0.005,                       # A2c — 0.5% of equity per trade, never conviction
+    chandelier_mult=8.0, chandelier_atr_window=22,   # A2d/A2e — the runner's only exit
+    max_names=30, sleeve_cap_pct=1.0,           # breadth is the thesis; the park holds the rest
+    heat_cap=None,                              # derived heat = N x r; the DD bar governs, per M1
+    # Zak's 2026-08-13 ruling closes the fifth and sixth spec gaps (the slot ordering runs 54-56
+    # died on, and the score floor the door was never specified to carry). FCFS is the null
+    # ordering — no selection signal beyond "a slot was free when the breakout arrived" — which is
+    # the E3 thesis's own claim: the binding constraint is breadth and holding, not selectivity.
+    slot_order="breakout_fcfs", entry_mcn_floor=False,
+    # E3 names TWO exits — the 3xATR stop and the Chandelier — and runs 54 through 58 each wore
+    # §3.2's exits anyway: run 58's census reads score 711, template 290, earnings 186, gate_off
+    # 116 out of 1,648, because `forever` (below) only engages after a completed trim ladder and
+    # A2 has no trims. The four are now declared OFF by key, which the conformance table prints
+    # under `suppressed` — the arm's exits are a replacement, not an addition, and this preset
+    # finally says so in a way the engine actually reads.
+    template_exit=False, score_exit=False, earnings_exit=False, gate_off_exit=False,
+    # everything §3.2 does that A2 does not: no pyramiding, no trims, no press, no euphoria rung,
+    # no MCN floor (the ruling above makes the comment true — until 2026-08-13 the floor was
+    # still enforced at the door), no M4 earnings gate.
+    entry_fraction=1.0, pyramid_tranches=1, pyramid_spacing=None,
+    trim_at=None, trim_frac=None, forever=True,
+    breakeven=False, breakeven_r=None, breakeven_on_full_size=False, euphoria=False,
+    require_m4=False, m4_swing=False, press_on_next_base=False,
+    mq_vol_divisor=False, mcn_drop_atr=False, confirm_before_entry=False)
+
+# The one pre-registered alternative on the new ordering axis (E3 sensitivity ladder, amended
+# 2026-08-13): calmest trend first. The strongest selective candidate — the smooth-mover evidence
+# is real — but it is an overlay on the thesis rather than the thesis, so it is the arm and FCFS
+# is the centre. Ordering key: the name's own ATR as a fraction of price, ascending.
+# (The push study then measured it BACKWARD for completion — the calm quartile completes at
+# 0.59x base against the loud quartile's 1.74x — so it stays on the ladder as the arm that
+# prices what smoothness buys on the drawdown side, and it does not centre anything.)
+PRESETS["a2o"] = dict(PRESETS["a2"], slot_order="trend_vol")
+
+# A3 — hold the leaders, every clause pinned by the push study (WO-A3 §3, amendment of
+# 2026-08-13). 56,380 resolved episodes on our own census, 2017-2026:
+#
+#   * the door stays A2's — a fresh 252-high, M2, full breadth. Base rate: 3.86% of eligible
+#     breakouts run +50% before giving the level back; the rest die in ~10 sessions at -1..-3%.
+#   * the queue is LOUDEST FIRST ('vol_desc'): completion lift is monotone in volatility,
+#     0.59x calm quartile -> 1.74x loud, and per-episode EV +0.16% -> +0.91% the same way.
+#   * the LEVEL is the stop ('level_stop'): close below the breakout level, out next open.
+#     Winners never close below it on the way to +50% (that is the episode definition doing the
+#     work); a 3xATR trail would kill 70% of them (survival 0.305 measured). No Chandelier on
+#     the centre — survivors ride until the level breaks. The trail arms live on the ladder.
+#   * sizing is 1/N — a level stop has no distance to size from, and 1/30 puts ~3.3% of NAV
+#     behind each slot; the 10xATR stop below is the Protect layer's resting order
+#     (needed-trail p90 across all pushes is 11.8 ATRs — 10x as an INITIAL stop binds only in a
+#     crash that never printed a close below the level first), not the working exit.
+#   * the Barroso-Santa-Clara governor runs at the paper's own constants (12% target, 126
+#     sessions): entry sizes shrink when the account's trailing vol runs hot. WO-17, revived.
+#   * the regime gate earned nothing on this window (completion 3.84% gate-on vs 4.08% off), so
+#     no new gate is added; §3.2's own entry latch stays as baseline machinery.
+#   * §3.2's exits are OFF and declared, as ruled for A2: score, template, earnings, gate_off.
+PRESETS["a3"] = dict(
+    park_idle=True, cash_target=0.10,
+    entry_new_high=252, slot_order="vol_desc", entry_mcn_floor=False,
+    level_stop=True, size_nav_frac=1.0 / 30.0, stop_ladder=False,
+    atr_window=20, atr_stop_mult=10.0, max_stop=None,
+    chandelier_mult=None, chandelier_atr_window=None, risk_per_trade=None,
+    vol_target=0.12, vol_window=126,
+    max_names=30, sleeve_cap_pct=1.0, heat_cap=None,
+    template_exit=False, score_exit=False, earnings_exit=False, gate_off_exit=False,
+    entry_fraction=1.0, pyramid_tranches=1, pyramid_spacing=None,
+    trim_at=None, trim_frac=None, forever=True,
+    breakeven=False, breakeven_r=None, breakeven_on_full_size=False, euphoria=False,
+    require_m4=False, m4_swing=False, press_on_next_base=False,
+    mq_vol_divisor=False, mcn_drop_atr=False, confirm_before_entry=False)
+
+# A3c — the handover. The pre-registered ladder cell that crosses the two measured halves: A3's
+# net (39% of every push entered) with A2's ride (80% of each move kept). The level stop does the
+# cheap filtering for ten sessions, then an 8xATR(22) Chandelier takes the survivors.
+#
+# Both constants are the study's, not taste. TEN SESSIONS is where the survival curve turns: 84%
+# of failures have resolved by then (54,202 -> 8,546) while 94% of pushes are still alive
+# (2,178 -> 2,038), so a position still above its level at session 10 completes 19.3% of the time
+# against the 3.86% base — a 5x conditional lift, bought with a stop that costs the winners
+# almost nothing to keep that long. EIGHT ATRs is the needed-trail distribution: the median push
+# demands 4.8 and the 75th percentile 7.9, so 8x holds roughly three quarters of them — and A2
+# measured exactly that (80.5% of each move kept) on this tape with this multiple.
+PRESETS["a3c"] = dict(PRESETS["a3"], level_stop_sessions=10,
+                      chandelier_mult=8.0, chandelier_atr_window=22)
+
+# A3e — the crash protocol back on. A3d bought the ride (holds 8.9 -> 45.3 sessions once the
+# law's trail stopped clipping) and paid for it with the tail: 85.4% average exposure and a
+# -52.4% drawdown, because 30 slots at 1/30 of NAV each, held five times longer, keep the book
+# fully loaded into a decline that takes every name at once.
+#
+# The push study dismissed the regime gate on COMPLETION (3.84% gate-on against 4.08% off) and
+# that reading stands — it buys nothing on selection. Drawdown is a different question the
+# study never asked, and §3.3's crash protocol is the repo's own answer to it: entries were
+# already refused with the gate off (the day loop requires `on`), so this cell adds only the
+# exit side. Clenow's rule is the same shape and the same source as M1's latch.
+PRESETS["a3e"] = dict(PRESETS["a3"], gate_off_exit=True)
+
+# K3 — the park upgraded from the core index to E4's best blend. The park is not a detail: A1V
+# ran 74% of the account parked, so the vehicle it sits in decides more of the return than the
+# sleeve does. E4 measured the two side by side on this window — VOO 15.50% CAGR, the 80/20
+# VOO/SPMO blend 16.53% — and every arm below already parks. This changes only where the idle
+# money waits; the sleeve's rules are untouched, which is what makes the pair a measurement.
+PRESETS["a1v_blend"] = dict(PRESETS["a1v"], park_tilt=0.20)
+PRESETS["a3_blend"] = dict(PRESETS["a3"], park_tilt=0.20)
+
+# The park-tilt ladder (WO-A3 amendment, 2026-08-13). E4 measured the vehicle three times and the
+# result is monotone — VOO 15.50%, 90/10 16.12%, 80/20 16.53% CAGR — and it stopped at 20% only
+# because that was the pre-registered arm set. Since the park holds ~74% of the account, this is
+# the highest-leverage axis available, and it is priced rather than assumed: 50% and 100%.
+#
+# 100% is deliberately included as the ENDPOINT, not a recommendation. It stacks a momentum ETF
+# under a momentum sleeve, which §2.4.2 already says needs a concentration review before any
+# production role — a research measurement is not that review.
+PRESETS["a1v_b50"] = dict(PRESETS["a1v"], park_tilt=0.50)
+PRESETS["a1v_b100"] = dict(PRESETS["a1v"], park_tilt=1.00)
+
+# The breadth axis, aimed squarely at K3b's ONE failing clause. K3b returns 18.00% and is unproven
+# only because the edge does not survive removing the top three winners (+197.2% ex-top-3 against
+# the benchmark's +260.7%) — the Micron dependency. A1 holds five names; the external evidence
+# (Zarattini-Pagani-Wilcox: <7% of trades produce the cumulative profits) says concentration at
+# five is the reason one name can be the result. Ten names is the same rules with twice the
+# chances, and the ex-top-3 clause is the test it has to move.
+PRESETS["a1v_b10"] = dict(PRESETS["a1v"], park_tilt=0.20, max_names=10)
+PRESETS["a1v_b15"] = dict(PRESETS["a1v"], park_tilt=0.20, max_names=15)
+
+# E1 — the Micron question (E-series, wo-e-series-2026-08-12 §3). A1V with every MU trade
+# excluded, derived from `a1v` the way `a1v` is derived from `a1`, so the exclusion is the only
+# difference. 71.4% of A1's profit is one MU trade; A1V's 73 points over the 90/10 counterfactual
+# inherit that dependency, and this run prices it.
+#
+# The exclusion removes the name from the sleeve's REACH, not from the world: MU still ranks, the
+# book's slots stay open, and whatever capital the sleeve does not ask for follows the chassis into
+# the park — "the capital MU consumed follows chassis rules". This is the honest version of
+# §2.5(b)'s jackknife: `bars.jackknife_arithmetic` subtracts a winner's P&L but keeps the
+# compounding that winner financed, and its own docstring names E1 as the true form.
+PRESETS["e1"] = dict(PRESETS["a1v"], exclude_names=("MU.US",))
 
 
-# ------------------------------------------------------------------ data
+def hypothesis(name=None):
+    """The law, with a preset laid over it, with individual env overrides laid over that.
+
+    `name` defaults to the HYPOTHESIS env var. A sweep passes each cell's name explicitly so one
+    process — and one tape load — can price a whole ladder.
+    """
+    name = HYPOTHESIS if name is None else name
+    h = dict(LAW)
+    h.update(PRESETS.get(name, {}))
+    for k in list(h):
+        raw = os.environ.get(k.upper())
+        if raw is None or raw == "":
+            continue
+        if k == "exclude_names":
+            # Tickers, comma-separated, spelled the way `prices` spells them (MU.US). Upper-cased
+            # so a hand-typed dispatch input cannot silently exclude nothing — a filter that
+            # matches no rows reads exactly like a filter that worked.
+            h[k] = tuple(s.strip().upper() for s in raw.split(",") if s.strip())
+            continue
+        if k == "slot_order":
+            # A string knob — the scalar parser below would crash int()-ing it.
+            h[k] = raw.strip().lower()
+            continue
+        low = raw.strip().lower()
+        h[k] = (True if low in ("1", "true", "yes") else
+                False if low in ("0", "false", "no") else
+                None if low == "none" else float(raw) if "." in raw else int(raw))
+    return h
+
+# Transaction-cost curve v1 (E-series §2.2). Half-spread in bps PER SIDE, selected by point-in-time
+# ADDV; descending, first match wins, and an unknown ADDV falls through to the worst bucket. The
+# ANCHORS ARE FIXED BY THE WORK ORDER — bucket edges may be refined with sources, the anchors may
+# not. Replaces a flat 5/15bps split that traced to nothing.
+SPREAD_CURVE = ((50_000_000.0,  5.0),      # large cap — Nasdaq S&P 500 spread data
+                (10_000_000.0, 10.0),
+                ( 2_000_000.0, 18.0),      # small cap — Frazzini-Israel-Moskowitz realised
+                (   500_000.0, 35.0),
+                (         0.0, 60.0))      # micro cap — 50+bps
+
+def param_digest(hyp, extras):
+    """A stable hash of everything that decides behaviour (P1, E-series §3).
+
+    `law_stamp` is hand-set and does not move when the law does: runs 18 and 46 both carry
+    2026-08-09 while their hyp surfaces differ by 34 keys, so no two runs in the ledger can be
+    mechanically differenced and every cross-run delta carries an unattributable residual. This
+    digest is derived from the RESOLVED surface instead, so it cannot fail to move.
+
+    Sorted keys and a fixed separator, so the hash depends on the values and not on dict ordering
+    or on Python's repr. Missing keys and None-valued keys are deliberately distinct: an absent
+    knob and a knob explicitly switched off are different rule surfaces.
+    """
+    payload = {"hyp": {k: hyp[k] for k in sorted(hyp)},
+               "extras": {k: extras[k] for k in sorted(extras)}}
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def code_stamp():
+    """The digest of the code that interpreted the params — P1's second half.
+
+    Runs 54, 55 and 56 share one param_hash and measured three different engines: the exit gating,
+    the hair-trigger and the candidate pool all changed between them while the params stood still,
+    so the ledger says "same experiment" three times about three experiments. Two runs are the
+    same experiment only if the code is the same code. Hashing the driver and the law module makes
+    a code-only change visible in the record; a comment-only edit also moves it, which errs in the
+    safe direction — false-different is a shrug, false-same is how a delta gets misattributed.
+    """
+    here = pathlib.Path(__file__).resolve().parent
+    blob = b"".join((here / f).read_bytes() for f in ("backtest.py", "signals.py"))
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+# Park true-up cadence and band (E-series §2.1). Weekly check; trade only when cash has drifted
+# more than 5 percentage points off the target. Both are the work order's numbers, not defaults.
+PARK_CHECK_EVERY = 5     # sessions — "check weekly"
+PARK_BAND = 0.05         # "trade the park only when cash deviates > 5 pts from the 10% target"
+
+WARMUP = 280            # >= 266, the deepest window any rule reads (see tests/test_tail_equivalence)
+TAIL = 280
+T10 = 10                # §3.2: every MCN ranking window ends 10 trading days ago
+BENCH = os.environ.get("BENCHMARK", "VOO.US")
+# K3: the momentum ETF the park may tilt into. §2.3 already names SPMO the alpha-arm
+# comparator and E4 priced it as a park vehicle; this is the same instrument, held.
+PARK_TILT_TICKER = os.environ.get("PARK_TILT_TICKER", "SPMO.US")
+DELISTED_AFTER = 5      # sessions without a bar before a holding is treated as gone
+CALENDAR_HORIZON = 100  # a scheduled report we can believe in — one quarter (check.py allows 110)
+
+
+class DataIntegrityError(RuntimeError):
+    """The tape is wrong. Per .claude/rules/trading-code.md, a guard that detects a bad state
+    halts — it does not warn and continue. A backtest that completes on a corrupt series writes a
+    plausible number, and a plausible wrong number is the expensive kind."""
+
+
+def _assert_books_balance(cash, start_nav, trades, park_realised=0.0):
+    """Cash must be the starting capital plus every realised trade, once the book is empty.
+
+    `pnl_usd` is `proceeds - invested` and `invested` is exactly what left the account, so this is
+    an identity, not an estimate — the tolerance is float noise across a few hundred round trips.
+    A module-level function rather than an inline block so the guard can be fired on demand: a
+    check nobody has ever seen fail is a check nobody knows works.
+
+    `park_realised` carries the P&L of the parked index (K1/K2). Those trades are held out of
+    `trades` so they cannot pollute the per-trade statistics, but the cash they moved is real and
+    the identity has to see it — otherwise parking would silently disable this check.
+    """
+    realised = sum(tr["pnl_usd"] for tr in trades) + park_realised
+    expected = start_nav + realised
+    if abs(cash - expected) > max(0.01, abs(expected) * 1e-9):
+        raise AccountingError(
+            f"the books do not balance: ended holding {cash:,.2f} in cash, but start_nav "
+            f"{start_nav:,.2f} plus {len(trades)} realised trades totalling {realised:,.2f} is "
+            f"{expected:,.2f} — a discrepancy of {cash - expected:,.2f}.")
+
+
+class AccountingError(RuntimeError):
+    """The books do not balance. Distinct from DataIntegrityError: the tape can be perfect and the
+    arithmetic on top of it still wrong, and that failure is invisible in every summary statistic —
+    a return, a drawdown and a win rate all read as normal numbers whether or not cash was
+    conserved. Nothing else in the engine checks this, so it is asserted on every run."""
+
+
+# ------------------------------------------------------------------ integrity thresholds
+#
+# 2026-08-12. The first version of this guard halted the run on ANY adjusted daily move beyond
+# 85%, and measured against the real tape it would have halted on 819 of 5,264 names — so the
+# re-derivation of runs 18-44 could never have started. Three things came out of measuring it:
+#
+#   1. MAGNITUDE CANNOT SEPARATE a real collapse from a broken series. YELLQ (Yellow Corp) and
+#      EXPRQ (Express) were liquid $50 stocks that went bankrupt; a -90% session is what that
+#      looks like, and 814 of the 819 names pass L0 at some point, so they are not junk we can
+#      wave away. Excluding real bankruptcies would reintroduce the survivorship bias runs 15+
+#      deliberately removed.
+#   2. THE SHARE OF BAD NAMES CANNOT SEPARATE a raw basis from an adjusted one: 19.5% of names
+#      show an 85% move on the raw series against 15.6% on the adjusted. Any systemic threshold
+#      between those two numbers is luck, not a test.
+#   3. THE CORPORATE-ACTION RECORD CANNOT ARBITRATE IT EITHER. `corporate_actions` holds four
+#      split rows, all from August 2026 — it is a live feed for the book, not a historical
+#      archive, so it cannot validate a 2016-2026 tape. Backfilling the split calendar from
+#      EODHD would make this guard exact and is the right eventual fix; it is a separate job.
+#
+# What separates them is REPETITION and IMPOSSIBILITY. A real equity collapses once. Of the 793
+# violating bars in the "down 95%+" bucket, 94 names carry all of them — 8.4 collapses each,
+# which is a discontinuous series, not a company. And no market takes a $5+ stock up 20x between
+# two closes; SPDL prints 6,900,000x, which is two unrelated companies sharing a ticker.
+#
+# So the guard now does two different jobs instead of conflating them:
+#
+#   * a broken SECURITY is quarantined — dropped from the simulation, counted, and named in
+#     `stats.excluded_discontinuous`. That is removing the bad state, not tolerating it, and it
+#     is the same judgment migration 041 made by hand for twelve tickers.
+#   * a broken TAPE halts, and is now tested by its own invariant rather than inferred from price
+#     behaviour: the decision series must BE the adjusted series. That is the defect that
+#     invalidated runs 18-44, and it is checkable exactly.
+MAX_SANE_DAILY_MOVE = 0.85     # a session move past this is a candidate, not yet a verdict
+MIN_DISCONTINUITIES = 2        # one is an event; two in the tradeable region is a broken series
+#
+# The repetition test counts DOWN moves only, and that asymmetry is the whole point. Counting
+# both directions quarantined GME, DJT, LUNR, INSM and CHK — the January 2021 squeeze (+93%
+# then +135%), the Trump Media announcement (+357%), a SPAC on a lunar-lander contract, a phase-3
+# readout. Those are the largest momentum events in the tape, and this is a momentum sleeve: a
+# guard that throws them out is worse than no guard.
+#
+# Falling is different. After a genuine -85% the price sits at 15% of its old level, so to fall
+# -85% AGAIN from above $5 it must first recover roughly 6.7x. Real equities do not make that
+# round trip; a series that does is discontinuous. So repetition down is evidence, repetition up
+# is momentum, and only the absolute IMPOSSIBLE_UP ceiling constrains the upside.
+IMPOSSIBLE_UP = 20.0           # x between two closes — beyond any single-session equity move
+IMPOSSIBLE_DOWN = 0.05         # -95% in one session, on a basis that was a real price
+PRICE_BASIS_FLOOR = 1.0        # under $1 the vendor's 4dp precision makes a ratio noise, not a
+                               # return: $0.0001 -> $0.0002 reads as +100%
+# ...but the floor must not become a hiding place, because the worst series in the tape spend
+# their first life sub-penny: SPDL goes 0.0001 -> 647.50, two unrelated companies under one
+# symbol. Quantization noise is bounded by the gap between adjacent representable prices — 2x at
+# the very bottom, less everywhere above it — so a move of this size is a discontinuity at ANY
+# basis, and this threshold carries no floor.
+ABSURD_RATIO = 1000.0
+# It WAS a hiding place, and 2026-08-14 found what was hiding in it: a mis-stated split factor.
+# `BMNR.US` reverse-split on 2025-05-16. The raw close steps 0.02 -> 8.00, exactly 400x, and the
+# adjustment the vendor applied is exactly 20x — so the adjusted series carries a fabricated 20x
+# overnight gain. The basis was $0.3999, under the floor, and 20x is under ABSURD_RATIO, so it
+# passed both tests and went on to score as the best momentum name in the universe.
+#
+# The floor cannot simply be lowered, because the thing it protects against is real. But that
+# thing is QUANTIZATION, and quantization is computable rather than approximable: at basis p the
+# widest ratio a single tick of 4dp error can manufacture is (p + q) / (p - q). So the floor is
+# replaced by the quantity it was standing in for, and the bar becomes basis-aware —
+# `max(IMPOSSIBLE_UP, quantization bound)`. Above a dollar the bound is 1.0002 and IMPOSSIBLE_UP
+# governs exactly as before; at $0.0002 the bound is 3.0 and IMPOSSIBLE_UP still governs; only at
+# a basis of one or two ticks does it rise enough to disable the test, which is precisely where a
+# ratio genuinely is noise.
+#
+# A reverse split is not an edge case for this. A company reverse-splits BECAUSE its price is low,
+# so the seam ALWAYS sits under a dollar — the old floor was blind in the one place the defect it
+# was written for actually occurs. On the current tape this catches 136 further names over 1,865
+# bars, 2.2% of the 6,287 in the census and well inside MAX_QUARANTINE_SHARE.
+QUOTE_TICK = 1e-4              # the vendor quotes to four decimal places
+TRADEABLE_FLOOR = 5.0          # §3.2's price floor — below it the sleeve is out by law, so a
+                               # discontinuity there cannot become a trade
+MIN_ADJUSTED_SHARE = 0.20      # 58.9% of the real tape differs from raw across 2,999 names; if
+                               # almost nothing differs, the adjustment is not being applied
+MAX_QUARANTINE_SHARE = 0.10    # past this it is not N bad tickers, it is a bad tape
+
+
+def _discontinuous(arrays, cols):
+    """Names whose adjusted series is not a continuous price series. Returns {ticker: reason}.
+
+    Two independent signatures, either of which condemns a name:
+
+      * IMPOSSIBLE — a single session beyond 20x up or -95% down, measured from a basis of at
+        least $1 so that sub-penny quantization cannot manufacture one; or beyond 1000x either
+        way at any basis at all, which quantization cannot reach.
+      * REPEATED — two or more COLLAPSES beyond -85% on bars where the prior close cleared
+        §3.2's $5 floor. See the note on the constants: down is evidence, up is momentum.
+
+    A zero adjusted close is treated as impossible on its own. A traded equity does not print
+    0.0000; PACW does, on the day it merged into Banc of California, and a zero denominator
+    turns every downstream return into an infinity.
+    """
+    C, R = arrays["close"], arrays["raw_close"]
+
+    # The comparison is against the LAST BAR THE NAME PRINTED, not the previous row of the grid.
+    #
+    # Row-adjacent was a hole, and it is the hole these series are shaped to fall through. The grid
+    # is dates x tickers, so a name that does not trade has NaN, and NaN/NaN is not finite — the
+    # ratio simply vanishes. But a seam is nearly always ACROSS a gap: a shell stops trading, a
+    # reverse split happens while it is dark, and it resumes at a new price. CLSK.US survived the
+    # first version of this guard on exactly that shape — 0.0037 to 34.6762, a ratio of 9,372,
+    # invisible because it had not printed for days beforehand.
+    #
+    # `maximum.accumulate` over the row index of the finite bars carries the last live row forward;
+    # shifting it by one makes it strictly earlier than the bar being tested. Rows before a name's
+    # first bar have no predecessor and are marked invalid rather than compared against row zero.
+    n_rows = C.shape[0]
+    have = np.isfinite(C) & (C > 0)
+    src = np.where(have, np.arange(n_rows)[:, None], -1)
+    last_live = np.maximum.accumulate(src, axis=0)
+    prev_row = np.vstack([np.full((1, C.shape[1]), -1, dtype=int), last_live[:-1]])
+    has_prev = prev_row >= 0
+    take = np.maximum(prev_row, 0)
+    prev = np.where(has_prev, np.take_along_axis(C, take, axis=0), np.nan)
+    curr = C
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ratio = np.where(has_prev & have & (prev > 0), curr / prev, np.nan)
+    finite = np.isfinite(ratio)
+    prev_raw = np.where(has_prev, np.take_along_axis(R, take, axis=0), np.nan)
+
+    # The UP test carries no basis floor. It carries the quantization bound instead, which is what
+    # the floor was approximating — see the note on QUOTE_TICK. The DOWN test keeps the floor: a
+    # fall needs a real price to fall from, and nothing here changes that reasoning.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        quant = np.where(prev > QUOTE_TICK,
+                         (prev + QUOTE_TICK) / np.maximum(prev - QUOTE_TICK, QUOTE_TICK), np.inf)
+    up_bar = np.maximum(IMPOSSIBLE_UP, quant)
+    on_a_real_price = (ratio >= up_bar) | ((prev >= PRICE_BASIS_FLOOR) & (ratio <= IMPOSSIBLE_DOWN))
+    at_any_price = (ratio >= ABSURD_RATIO) | (ratio <= 1.0 / ABSURD_RATIO)
+    impossible = finite & (on_a_real_price | at_any_price)
+    zeroed = np.isfinite(C) & (C <= 0.0)
+    # The $5 floor is a fact about the actual print, so it reads the raw series, exactly as the
+    # L0 admission test does. An adjusted price of $6 on a stock that printed $0.30 is not a
+    # tradeable bar and a discontinuity in it cannot reach the book.
+    tradeable = np.isfinite(prev_raw) & (prev_raw >= TRADEABLE_FLOOR)
+    collapsed = finite & tradeable & (ratio < 1.0 - MAX_SANE_DAILY_MOVE)
+
+    out = {}
+    imp_n, col_n, zero_n = impossible.sum(axis=0), collapsed.sum(axis=0), zeroed.sum(axis=0)
+    for j, tk in enumerate(cols):
+        if zero_n[j]:
+            out[tk] = f"{int(zero_n[j])} bars priced at or below zero"
+        elif imp_n[j]:
+            worst = np.nanmax(np.where(impossible[:, j], ratio[:, j], np.nan))
+            quietest = np.nanmin(np.where(impossible[:, j], ratio[:, j], np.nan))
+            out[tk] = (f"impossible session move ({quietest:.4g}x to {worst:.4g}x, "
+                       f"{int(imp_n[j])} bars)")
+        elif col_n[j] >= MIN_DISCONTINUITIES:
+            out[tk] = f"{int(col_n[j])} collapses below -{MAX_SANE_DAILY_MOVE:.0%} above ${TRADEABLE_FLOOR:.0f}"
+    return out
+
+
+def _assert_price_integrity(arrays, cols, dates):
+    """Halt on a broken TAPE. Broken securities are quarantined by `_discontinuous`, not here.
+
+    None of this was catchable by the unit suite: every fixture in `tests/` is hand-built, and a
+    hand-built fixture never contains a split, a ticker change, or a duplicated series. These
+    assertions run against the real tape, on every run, before a single bar is simulated.
+    """
+    C, R = arrays["close"], arrays["raw_close"]
+
+    # THE defect behind runs 18-44, asserted directly rather than inferred. `close` must be the
+    # adjusted series; on the real tape 58.9% of bars differ from the raw print across 2,999
+    # names, because a decade of 5,000 US equities is full of splits and dividends. If almost
+    # nothing differs, either the transform in `load` was removed or `adj_close` came back empty
+    # and was filled from `close` — and every split is about to arrive as a crash again.
+    both = np.isfinite(C) & np.isfinite(R)
+    if both.any():
+        share = float((both & (np.abs(C - R) > 1e-9)).sum()) / float(both.sum())
+        if share < MIN_ADJUSTED_SHARE:
+            raise DataIntegrityError(
+                f"only {share:.1%} of bars differ between the decision series and the raw print, "
+                f"below the {MIN_ADJUSTED_SHARE:.0%} floor. The decision series is supposed to be "
+                f"`adj_close`; this reads as the raw print, which is the defect that invalidated "
+                f"runs 18-44 — CMG's 50:1 booked -98%, a 4:1 booked -76%.")
+
+    # Two tickers with an identical price series are one security counted twice — the book can
+    # hold both, doubling the intended position while max_names, the sleeve cap and the heat cap
+    # each see two names. TPX/SGI (a rename) did exactly this in runs 29/32/34/35/36.
+    #
+    # (bar count, sum-to-the-cent) is a CHEAP FILTER, never the test. Used as the test it is a
+    # birthday problem: across 3,343 names sharing a bar count it collided on 8 groups where only
+    # 5 were real. B/FRME and BHF/CHMG were each condemned as "one security" while differing on
+    # every one of their 176 shared bars. Because this guard HALTS, a coincidence takes the whole
+    # instrument down — so every candidate is confirmed element-wise before anything is raised.
+    # Tightening the test does not soften the guard: the five genuine duplicates still halt it.
+    tail = C[-260:]
+    buckets, dupes = {}, []
+    for j, tk in enumerate(cols):
+        v = tail[:, j]
+        finite = np.isfinite(v)
+        if int(finite.sum()) < 60:
+            continue
+        key = (int(finite.sum()), round(float(v[finite].sum()), 2))
+        twin = None
+        for tk_seen, j_seen in buckets.get(key, ()):
+            w = tail[:, j_seen]
+            if np.array_equal(np.isfinite(w), finite) and np.array_equal(w[finite], v[finite]):
+                twin = tk_seen
+                break
+        if twin is not None:
+            dupes.append((twin, tk))
+        else:
+            buckets.setdefault(key, []).append((tk, j))
+    if dupes:
+        raise DataIntegrityError(
+            f"{len(dupes)} ticker pairs share an identical price series — one security, two "
+            f"entries in the universe: " + "; ".join(f"{a}={b}" for a, b in dupes[:8]))
+
+
+def screen_tape(arrays, cols, dates):
+    """The whole gate, in the order it has to run: halt on a broken tape, then quarantine broken
+    securities, then halt anyway if so many are broken that "broken securities" is the wrong
+    diagnosis. Returns {ticker: reason} for the names the caller must drop.
+    """
+    _assert_price_integrity(arrays, cols, dates)
+    excluded = _discontinuous(arrays, cols)
+    # A security whose series is discontinuous cannot be simulated, but it also must not stop the
+    # run — 218 of 5,264 names are in this state and halting on each in turn is not a workflow.
+    # Past a ceiling, though, the diagnosis flips: that many broken names is a broken tape.
+    if len(excluded) > MAX_QUARANTINE_SHARE * len(cols):
+        raise DataIntegrityError(
+            f"{len(excluded)} of {len(cols)} names ({len(excluded)/len(cols):.1%}) have a "
+            f"discontinuous series, above the {MAX_QUARANTINE_SHARE:.0%} ceiling. That is not a "
+            f"set of bad tickers, it is a bad tape — check the price basis before trusting any "
+            f"of it. Worst: " + "; ".join(f"{t} ({r})" for t, r in list(excluded.items())[:5]))
+    return excluded
+
+
+# =============================================================================== data
 def load(cur):
+    """Every US bar we hold, living and dead. The census is rebuilt from bars, not from `status`."""
     cur.execute("""select p.ticker, p.d, p.open, p.high, p.low, p.close, p.adj_close, p.volume
-                   from prices p join universe u on u.ticker = p.ticker
-                   where u.kind='stock' and u.status='active' and (u.in_l0 or u.is_holding)
-                     and u.ticker like '%.US'
-                   order by p.d""")
+                     from prices p join universe u on u.ticker = p.ticker
+                    where u.kind = 'stock' and u.ticker like '%%.US'
+                      and u.ticker not in (select ticker from universe_excluded)
+                    order by p.d""")
     df = pd.DataFrame(cur.fetchall(),
                       columns=["ticker", "d", "open", "high", "low", "close", "adj", "vol"])
     for c in ("open", "high", "low", "close", "adj", "vol"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["adj"] = df["adj"].fillna(df["close"])
-    wide = {c: df.pivot(index="d", columns="ticker", values=c).sort_index()
-            for c in ("open", "high", "low", "close", "adj", "vol")}
+
+    # ---- EVERY RULE READS THE ADJUSTED SERIES. This is the 2026-08-11 correction.
+    #
+    # `prices.close` is the raw print. `prices.volume` is already split-adjusted. Running decisions
+    # on raw closes meant every split arrived as a crash: CMG's 50:1 booked -98%, TSLA's 3:1 -67%,
+    # a 4:1 -76%. In a system whose widest stop is 30% those are impossible numbers, and four of
+    # them sat in the recorded runs. §3.2's own §2.6 already flags splits as a market-mechanics
+    # concern that changes share counts without a trade; the engine simply never honoured it.
+    #
+    # The whole OHLC bar is rescaled by the day's own adj/close factor, so the bar keeps its
+    # internal geometry (the high is still above the close) while the series across a split is
+    # continuous. Two consequences, both deliberate:
+    #
+    #   * P&L is now TOTAL return, not price-only, because `adj_close` carries dividends too. That
+    #     makes the VOO comparison honest — VOO was always benchmarked on total return, so the
+    #     sleeve was previously handicapped by its own dividend yield. `stats.dividend_bps` is
+    #     retired; the number is in the P&L.
+    #   * `raw_close` is kept for the ONE place the actual print is the right number: §3.2's $5
+    #     price floor. A stock printing $3 today is a penny stock whatever its adjusted history.
+    factor = (df["adj"] / df["close"]).replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    df["raw_close"] = df["close"]
+    for c in ("open", "high", "low"):
+        df[c] = df[c] * factor
+    df["close"] = df["adj"]
+
+    # Scatter into the date x ticker grid directly rather than pivoting six times. Retaining the
+    # delisted census roughly doubles the ticker count, and six pivots of a ten-million-row frame
+    # is where a runner with 7 GB stops being able to load the tape at all.
+    tcode, cols = pd.factorize(df["ticker"], sort=True)
+    dcode, dates = pd.factorize(df["d"], sort=True)
+    shape = (len(dates), len(cols))
+    arrays = {}
+    for c in ("open", "high", "low", "close", "adj", "vol", "raw_close"):
+        a = np.full(shape, np.nan)
+        a[dcode, tcode] = df[c].to_numpy(dtype=float)
+        arrays[c] = a
+    del df
+
+    # A non-positive price is not a price. The vendor pads the delisting tail with 0.0000 after an
+    # acquisition — CONN 5 bars, HIBB 7, AEL 2 — and condemning the whole ticker for it would
+    # throw away years of valid history AND bias the sleeve against takeouts, which is the good
+    # ending for a momentum position. NaN is what "no bar" already means to the engine, and the
+    # DELISTED_AFTER path handles a name that stops printing.
+    dead = arrays["close"] <= 0.0
+    if dead.any():
+        for c in ("open", "high", "low", "close", "adj", "raw_close"):
+            arrays[c] = np.where(dead, np.nan, arrays[c])
+
+    excluded = screen_tape(arrays, cols, dates)
+    if excluded:
+        keep = np.array([tk not in excluded for tk in cols], dtype=bool)
+        for c in arrays:
+            arrays[c] = arrays[c][:, keep]
+        cols = [tk for tk, k in zip(cols, keep) if k]
+
     cur.execute("select ticker, industry from universe where kind='stock'")
-    ind = {t: i for t, i in cur.fetchall()}
+    industry = {t: i for t, i in cur.fetchall()}
+
+    cur.execute("""select d, close, coalesce(adj_close, close) from prices
+                    where ticker = %s order by d""", (BENCH,))
+    rows = cur.fetchall()
+    bench = pd.Series({d: float(a) for d, _, a in rows}).sort_index() if rows else pd.Series(dtype=float)
+
+    # K3's second park vehicle. Loaded unconditionally so the frame has the same shape on every
+    # run; an arm that does not tilt never reads it. SPMO's bars begin 2015-10 — inside every
+    # window this programme uses — and the tilt asserts its own coverage at the point of use
+    # rather than here, because a window reaching further back needs the seam declared, not
+    # silently back-filled with the core index.
+    cur.execute("""select d, coalesce(adj_close, close) from prices
+                    where ticker = %s order by d""", (PARK_TILT_TICKER,))
+    tilt_rows = cur.fetchall()
+    park_tilt = (pd.Series({d: float(a) for d, a in tilt_rows}).sort_index()
+                 if tilt_rows else pd.Series(dtype=float))
+
+    # M1 is the S&P 500 (§3.2). GSPC if we hold it deep enough, else the tracker standing in for it.
     cur.execute("select d, close from prices where ticker='GSPC.INDX' order by d")
     spx = pd.Series({d: float(c) for d, c in cur.fetchall()}).sort_index()
-    return wide, ind, spx
+    gate_source = "GSPC.INDX"
+    if len(spx) < len(bench):
+        spx, gate_source = pd.Series({d: float(c) for d, c, _ in rows}).sort_index(), BENCH
+
+    cur.execute("select ticker, report_date from earnings order by ticker, report_date")
+    reports = {}
+    for tk, rd in cur.fetchall():
+        reports.setdefault(tk, []).append(rd)
+
+    # Point-in-time EPS for M4: each quarter carries its own reportDate, so what was knowable on a
+    # past date is a prefix cut, not a guess. Period order and report order agree, so one bisect.
+    cur.execute("""select f.ticker,
+                          array_agg((h.value->>'reportDate')::date order by h.key desc)  as rds,
+                          array_agg((h.value->>'epsActual')::double precision
+                                    order by h.key desc)                                 as eps
+                     from v_fundamentals_latest f,
+                          lateral jsonb_each(coalesce(f.raw_doc->'Earnings'->'History','{}'::jsonb)) h
+                    where h.value->>'epsActual' is not null
+                      and h.value->>'reportDate' is not null
+                    group by f.ticker""")
+    eps = {}
+    for tk, rds, vals in cur.fetchall():
+        pairs = [(r, v) for r, v in zip(rds, vals) if r is not None and v is not None]
+        if pairs:
+            eps[tk] = (np.array([r.toordinal() for r, _ in pairs]), [v for _, v in pairs])
+
+    return dict(dates=list(dates), cols=list(cols), arrays=arrays, industry=industry,
+                bench=bench, spx=spx, gate_source=gate_source, reports=reports, eps=eps,
+                park_tilt=park_tilt, excluded_discontinuous=excluded)
 
 
-def m1_series(spx):
-    """The Weinstein gate, resolved daily by carrying the latest weekly decision forward."""
-    s = pd.Series(spx.values, index=pd.to_datetime(spx.index))
-    weekly = s.resample("W-FRI").last().dropna()
-    sma = weekly.rolling(30).mean()
-    state, out, prev = None, {}, None
-    for i, (d, px) in enumerate(weekly.items()):
-        if i < 33 or pd.isna(sma.iloc[i]):
-            out[d] = None; continue
-        now, four = sma.iloc[i], sma.iloc[i - 4]
-        if prev is None:
-            state = "ON" if (px > now and now >= four) else "OFF"
-        elif prev == "ON":
-            state = "OFF" if px < now else "ON"          # latch: only the opposite trigger flips
-        else:
-            state = "ON" if (px > now and now >= four) else "OFF"
-        out[d] = state; prev = state
-    return pd.Series(out).sort_index()
+def eps_as_of(eps_entry, day):
+    """The quarters already reported by `day`, newest first — a prefix cut on report date."""
+    rds, vals = eps_entry
+    # rds descends, so the first index whose report date is on or before `day` starts the slice.
+    i = int(np.searchsorted(-rds, -day.toordinal(), side="left"))
+    return vals[i:]
 
 
-def gate_on(m1, day):
-    """The gate in force on `day` — the most recent Friday decision at or before it."""
-    prior = m1.loc[:pd.Timestamp(day)]
-    return (prior.iloc[-1] == "ON") if len(prior) and prior.iloc[-1] else False
+# =============================================================================== the weekly rank
+def own_bars(valid, j, t, back=0, n=TAIL):
+    """The last `n` bars **this name actually printed**, ending `back` sessions before `t`.
+
+    Not a slice of the date grid. The grid is the union of every ticker's dates, so a name is NaN
+    on any session it did not trade, and a fixed grid slice therefore mixes "no bar" into a window
+    the rules read as prices. Taking a name's own bars is what `rank.py` does — it loads one
+    series per ticker — and it is the difference between 2,310 rank dates and zero: the first run
+    of this engine required a hole-free grid window and no name in ten years ever had one.
+
+    The 2026-07-31 findings recorded the same shape from the other direction: one TSX listing put
+    TSX-only dates into the union index and every US name silently lost its volume baseline.
+    """
+    v = valid[j]
+    k = int(np.searchsorted(v, t, side="right")) - back
+    return v[k - n:k] if k >= n else None
 
 
-def pct_rank(a):
-    """Cross-sectional percentile 0..100, NaN-safe."""
-    v = np.asarray(a, dtype=float)
-    out = np.full(v.shape, np.nan)
-    ok = ~np.isnan(v)
-    n = ok.sum()
-    if n > 1:
-        out[ok] = 100.0 * v[ok].argsort().argsort() / (n - 1)
-    elif n == 1:
-        out[ok] = 50.0
-    return out
+def _reentry_ready(tk, j, t, valid, C, exited, hyp):
+    """X1 — may we buy this name back today, having sold it before?
+
+    Three conditions, all of them the stock's rather than ours: we held it and let it go, the
+    cool-off has passed, and last night it closed above every close of the prior `reentry_window`
+    sessions. A name we never held cannot re-enter, and one that delisted cannot come back.
+    """
+    if not hyp["reentry_window"]:
+        return False
+    last = exited.get(tk)
+    if last is None or t - last < int(hyp["reentry_cooloff"]):
+        return False
+    rows = own_bars(valid, j, t, back=1)
+    if rows is None:
+        return False
+    return sg.resumed(C[rows, j], window=int(hyp["reentry_window"]))
 
 
-# ------------------------------------------------------------------ weekly rank
-def rank_week(w, t, ind):
-    """Everything weekly-rank computes, as of bar index t. Returns a DataFrame of candidates."""
-    C, H, L, V, A = (w[k].iloc[:t + 1] for k in ("close", "high", "low", "vol", "adj"))
-    close, high, low, vol, adj = C.values, H.values, L.values, V.values, A.values
-    cols = np.array(w["close"].columns)
+def _vol_scalar(equity, target, window):
+    """The governor's dial: min(1, target / realized) on the account's own trailing daily
+    returns, annualized at 252 sessions (the same convention §2.5's bars use). It only ever
+    SHRINKS — a quiet stretch never levers the book up, because the paper's symmetric version
+    borrows and this account does not. Too little history reads as 1.0, declared as the warmup
+    rather than a guess about volatility nobody has measured yet."""
+    if len(equity) < window + 1:
+        return 1.0
+    navs = np.array([row[1] for row in equity[-(window + 1):]], dtype=float)
+    rets = navs[1:] / navs[:-1] - 1.0
+    sd = rets.std(ddof=1)
+    if sd <= 0:
+        return 1.0
+    return float(min(1.0, target / (sd * np.sqrt(252.0))))
 
-    live = ~np.isnan(close[-1])
-    nbars = (~np.isnan(close)).sum(axis=0)
-    addv = np.nanmedian((close * vol)[-50:], axis=0)
-    eff = live & (nbars >= 126) & (close[-1] >= 5) & (addv >= 10_000_000) & (nbars >= 210)
-    if eff.sum() < 30:
+
+def _tolerance(atr_frac, mult, floor=0.25):
+    """The law's flat allowance, or that allowance widened in proportion to the name's own ATR."""
+    return floor if not mult else sg.volatility_tolerance(atr_frac, floor=floor, mult=float(mult))
+
+
+def rank(frame, t, cols, arrays, valid, hyp):
+    """L1-M as `rank.py` builds it: M2 + M4, ranked by MCN, top 150 — same calls, same order.
+
+    Gates and stops read current price; MCN reads windows ending 10 sessions ago (§3.2, "rank is
+    calm; protection is real-time"). Both slices are 280 of the name's own bars, so both are
+    constant-cost.
+    """
+    O, H, L, C, A, V = (arrays[k] for k in ("open", "high", "low", "close", "adj", "vol"))
+
+    # ---- L0 liquidity, evaluated on the bars of the day. Not a §3.2 rule: it is the census, and
+    # it is what makes a delisted name leave the universe on the day its bars stop.
+    close_t = C[t]
+    live = ~np.isnan(close_t)
+    nbars = (~np.isnan(C[max(0, t - 251):t + 1])).sum(axis=0)
+    # ADDV on the ADJUSTED close. `volume` is already split-adjusted, so adj_close x volume is the
+    # true historical dollar turnover — the split factors cancel. raw_close x volume does NOT
+    # cancel: it inflates a name's past liquidity by its own FUTURE split factor, which is
+    # look-ahead. CMG's pre-split ADDV read $79bn. 660 names were affected and 170,220 name-days
+    # entered L0 on the strength of it alone.
+    addv = np.nanmedian((C[max(0, t - 49):t + 1] * V[max(0, t - 49):t + 1]), axis=0)
+    # The $5 floor is the one clause that wants the actual print: a stock trading at $3 today is a
+    # penny stock whatever its adjusted history says.
+    raw_t = arrays["raw_close"][t]
+    eff = live & (nbars >= 210) & (raw_t >= 5) & (addv >= 10_000_000)
+    idx = np.where(eff)[0]
+    if len(idx) < 30:
         return None
 
-    idx = np.where(eff)[0]
-    T10 = 10
-    a = adj[:-T10, idx]; c = close[:-T10, idx]; h = high[:-T10, idx]
-    l = low[:-T10, idx]; v = vol[:-T10, idx]
+    quality, atr_pct, dryup, near_high = {}, {}, {}, {}
+    m2, bases, group_returns, addv_of, atrf = {}, {}, {}, {}, {}
+    for j in idx:
+        tk = cols[j]
+        f_rows = own_bars(valid, j, t)
+        m_rows = own_bars(valid, j, t, back=T10)
+        if f_rows is None or m_rows is None:
+            continue                                     # not yet 280 of its own bars
+        cl_f, hi_f, lo_f = C[f_rows, j], H[f_rows, j], L[f_rows, j]
+        ac, hh, ll, cc, vv = (X[m_rows, j] for X in (A, H, L, C, V))
 
-    # momentum quality — 90d exp regression of log price, annualised slope x R2 / 90d vol
-    y = np.log(a[-90:])
-    x = np.arange(90.0)
-    xc = x - x.mean()
-    slope = (xc[:, None] * (y - y.mean(axis=0))).sum(axis=0) / (xc ** 2).sum()
-    yhat = slope * xc[:, None] + y.mean(axis=0)
-    ss_res = ((y - yhat) ** 2).sum(axis=0)
-    ss_tot = ((y - y.mean(axis=0)) ** 2).sum(axis=0)
-    r2 = np.clip(1 - ss_res / np.where(ss_tot == 0, 1e-12, ss_tot), 0, 1)
-    vol90 = np.std(np.diff(np.log(a[-91:]), axis=0), axis=0)
-    mq = slope * 252.0 * r2 / np.where(vol90 == 0, 1e-9, vol90)
+        # D1/D2: eligibility scaled to the name's own daily range. Both default to the law's flat
+        # 25% — `volatility_tolerance` floors at it, so a quiet name is judged exactly as §3.2
+        # judges it and only a name that actually moves is given room.
+        apct = sg.atr_fraction(hi_f, lo_f, cl_f)
+        addv_of[tk], atrf[tk] = float(addv[j]), apct
+        if hyp["screen"] == "deep_recovery":
+            # C1: M2 and M3 both go. The census screen is the whole eligibility test, and it has
+            # no pivot — the entry trigger is a new 20-session closing high (`signals.resumed`),
+            # the same door X1 opened, because a name 50% off its low has no §3.2 base and will
+            # not have one for months.
+            m2[tk] = sg.deep_recovery(hi_f, lo_f, cl_f)["passes"]
+            bases[tk] = dict(valid=False, pivot=None, contraction_low=None, depth=None)
+        else:
+            m2[tk] = sg.trend_template(cl_f, off_high=_tolerance(apct, hyp["off_high_atr_mult"]))
+            bases[tk] = sg.base_scan(hi_f, lo_f, cl_f, min_age=int(hyp["min_base_age"]),
+                                     max_depth=_tolerance(apct, hyp["depth_atr_mult"]))
+        quality[tk] = sg.momentum_quality(ac, vol_divisor=hyp["mq_vol_divisor"])
+        subs = sg.setup_proximity(hh, ll, cc, vv)
+        atr_pct[tk], dryup[tk], near_high[tk] = subs["atr_pct"], subs["dryup"], subs["near_high"]
+        ind = frame["industry"].get(tk)
+        if ind and len(ac) >= 126 and ac[-126] > 0:
+            group_returns.setdefault(ind, []).append(float(ac[-1]) / float(ac[-126]) - 1)
 
-    # setup proximity — four equal sub-scores
-    tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
-    atr = pd.DataFrame(tr).rolling(14, min_periods=8).mean().values
-    hist = atr[-252:]
-    s_atr = 100.0 - 100.0 * np.nanmean(hist <= atr[-1], axis=0)
-    dd_r = 1 - np.min(c[-20:], axis=0) / np.max(c[-20:], axis=0)
-    dd_p = 1 - np.min(c[-40:-20], axis=0) / np.max(c[-40:-20], axis=0)
-    s_pull = dd_p - dd_r
-    v50 = np.mean(v[-50:], axis=0)
-    s_dry = -np.mean(v[-10:], axis=0) / np.where(v50 == 0, 1e-9, v50)
-    hi52 = np.max(c[-252:], axis=0)
-    s_prox = c[-1] / hi52
-    setup = np.nanmean(np.vstack([s_atr, pct_rank(s_pull), pct_rank(s_dry), pct_rank(s_prox)]), axis=0)
+    ranked = sorted(quality)
+    if not ranked:
+        return None
+    groups = sorted(group_returns)
+    group_mean = {g: float(np.nanmean(group_returns[g])) for g in groups}
+    group_pct = dict(zip(groups, sg.pct_rank([group_mean[g] for g in groups])))
+    q_p = dict(zip(ranked, sg.pct_rank([quality[tk] for tk in ranked])))
+    d_p = dict(zip(ranked, sg.pct_rank([dryup[tk] for tk in ranked])))
+    x_p = dict(zip(ranked, sg.pct_rank([near_high[tk] for tk in ranked])))
 
-    # industry group strength — equal-weight 6-month group return, percentile across groups
-    ret6 = a[-1] / a[-126] - 1
-    tick = cols[idx]
-    gser = pd.Series(ret6, index=[ind.get(t_) for t_ in tick])
-    gmean = gser.groupby(level=0).mean()
-    gpct = pd.Series(pct_rank(gmean.values), index=gmean.index)
-    grp = np.array([gpct.get(ind.get(t_), 50.0) if ind.get(t_) else 50.0 for t_ in tick])
+    day = frame["dates"][t]
+    out, m4_known = {}, 0
+    for tk in ranked:
+        # S2: the ATR-tightness sub-score rewards quiet. Tightness belongs at the pivot, where
+        # M3 already measures the base contraction — as a ranking term it tilts the whole book
+        # toward names that cannot produce a tail.
+        parts = [d_p[tk], x_p[tk]] if hyp["mcn_drop_atr"] else [atr_pct[tk], d_p[tk], x_p[tk]]
+        setup = float(np.nanmean(parts))
+        ind = frame["industry"].get(tk)
+        grp = group_pct.get(ind, 50.0) if ind else 50.0
+        score = sg.mcn(q_p[tk], setup, grp)
+        entry = frame["eps"].get(tk)
+        if entry is not None:
+            m4 = sg.m4_acceleration(eps_as_of(entry, day), swing=hyp["m4_swing"])["passes"]
+            m4_known += 1
+        else:
+            m4 = None                       # unknown is not a pass; §3.3 never guesses a component
+        out[tk] = dict(mcn=score, m2=bool(m2[tk]), m4=m4, base=bases[tk])
 
-    mcn = np.nanmean(np.vstack([pct_rank(mq), setup, grp]), axis=0)
+    # L1-M = M2 and M4 pass, ranked by MCN, top 150 (§3.2). An unknown M4 is not a pass.
+    eligible = [tk for tk in out if out[tk]["m2"]
+                and (out[tk]["m4"] is True or not hyp["require_m4"])
+                and out[tk]["mcn"] == out[tk]["mcn"]]
+    # §3.2's L1-M is the top 150 by MCN. A2 must NOT inherit that truncation: MCN rewards explosive
+    # short-horizon momentum, mega-cap trend leaders compound steadily and score badly on it, and
+    # run 55 proved the consequence — NVDA held 3 days at a loss, and AVGO, LLY, GOOGL, MSFT, AMZN
+    # and NFLX never entered once in nine years while each made repeated 252-day highs. The arm was
+    # A2 at the door and A1 in the queue.
+    #
+    # The gap runs 54-56 flagged is now closed by ruling (Zak, 2026-08-13). The queue's order is a
+    # declared clause of the hypothesis, not an inheritance:
+    #
+    #   * None            — MCN descending, §3.2's own queue. The law, and every non-A2 variant.
+    #   * 'breakout_fcfs' — E3's centre. Within a day, dollar liquidity (ADDV) descending; across
+    #     days, first-come-first-served emerges because the door only fires on a FRESH new-high
+    #     close, so today's signals compete only for today's free slots. No selection signal
+    #     beyond "a slot was free when the breakout arrived" — the thesis says breadth and
+    #     holding are the constraint, not selectivity, and the queue now says the same thing.
+    #   * 'trend_vol'     — the pre-registered alternative arm: calmest trend first, the name's
+    #     own ATR as a fraction of price, ascending. The smooth-mover overlay, kept on the ladder
+    #     so its lift over FCFS is measured rather than assumed.
+    order = hyp.get("slot_order")
+    if order == "breakout_fcfs":
+        ranked_eligible = sorted(eligible, key=lambda tk: -addv_of.get(tk, 0.0))
+    elif order == "trend_vol":
+        ranked_eligible = sorted(eligible, key=lambda tk: atrf.get(tk) if atrf.get(tk) is not None
+                                 else float("inf"))
+    elif order == "vol_desc":
+        # A3's measured centre (push study, 2026-08-13): the LOUDEST names first. Completion
+        # lift is monotone in volatility — 0.59x in the calm quartile, 1.74x in the loud one —
+        # and per-episode EV runs +0.16% to +0.91% the same way. The opposite of trend_vol,
+        # which stays on the ladder so the smoothness story is measured rather than argued.
+        ranked_eligible = sorted(eligible, key=lambda tk: -atrf[tk]
+                                 if atrf.get(tk) is not None else float("inf"))
+    elif order is None:
+        ranked_eligible = sorted(eligible, key=lambda tk: -out[tk]["mcn"])
+    else:
+        raise ValueError(f"unknown slot_order {order!r} — the queue's order is a declared clause, "
+                         f"and an unrecognized one must halt rather than fall back to MCN")
+    l1m = ranked_eligible if hyp.get("entry_new_high") else ranked_eligible[:150]
+    return dict(scored=out, l1m=l1m, evaluated=len(ranked), m4_known=m4_known,
+                addv=addv_of, atr_fraction=atrf)
 
-    # trend template at the current price
-    cc = close[:, idx]
-    s50 = np.nanmean(cc[-50:], axis=0); s150 = np.nanmean(cc[-150:], axis=0)
-    s200 = np.nanmean(cc[-200:], axis=0); s200_21 = np.nanmean(cc[-221:-21], axis=0)
-    lo52 = np.nanmin(cc[-252:], axis=0); hh52 = np.nanmax(cc[-252:], axis=0); px = cc[-1]
-    m2 = ((px > s150) & (px > s200) & (s150 > s200) & (s200 > s200_21) & (px > s50)
-          & (px >= lo52 * 1.30) & (px >= hh52 * 0.75))
 
-    # base scan — pivot is the highest high of the base, base is peak..today
-    hh, ll = high[:, idx], low[:, idx]
-    look = min(120, hh.shape[0])
-    seg_h, seg_l = hh[-look:], ll[-look:]
-    p = np.nanargmax(seg_h, axis=0)
-    pivot = seg_h[p, np.arange(len(p))]
-    blen = look - p
-    depth = np.array([(pivot[j] - np.nanmin(seg_l[p[j]:, j])) / pivot[j] for j in range(len(p))])
-    clow = np.nanmin(ll[-10:], axis=0)
-    valid = (blen >= 25) & (depth <= 0.25) & (px <= pivot * 1.005)
+# =============================================================================== the simulation
+def simulate(frame, cfg):
+    """The day loop. Pure: no database, no clock — `tests/test_backtest_engine.py` runs it on
+    hand-built bars, which is the only way to assert what the engine refuses to do."""
+    hyp = cfg["hyp"]
+    dates, cols = frame["dates"], frame["cols"]
+    arrays = frame["arrays"]
+    O, H, L, C, A, V = (arrays[k] for k in ("open", "high", "low", "close", "adj", "vol"))
+    col = {tk: j for j, tk in enumerate(cols)}
+    n = len(dates)
 
-    out = pd.DataFrame(dict(ticker=tick, mcn=mcn, m2=m2, valid=valid, pivot=pivot,
-                            depth=depth, blen=blen, clow=clow, px=px,
-                            stop=np.maximum(clow, pivot * 0.92)))
-    l1m = out[out.m2].sort_values("mcn", ascending=False).head(150)
-    return out.set_index("ticker"), l1m
+    # the 50 sessions *before* each day — the breakout day is the test, never its own baseline
+    v50 = pd.DataFrame(V).shift(1).rolling(50, min_periods=25).mean().values
+    # every name's own printed sessions, once. Rules read these rows, never grid slices.
+    valid = [np.flatnonzero(~np.isnan(C[:, j])) for j in range(len(cols))]
 
+    gate_weeks, gate_states = _gate_series(frame["spx"])
 
-# ------------------------------------------------------------------ simulation
-def run(w, ind, m1, hb):
-    dates = list(w["close"].index)
-    O, H, L, C, V = (w[k] for k in ("open", "high", "low", "close", "vol"))
-    # prior 50 days: the breakout day is the test, not the baseline. min_periods matters —
-    # without it one missing bar anywhere in the window returns NaN and silently fails the gate.
-    v50 = V.shift(1).rolling(50, min_periods=25).mean()
+    nav = cash = cfg["start_nav"]
 
-    budgets = {70: 0.007, 85: 0.009}          # §3.2 steady-state risk budgets
-    MAXSTOP, CEIL, MAXN, BAND = 0.08, 0.40, 4, 0.12
+    # ------------------------------------------------------------------ the parked index (K1/K2)
+    # Idle capital rests in the benchmark instead of earning nothing. `book` holds what was paid so
+    # a partial sale can realise its share of the cost; `realised` accumulates the park's P&L and
+    # is carried into the closing reconciliation, because cash raised here is cash the identity has
+    # to account for. Park trades are deliberately kept OUT of `trades` — a rebalance is not a
+    # momentum decision, and folding it in would corrupt every per-trade statistic in the report.
+    park = dict(qty=0.0, book=0.0, realised=0.0, buys=0, sells=0, cost=0.0, mark=0.0)
+    park_on = bool(hyp.get("park_idle")) and hyp.get("cash_target") is not None
+    park_bps = cfg["spread_bps"][0] / 10_000.0     # the benchmark is the deep bucket by definition
 
-    nav, cash = START_NAV, START_NAV
-    book, trades, equity = {}, [], []
-    queue = pd.DataFrame()
-    fired = {}                               # ticker -> pivot already filled; re-arms on a new base
-    diag = dict(weeks=0, l1m=0, valid=0, touched=0, no_fill_gap=0, no_volume=0,
-                no_room=0, taken=0, days_slots_free=0, already_fired=0)
+    # K3. The park may hold a fixed tilt into the momentum ETF beside the core index, priced as a
+    # synthetic total-return index over the two. Two things are declared rather than buried:
+    #
+    #   * it rebalances DAILY, where §2.1's own park trues up on a band. E4 measured the cost of
+    #     that difference and it is nearly nothing — the 80/20 blend trued up ONCE in nine years,
+    #     so the drift never left the 5-point band — but a daily-rebalanced synthetic is still a
+    #     small upper bound on the tilt's contribution, not a tradeable path;
+    #   * the tilt's own history is asserted, not assumed. SPMO does not exist before 2015-10, and
+    #     silently falling back to the core index for the missing stretch would report a blend
+    #     that was never held. A window reaching further back must halt.
+    park_by_day = frame["bench_by_day"]
+    if hyp.get("park_tilt"):
+        tilt_w = float(hyp["park_tilt"])
+        tilt_px = {d: float(v) for d, v in frame["park_tilt"].items()}
+        common = [d for d in dates if d in frame["bench_by_day"] and d in tilt_px]
+        if not common or common[0] > dates[WARMUP]:
+            raise DataIntegrityError(
+                f"the park tilt ({PARK_TILT_TICKER}) has no bars before "
+                f"{common[0] if common else 'ever'}, and the simulated window opens at "
+                f"{dates[WARMUP]} — a tilt cannot be back-filled with the core index without "
+                f"reporting a park that was never held")
+        synth, prev = {}, None
+        level = 1.0
+        for d in common:
+            if prev is not None:
+                r_core = frame["bench_by_day"][d] / frame["bench_by_day"][prev] - 1.0
+                r_tilt = tilt_px[d] / tilt_px[prev] - 1.0
+                level *= 1.0 + (1.0 - tilt_w) * r_core + tilt_w * r_tilt
+            synth[d] = level
+            prev = d
+        park_by_day = synth
 
-    for t in range(WARMUP, len(dates)):
+    def park_price(d):
+        v = park_by_day.get(d)
+        return float(v) if v else None
+
+    def park_sell(px, want):
+        """Liquidate enough of the park to raise `want` in cash. Returns the proceeds."""
+        if px is None or want <= 0 or park["qty"] <= 0:
+            return 0.0
+        net = px * (1 - park_bps)
+        qty = min(park["qty"], want / net)
+        proceeds, share = qty * net, qty / park["qty"]
+        park["realised"] += proceeds - park["book"] * share
+        park["cost"] += qty * px * park_bps
+        park["book"] -= park["book"] * share
+        park["qty"] -= qty
+        park["sells"] += 1
+        return proceeds
+
+    def park_buy(px, spend):
+        """Put `spend` of idle cash into the park. Returns the cash consumed."""
+        if px is None or spend <= 0:
+            return 0.0
+        park["qty"] += spend / (px * (1 + park_bps))
+        park["book"] += spend
+        park["cost"] += spend * park_bps / (1 + park_bps)
+        park["buys"] += 1
+        return spend
+    book, trades, equity, pending = {}, [], [], {}
+    exited = {}                 # ticker -> the session we last let it go (X1's cool-off clock)
+    fired, queue, conf = {}, None, dict(m4_evaluated=0, m4_known=0, blackout_decisions=0,
+                                        blackout_known=0, rank_dates=0, entries=0,
+                                        entries_refused_below_70=0, gap_no_fill=0,
+                                        pressed=0, press_windows=0, press_expired=0,
+                                        reentries=0, trims=0, heat_refused=0, recoveries=0,
+                                        new_high_entries=0)
+
+    def spread(j, t):
+        """Half-spread per side, by point-in-time ADDV bucket (E-series §2.2).
+
+        Replaces the flat 5/15bps two-bucket split, which traced to no source. The curve's anchors
+        are fixed by the work order: ~1-5bps large-cap (Nasdaq S&P 500 spread data), ~18bps
+        small-cap (Frazzini-Israel-Moskowitz realised), 50+bps micro-cap. Retail price improvement
+        — roughly 47% of the quoted spread in S&P names — is deliberately NOT modelled, so the
+        curve is conservative by construction rather than optimistic.
+
+        ADDV is computed on the ADJUSTED close, so the split factors cancel; raw x volume would
+        inflate a name's past liquidity by its own future split factor and quietly move names into
+        a cheaper bucket than they traded in. That is the defect that cost runs 18-44.
+        """
+        advv = np.nanmedian(C[max(0, t - 49):t + 1, j] * V[max(0, t - 49):t + 1, j])
+        if not np.isfinite(advv):
+            advv = 0.0                      # unknown liquidity is charged as the worst bucket
+        for floor, bps in cfg["spread_curve"]:
+            if advv >= floor:
+                return bps / 10_000.0
+        return cfg["spread_curve"][-1][1] / 10_000.0
+
+    def _blacked_out(frame, conf, tk, day):
+        """§3.3: the earnings wall cancels a resting order. Counted per door tried, because the
+        coverage ratio only means anything if the denominator is the decisions we actually made."""
+        nxt = _next_report(frame["reports"].get(tk), day)
+        conf["blackout_decisions"] += 1
+        conf["blackout_known"] += 1 if _knowable(nxt, day) else 0
+        return nxt is not None and sg.in_blackout(day, nxt)
+
+    def base_trigger(j, t, base, rows):
+        """Door one — the breakout §3.2 names. Returns the fill, or None if nothing triggered."""
+        pivot = base["pivot"]
+        hi, op = H[t, j], O[t, j]
+        if hyp["confirm_before_entry"]:
+            # E1. Nothing rests at the broker. The trigger is a session that *closes* above the
+            # pivot carrying >= 1.4x its own 50-day, and the fill is the next open — so a breakout
+            # that did not carry is never bought, rather than bought and then discovered. Costs a
+            # session of drift; removes the entire unconfirmed bucket, which lost money under both
+            # readings of the hair-trigger.
+            vj = valid[j]
+            kk = int(np.searchsorted(vj, t, side="left"))
+            if kk == 0:
+                return None
+            trig = vj[kk - 1]
+            if not (C[trig, j] > pivot) or not sg.breakout_confirmed([V[trig, j]], [v50[trig, j]]):
+                return None
+            fill = op if not np.isnan(op) else C[trig, j]
+            if fill > pivot * cfg["confirm_limit"]:
+                conf["gap_no_fill"] += 1
+                return None                               # gapped past the ceiling — let it go
+            return dict(kind="base", fill=fill, pivot=pivot, confirmed=True)
+        if np.isnan(hi) or hi < pivot:
+            return None
+        order = sg.entry_order(pivot, base["contraction_low"],
+                               limit_over=cfg["limit_over"], max_stop=cfg["max_stop"])
+        fill = pivot if (np.isnan(op) or op <= pivot) else op
+        if fill > order["limit"]:
+            conf["gap_no_fill"] += 1
+            return None                                   # gapped through the limit — no fill
+        return dict(kind="base", fill=fill, pivot=pivot, confirmed=None)
+
+    def realise(tk, day, price, reason, t, qty, gross_price=None):
+        """Book `qty` shares out of a position and write the trade row for that slice.
+
+        The engine held whole positions only until the trim ladder needed partials. A slice is a
+        trade in its own right — its own row, its own reason, its own P&L — so `trim50` and the
+        eventual exit of the runner are separately measurable, which is the whole point of asking
+        whether trimming pays. Average cost is unchanged by a trim: the lots shrink pro rata, so
+        what is left has the same basis, the same stop and the same milestones ahead of it.
+        """
+        p = book[tk]
+        share = qty / p["qty"]
+        # Decisions ride raw prices, so the sleeve's P&L is price-only. The dividend the adjusted
+        # series implies is measured and reported (`stats.dividend_bps`) rather than either banked
+        # silently or forgotten — VOO's benchmark is total return, so this is the size of the
+        # handicap we are giving it.
+        # Dividends are inside the adjusted series now, so P&L is total return and there is no
+        # separate line to add. Kept at zero rather than deleted so the column and the trade
+        # schema stay stable across the correction.
+        dividend = 0.0
+        invested, gross_invested = p["invested"] * share, p["gross_invested"] * share
+        proceeds = qty * price
+        gross = qty * (gross_price if gross_price is not None else price)
+        trades.append(dict(
+            ticker=tk, entry_date=p["entry_date"], entry_price=invested / qty,
+            qty=qty, exit_date=day, exit_price=price, mcn=p["mcn"], pivot=p["pivot"],
+            initial_stop=p["init_stop"], size_pct=p["size"], pyramid_steps=p["step"],
+            pnl_usd=proceeds - invested, pnl_pct=proceeds / invested - 1,
+            pnl_gross_usd=gross - gross_invested,
+            cost_usd=(gross - proceeds) + (invested - gross_invested),
+            dividend_usd=dividend,
+            bars_held=t - p["entry_idx"], max_favorable=p["mfe"], max_adverse=p["mae"],
+            exit_reason=reason, confirmed=p["confirmed"], entry_kind=p.get("kind", "base")))
+        p["qty"] -= qty
+        p["invested"] -= invested
+        p["gross_invested"] -= gross_invested
+        p["lots"] = [(d * (1 - share), e, a) for d, e, a in p["lots"]]
+        return proceeds
+
+    def trim(tk, day, price, reason, t, qty, gross_price=None):
+        got = realise(tk, day, price, reason, t, qty, gross_price=gross_price)
+        conf["trims"] += 1
+        return got
+
+    def close_position(tk, day, price, reason, t, gross_price=None):
+        proceeds = realise(tk, day, price, reason, t, book[tk]["qty"], gross_price=gross_price)
+        book.pop(tk)
+        # A delisted name has no way back; everything else is only a moment we were wrong about.
+        if reason != "delisted":
+            exited[tk] = t
+        return proceeds
+
+    for t in range(WARMUP, n):
         day = dates[t]
-        on = gate_on(m1, day)
+        on = _gate_on(gate_weeks, gate_states, day)
 
-        # ---- weekly re-rank (Fridays), exactly as weekly-rank does it
-        if pd.Timestamp(day).weekday() == 4 or queue.empty:
-            got = rank_week(w, t, ind)
-            if got is not None:
-                scored, queue = got
-                diag["weeks"] += 1
-                diag["l1m"] += len(queue); diag["valid"] += int(queue.valid.sum())
-                # §3.2 lists exactly three exits: the stop, the trend template failing, and
-                # MCN < 55. Falling out of the top 150 is NOT one of them — L1-M is a
-                # candidate list, not a holding rule, and treating it as one ejected every
-                # position within days and made the sleeve untradeable.
-                for tk in list(book):
-                    if tk not in scored.index:
-                        continue                            # no longer scoreable; leave it to the stop
-                    row = scored.loc[tk]
-                    px = C[tk].iloc[t]
-                    if np.isnan(px):
-                        continue
-                    if t - book[tk]["entry_idx"] < MIN_HOLD:
-                        continue                            # §1 minimum intended hold; stops exempt
-                    if not bool(row.m2):
-                        cash += book[tk]["qty"] * px
-                        close_trade(book, trades, tk, day, px, "trend template fail", t)
-                    elif float(row.mcn) < MCN_EXIT:
-                        cash += book[tk]["qty"] * px
-                        close_trade(book, trades, tk, day, px, "MCN < 55", t)
-
-        # ---- gate off: the sleeve goes to cash (§3.3 crash protocol)
-        if not on and book:
-            for tk in list(book):
-                px = O[tk].iloc[t]
-                if np.isnan(px): px = C[tk].iloc[t]
-                if not np.isnan(px):
-                    cash += book[tk]["qty"] * px
-                    close_trade(book, trades, tk, day, px, "market gate OFF", t)
-
-        # ---- §5.1: a breakout that did not carry 1.4x volume is a failed breakout. The
-        # broker order has already filled overnight, so the brief instructs an exit at the
-        # next open — not a refusal to enter, which is what the first run modelled.
-        for tk in list(book):
-            p = book[tk]
-            if p["vol_ok"] or p["entry_idx"] == t:
+        # ---- exits flagged at yesterday's close fill at this open (§5.1: the desk arms, the
+        # morning executes). Only the stop is intraday, because the broker holds it.
+        for tk, reason in list(pending.items()):
+            pending.pop(tk)
+            if tk not in book:
                 continue
-            px = O[tk].iloc[t]
+            j = col[tk]
+            px = O[t, j]
             if np.isnan(px):
-                px = C[tk].iloc[t]
-            if not np.isnan(px):
-                cash += p["qty"] * px
-                close_trade(book, trades, tk, day, px, "volume unconfirmed", t)
+                px = C[t, j]
+            if np.isnan(px):
+                px = book[tk]["last_mark"]
+            cash += close_position(tk, day, px * (1 - spread(j, t)), reason, t, gross_price=px)
 
-        # ---- stops and trails on what we hold
+        # ---- weekly re-rank (§3.0 cadence: M2 and M4 weekly, MCN weekly)
+        if pd.Timestamp(day).weekday() == 4 or queue is None:
+            got = rank(frame, t, cols, arrays, valid, hyp)
+            if got is not None:
+                queue = got
+                conf["rank_dates"] += 1
+                conf["m4_evaluated"] += got["evaluated"]
+                conf["m4_known"] += got["m4_known"]
+
+        scored = (queue or {}).get("scored", {})
+
+        # ---- what we hold: stops first, then the conclusions the law draws
         for tk in list(book):
-            p = book[tk]
-            lo, hi, cl, op = L[tk].iloc[t], H[tk].iloc[t], C[tk].iloc[t], O[tk].iloc[t]
+            p, j = book[tk], col[tk]
+            lo, hi, cl, op = L[t, j], H[t, j], C[t, j], O[t, j]
+
             if np.isnan(cl):
+                p["stale"] += 1
+                if p["stale"] >= DELISTED_AFTER:
+                    cash += close_position(tk, day, p["last_mark"], "delisted", t,
+                                           gross_price=p["last_mark"])
                 continue
-            if lo <= p["stop"]:
-                fill = min(p["stop"], op) if not np.isnan(op) else p["stop"]
-                cash += p["qty"] * fill
-                close_trade(book, trades, tk, day, fill, "stop", t)
+            p["stale"] = 0
+
+            # the stop is a resting broker order: it fires intraday, and a gap fills at the open
+            if p["stop"] is not None and lo <= p["stop"]:
+                gapped = not np.isnan(op) and op < p["stop"]
+                fill = op if gapped else p["stop"]
+                cash += close_position(tk, day, fill * (1 - spread(j, t)),
+                                       "gap" if gapped else "stop", t, gross_price=fill)
                 continue
-            p["hi_close"] = max(p["hi_close"], cl)
-            p["mfe"] = max(p["mfe"], hi / p["entry"] - 1)
-            p["mae"] = min(p["mae"], lo / p["entry"] - 1)
 
-            # pyramid — 50 / 25 / 25 at the pivot, +2.5%, +4.5%
-            for step, mult in ((2, 1.025), (3, 1.045)):
-                if p["vol_ok"] and p["step"] == step - 1 and hi >= p["pivot"] * mult and on:
-                    add_cost = p["target_cad"] * 0.25
-                    if cash >= add_cost:
-                        fill = max(p["pivot"] * mult, op if not np.isnan(op) else 0)
-                        q = add_cost / fill
-                        p["entry"] = (p["entry"] * p["qty"] + fill * q) / (p["qty"] + q)
-                        p["qty"] += q; cash -= add_cost; p["step"] = step
+            if cl > p["hi_close"]:
+                p["hi_close"], p["hi_at"] = cl, t
+            p["mfe"] = max(p["mfe"], hi / p["avg_cost"] - 1)
+            p["mae"] = min(p["mae"], lo / p["avg_cost"] - 1)
 
-            # ratchet — breakeven at full size, 10% trail past +15%, 5% under euphoria
-            win = cl / p["entry"] - 1
-            hist = C[tk].iloc[max(0, t - 49):t + 1].dropna()
-            euph = False
-            if len(hist) >= 50:
-                euph = cl > hist.mean() + 2 * hist.std()
-            cand = p["stop"]
-            if euph:
-                cand = max(cand, p["hi_close"] * 0.95)
-            elif win >= 0.15:
-                cand = max(cand, p["hi_close"] * 0.90)
-            elif p["step"] >= BREAKEVEN_STEP:
-                cand = max(cand, p["entry"])
-            p["stop"] = max(p["stop"], cand)               # ratchets up, never down
-
-        # ---- entries
-        if on and len(book) < MAXN and not queue.empty:
-            diag["days_slots_free"] += 1
-            exposure = sum(p["qty"] * C[p["ticker"]].iloc[t] for p in book.values()
-                           if not np.isnan(C[p["ticker"]].iloc[t]))
-            for _, r in queue[queue.valid].sort_values("mcn", ascending=False).iterrows():
-                tk = r.ticker
-                if tk in book or len(book) >= MAXN:
+            # ---- M1: the trim ladder. Zak's own method — sell a quarter at +50%, a quarter at
+            # +100%, let the rest ride until the name is genuinely finished. Each rung is a
+            # resting GTC limit sell at avg cost x (1 + level), so it fills intraday when the
+            # high reaches it and takes the better price on a gap through. That is how the order
+            # would actually sit at the broker, and unlike an at-the-close trim it cannot use a
+            # price the day had not yet printed when the decision was made.
+            for rung, level in enumerate(hyp["trim_at"] or ()):
+                if rung in p["trimmed"] or p["qty"] <= 0:
                     continue
-                if fired.get(tk) == round(float(r.pivot), 4):
-                    diag["already_fired"] += 1
-                    continue                                # this order already filled once
-                op = O[tk].iloc[t]
-                if VOL_MODE == "confirm_first":
-                    # wait for yesterday to CLOSE above the pivot on 1.4x volume, then buy this
-                    # open. Costs a day of drift; never pays for a breakout that did not carry.
-                    pc, pv, pv5 = C[tk].iloc[t - 1], V[tk].iloc[t - 1], v50[tk].iloc[t - 1]
-                    if np.isnan(pc) or pc < r.pivot:
+                target = p["avg_cost"] * (1 + float(level))
+                if np.isnan(hi) or hi < target:
+                    continue
+                fill = max(target, op if not np.isnan(op) else target)
+                sold = min(p["qty_peak"] * float(hyp["trim_frac"]), p["qty"])
+                p["trimmed"].add(rung)
+                if sold <= 0:
+                    continue
+                cash += trim(tk, day, fill * (1 - spread(j, t)),
+                             f"trim{int(round(level * 100))}", t, sold, gross_price=fill)
+            if p["qty"] <= 0:
+                book.pop(tk)                      # the ladder sold the last of it
+                exited[tk] = t
+                continue
+            # What is left after a trim is the runner. §3.2's housekeeping exits — the template,
+            # the MCN floor, the stall clock, the stagnation clock — are how a position that is
+            # merely resting gets closed, and Zak's rule is that the runner rides "until the stock
+            # completely dies". So on a trimmed position only the stop, the gate and delisting
+            # speak. This is an interpretation of "completely dies", and it is the assumption to
+            # revisit first if the runner bucket bleeds.
+            riding = hyp["runner_immunity"] and p["trimmed"]
+            # A2: proven strength earns room. Zak's "on proven strength we widen the stops" — a
+            # position that has already made `strength_at` has told us something the entry could
+            # not, and the trail that was right for an unproven breakout is not right for it.
+            gain = cl / p["avg_cost"] - 1
+            proven = hyp["strength_at"] is not None and gain >= float(hyp["strength_at"])
+            # A3: past the final rung the position stops being a trade. Zak's rule — "if it makes
+            # it that high... never sell... just ride it through the highs and lows unless the
+            # financials on the profitability of the company dies". Every §3.2 exit is a PRICE
+            # exit, and the whole premise here is that price no longer speaks, so all of them go:
+            # the stop, the trail, the template, the score, the clocks and the market gate. What
+            # is left is the business failing, and the name ceasing to trade.
+            forever = bool(hyp["forever"] and hyp["trim_at"]
+                           and len(p["trimmed"]) >= len(hyp["trim_at"]))
+            if forever:
+                p["stop"] = None
+                eps = frame["eps"].get(tk)
+                if eps is not None and sg.profitability_dead(
+                        eps_as_of(eps, day), worsening=bool(hyp["dead_needs_worsening"])):
+                    pending[tk] = "profitability"
+                    continue
+                p["last_mark"] = cl
+                continue
+
+            # ---- §3.2 breakout confirmation, judged at EOD on the sessions since entry
+            window = range(p["entry_idx"], min(p["entry_idx"] + sg.CONFIRM_SESSIONS, t + 1))
+            if hyp["confirm_before_entry"]:
+                # E1: the breakout was confirmed before a share was bought, so there is nothing to
+                # classify, nothing to freeze, no late window and no hair-trigger. The entire
+                # apparatus §3.2 needed to manage an unconfirmed fill simply does not arise.
+                state = dict(confirmed=True, pyramid_armed=True, fraction=1.0,
+                             exit_next_open=False, closed_below_pivot=False)
+            else:
+                state = sg.confirmation_state(
+                    [V[i, j] for i in window], [v50[i, j] for i in window],
+                    closes=[C[i, j] for i in window], pivot=p["pivot"],
+                    hair_trigger_while_pending=cfg["hair_trigger_while_pending"])
+            p["confirmed"] = state["confirmed"]
+
+            if not on and hyp["gate_off_exit"]:
+                pending[tk] = "gate_off"                 # §3.3 crash protocol, acted next open
+                continue
+            if state["exit_next_open"] and not hyp["entry_new_high"]:
+                # The hair-trigger exits on a close below the PIVOT. A2 has no pivot — its entry is
+                # a new high and its "pivot" is recorded as the fill, so this fires on any close
+                # below the entry price. That is a breakeven stop on day one, sitting underneath a
+                # 3xATR stop and an 8xATR trail and firing long before either. It closed 412 of run
+                # 54's 1,352 positions and is why the average hold was 18.9 days for an arm whose
+                # whole thesis is holding. A2 has no volume-confirmation step to enforce.
+                pending[tk] = "unconfirmed"              # the hair-trigger — the only volume exit
+                continue
+            level_governs = (hyp["level_stop_sessions"] is None
+                             or (t - p["entry_idx"]) < int(hyp["level_stop_sessions"]))
+            if hyp["level_stop"] and level_governs and np.isfinite(cl) and cl < p["level"]:
+                # A3 (push study, 2026-08-13): the breakout level IS the stop, judged on the
+                # close, acted next open. What run 54 had by ACCIDENT and was rightly called a
+                # defect for an arm specced with a 3xATR stop is, measured across 56,380 resolved
+                # episodes, the structure with positive expectancy in every volatility quartile:
+                # 93% of breakouts die within ~10 sessions costing -1% to -3%, and the winners
+                # never close below the level on their way to +50%. The catastrophe stop below
+                # sits 10 ATRs down and exists for the Protect layer, not as the exit.
+                pending[tk] = "level_stop"
+                continue
+
+            row = scored.get(tk)
+            # An ENTRY screen is not a HOLD condition, and conflating the two cost run 39 its
+            # winners. `deep_recovery` requires the name to be at least 25% under its 52-week
+            # high — so the moment a position works, the screen stops passing and the template
+            # exit sells it. 142 of that run's 253 exits were `template` at 9.1 sessions: the
+            # rule was selling every name for the crime of no longer being cheap. With a screen
+            # in use, holding is governed by the stop, the trail, the rungs and the clocks.
+            if hyp["template_exit"] and not hyp["screen"] and not riding \
+                    and row is not None and row["m2"] is False:
+                pending[tk] = "template"
+                continue
+            # C2. Run 39 did this by accident and it was the best bucket in the run: +$18,831 over
+            # 142 exits. Run 40 removed it and lost $13,083 — the hold doubled, the best trade went
+            # to +271%, and the account got worse. So the screen failing IS information; it is just
+            # not a stop. `deep_recovery` stops passing for two different reasons — the price rose
+            # out of the cheap band, or the old 52-week high simply aged out of the window — and
+            # only the first is a reason to take money off the table. `screen_exit_min_gain` keeps
+            # the first and discards the second.
+            # C4. C2 is why this exists. Requiring +10% of profit before the screen could sell made
+            # the run WORSE than either taking the signal raw (C1, +$4,624) or ignoring it
+            # entirely (C1b, -$8,459): -$12,773, average loss -10.21% -> -13.24%, drawdown -18% ->
+            # -35%. The gate did not protect winners, it stopped the rule cutting losers — which
+            # means the rule was never a profit-take at all.
+            #
+            # `deep_recovery` has four clauses and only one of them moves on its own: `r3 > 0.10`,
+            # the trailing quarter. Depth and off-high fail when the old high or low simply ages
+            # out of the 252-day window, which says nothing; the quarter failing says the move
+            # stopped. So the exit is that clause by itself, judged on the stock and not on our
+            # P&L, which is how every other exit in §3.2 works.
+            if hyp["momentum_exit_r3"] is not None and not riding:
+                r3 = sg.deep_recovery(H[own_bars(valid, j, t), j], L[own_bars(valid, j, t), j],
+                                      C[own_bars(valid, j, t), j])["r3"] \
+                     if own_bars(valid, j, t) is not None else None
+                if r3 is not None and r3 < float(hyp["momentum_exit_r3"]):
+                    pending[tk] = "momentum_died"
+                    continue
+            if hyp["screen"] and hyp["screen_exit"] and not riding \
+                    and row is not None and row["m2"] is False \
+                    and (hyp["screen_exit_min_gain"] is None
+                         or cl / p["avg_cost"] - 1 >= float(hyp["screen_exit_min_gain"])):
+                pending[tk] = "no_longer_cheap"
+                continue
+            if hyp["score_exit"] and not riding and row is not None \
+                    and row["mcn"] == row["mcn"] and row["mcn"] < cfg["mcn_exit"]:
+                pending[tk] = "score"
+                continue
+            if not riding and sg.stagnant(sessions_since_high=t - p["hi_at"],
+                                          limit=hyp["stagnation_days"]):
+                pending[tk] = "stagnant"
+                continue
+
+            # §3.2: a stalled pyramid "either completes on the next base or exits". Only the exit
+            # branch was ever built. P1 builds the other one — the press.
+            #
+            # The first cut of this required a valid new base AND a breakout on the exact session
+            # the four-week clock expired. That is a coincidence, not a rule: it never fired once
+            # in 285 trades, so P1 went untested while looking disproven. "The next base" needs a
+            # window to arrive in — the position keeps its stop and is given `press_grace` sessions
+            # to complete, and exits only if none shows up.
+            stalled_now = not riding and sg.stalled_pyramid(
+                pyramid_step=p["step"], sessions_held=t - p["stall_from"])
+            seeking = p.get("seeking")
+            if hyp["press_on_next_base"] and p["step"] < 3 and (stalled_now or seeking):
+                if not seeking:
+                    p["seeking"] = seeking = t + int(hyp["press_grace"])
+                    conf["press_windows"] += 1
+                pressed = False
+                nb_rows = own_bars(valid, j, t, back=1)
+                nb = (sg.base_scan(H[nb_rows, j], L[nb_rows, j], C[nb_rows, j],
+                                   min_age=int(hyp["min_base_age"]),
+                                   max_depth=_tolerance(sg.atr_fraction(H[nb_rows, j], L[nb_rows, j],
+                                                                        C[nb_rows, j]),
+                                                        hyp["depth_atr_mult"]))
+                      if nb_rows is not None else None)
+                if nb and nb["valid"] and not np.isnan(hi) and hi >= nb["pivot"]:
+                    dollars = p["target"] * (3 - p["step"]) * 0.25
+                    if cash >= dollars:
+                        fillp = max(nb["pivot"], op if not np.isnan(op) else nb["pivot"])
+                        paid = dollars * (1 + spread(j, t))
+                        cash -= paid
+                        p["lots"].append((dollars, fillp,
+                                          A[t, j] if np.isfinite(A[t, j]) else fillp))
+                        p["qty"] += dollars / fillp
+                        p["invested"] += paid
+                        p["gross_invested"] += dollars
+                        p["avg_cost"] = p["invested"] / p["qty"]
+                        p["qty_peak"] = max(p["qty_peak"], p["qty"])
+                        p["step"] = 3
+                        p["stall_from"] = t
+                        p["seeking"] = None
+                        conf["pressed"] += 1
+                        pressed = True
+                if not pressed and t >= seeking:
+                    conf["press_expired"] += 1
+                    pending[tk] = "stalled"
+                    continue                      # no base arrived in the window — resolve it
+            elif stalled_now:
+                pending[tk] = "stalled"
+                continue
+
+            nxt = _next_report(frame["reports"].get(tk), day)
+            conf["blackout_decisions"] += 1
+            if _knowable(nxt, day):
+                conf["blackout_known"] += 1
+                if hyp["earnings_exit"] and not riding \
+                        and sg.trading_days_between(day, nxt) <= 1 and \
+                        sg.holds_through_earnings(cl, p["avg_cost"], cushion=cfg["cushion"]) is False:
+                    pending[tk] = "earnings"
+                    continue
+
+            # ---- pyramid: adds arm only once confirmed, both limits at the ceiling (§3.2)
+            add_nxt = _next_report(frame["reports"].get(tk), day)
+            if state["pyramid_armed"] and p["step"] < 3 and not (
+                    add_nxt is not None and sg.in_blackout(day, add_nxt)):
+                for order in sg.pyramid_orders(p["pivot"], ceiling=cfg["pyramid_ceiling"],
+                                               spacing=hyp["pyramid_spacing"],
+                                               tranches=int(hyp["pyramid_tranches"])):
+                    if order["step"] <= p["step"] or hi < order["trigger"]:
                         continue
-                    diag["touched"] += 1
-                    if np.isnan(pv) or np.isnan(pv5) or pv < 1.4 * pv5:
-                        diag["no_volume"] += 1
+                    fill = max(order["trigger"], op if not np.isnan(op) else order["trigger"])
+                    if fill > order["limit"]:
+                        continue                          # a gap beyond +5% fills nothing
+                    dollars = p["target"] * order["fraction"]
+                    # The pyramid has the same first call as the entry: §3.2 buys the rest of the
+                    # position on the way up, and a tranche skipped for want of cash is a
+                    # position that never reaches its intended size. MU's second and third
+                    # tranches are exactly this case.
+                    # the 1% cushion covers the half-spread the fill is about to be charged:
+                    # raising exactly `dollars` leaves the account a few cents short of `paid`,
+                    # which the no-leverage guard correctly refuses to let pass
+                    add_need = dollars * (1 + 0.01)
+                    if cash < add_need and park_on:
+                        cash += park_sell(park_price(day) or park["mark"], add_need - cash)
+                    if cash < add_need:
                         continue
-                    vol_ok = True
-                    fill = op if not np.isnan(op) else pc
-                    if fill > r.pivot * 1.05:               # §3.2 gap-up tolerance
-                        diag["no_fill_gap"] += 1
-                        continue
+                    paid = dollars * (1 + spread(j, t))
+                    cash -= paid
+                    p["lots"].append((dollars, fill, A[t, j] if np.isfinite(A[t, j]) else fill))
+                    p["qty"] += dollars / fill
+                    p["invested"] += paid
+                    p["gross_invested"] += dollars
+                    p["avg_cost"] = p["invested"] / p["qty"]
+                    p["qty_peak"] = max(p["qty_peak"], p["qty"])
+                    p["step"] = order["step"]
+
+            # ---- the stop ladder. A2 REPLACES it wholesale (A2d): the Chandelier is the only exit
+            # the runner has, so the breakeven rung, the 10% trail and the euphoria tightening must
+            # not also fire. Stacking them would be the run-33 failure by another route — all three
+            # runners stopped out within 2-4 sessions of a tightening, at +91.7%, +102.7% and +9.9%.
+            out = {"stop": None} if (hyp["chandelier_mult"]
+                                     or not hyp["stop_ladder"]) else sg.ratchet_stop(
+                                  closes=C[max(0, p["entry_idx"]):t + 1, j][
+                                      ~np.isnan(C[max(0, p["entry_idx"]):t + 1, j])],
+                                  avg_cost=p["avg_cost"], current_stop=p["stop"],
+                                  highest_close=p["hi_close"], pyramid_step=p["step"],
+                                  trail10_from=hyp["trail_from"],
+                                  trail10=(hyp["runner_trail"] if riding and hyp["runner_trail"]
+                                           else hyp["strength_trail"] if proven
+                                           and hyp["strength_trail"] else hyp["trail"]),
+                                  breakeven_r=hyp["breakeven_r"], init_stop=p["init_stop"],
+                                  breakeven=hyp["breakeven"],
+                                  # A runner has already banked two rungs of profit. The euphoria
+                                  # tightening pays on an ordinary position (B2 proved that) but on
+                                  # a trimmed one it is what ends the ride: in run 33 all three
+                                  # runners stopped out 2-4 sessions after their second trim, on a
+                                  # 5% trail, at +91.7% (MU), +102.7% (AVAV) and +9.9% (CAMT).
+                                  euphoria=hyp["euphoria"] and not proven and not (
+                                      riding and hyp["runner_no_euphoria"]),
+                                  breakeven_on_full_size=hyp["breakeven_on_full_size"],
+                                  breakeven_giveback=hyp["breakeven_giveback"])
+            if hyp["chandelier_mult"]:
+                # A2d/A2e — two states and one switch. Below +1R the initial 3xATR stop stands
+                # untouched; at or above it the Chandelier takes over and thereafter only ratchets
+                # up. No profit target on the runner: the tail is the entire thesis, and <7% of
+                # trades produce the cumulative profits in the 66,000-trade sample this arm is
+                # built on. Cutting a winner at a target is how that family stops working.
+                #
+                # A3c switches on TIME instead of on R. Under a level stop the initial stop is
+                # the 10xATR catastrophe rung, so "+1R" is a move no breakout makes and the
+                # trail would never engage at all. The handover is the survival curve's own
+                # date: the level stop does the cheap filtering while failures resolve, and the
+                # wide trail takes the survivors — which is A2's measured 80% ride grafted onto
+                # A3's measured 39% net.
+                ch_rows = own_bars(valid, j, t)
+                if hyp["level_stop_sessions"] is not None:
+                    engaged = (t - p["entry_idx"]) >= int(hyp["level_stop_sessions"])
                 else:
-                    hi = H[tk].iloc[t]
-                    if np.isnan(hi) or hi < r.pivot:
-                        continue
-                    diag["touched"] += 1
-                    limit = r.pivot * 1.02
-                    fill = r.pivot if (np.isnan(op) or op <= r.pivot) else op
-                    if fill > limit:
-                        diag["no_fill_gap"] += 1
-                        continue                            # gapped through the limit — no fill
-                    vv, v5 = V[tk].iloc[t], v50[tk].iloc[t]
-                    vol_ok = bool(not np.isnan(vv) and not np.isnan(v5) and vv >= 1.4 * v5)
-                    if not vol_ok:
-                        diag["no_volume"] += 1              # filled anyway; exits at tomorrow's open
-                stop = max(r.clow, fill * (1 - MAXSTOP))
-                dist = max((fill - stop) / fill, 1e-4)
-                budget = budgets[85] if r.mcn >= 85 else budgets[70]
-                size = min(budget / dist, BAND)
-                target = size * nav
-                if exposure + target > CEIL * nav or cash < target * 0.5:
-                    diag["no_room"] += 1
+                    r_dist = p["avg_cost"] - p["init_stop"]
+                    engaged = (r_dist > 0 and np.isfinite(cl)
+                               and cl >= p["avg_cost"] + r_dist)
+                if engaged and ch_rows is not None:
+                    a_ch = sg.atr(H[ch_rows, j], L[ch_rows, j], C[ch_rows, j],
+                                  window=int(hyp["chandelier_atr_window"] or 22))
+                    if len(a_ch):
+                        cs = sg.chandelier_stop(p["hi_close"], float(a_ch[-1]),
+                                                multiple=float(hyp["chandelier_mult"]))
+                        if cs is not None and cs > p["stop"]:
+                            out = {"stop": cs}          # ratchets up only, never down
+            if out["stop"] is not None:
+                p["stop"] = out["stop"]
+            p["last_mark"] = cl
+
+        # ---- entries. A resting GTC buy stop-limit at the pivot, judged daily (§3.2 M3 is a
+        # daily trigger check — the pre-rewrite sim reused Friday's pivot all week).
+        if on and queue and len(book) < cfg["max_names"]:
+            exposure = sum(p["qty"] * (C[t, col[p["ticker"]]] if not np.isnan(C[t, col[p["ticker"]]])
+                                       else p["last_mark"]) for p in book.values())
+            for tk in queue["l1m"]:
+                if tk in book or len(book) >= cfg["max_names"]:
                     continue
-                diag["taken"] += 1
-                fired[tk] = round(float(r.pivot), 4)
-                first = target * 0.5                        # pyramid step 1
-                q = first / fill
-                cash -= first
-                exposure += first
-                book[tk] = dict(ticker=tk, entry=fill, qty=q, stop=stop, pivot=r.pivot,
-                                hi_close=fill, step=1, target_cad=target, mcn=float(r.mcn),
-                                entry_date=day, entry_idx=t, init_stop=stop, size=size,
-                                mfe=0.0, mae=0.0, last_mark=fill, vol_ok=vol_ok)
+                # E1: the run is the world with this name removed from the sleeve's reach. The
+                # skip sits before every door — base, recovery, new-high, re-entry — and before
+                # sizing, so the capital the name would have taken follows the chassis instead
+                # (cash floor first, then the park). Leak-guarded in the conformance table: an
+                # excluded name that trades anyway is a violation, not a footnote.
+                if tk in (hyp["exclude_names"] or ()):
+                    continue
+                row = scored[tk]
+                # §3.2's floor, now a declared clause rather than baseline gravity: E3's door is
+                # "breakout + M2" and names no score, and run 56 refused 752,675 candidate-days
+                # below 70 while claiming to test that door. The law and every non-A2 variant
+                # keep the floor exactly as before.
+                if hyp["entry_mcn_floor"] and not sg.enterable(row["mcn"], floor=cfg["min_mcn"]):
+                    conf["entries_refused_below_70"] += 1
+                    continue
+                j = col[tk]
+                # The base is read on LAST NIGHT's bars, and today's session is what fills the
+                # order resting at its pivot (§5.1). Scanning through today instead would mark the
+                # base broken by the very breakout it is supposed to trigger — the scan says
+                # "spent" the moment a high clears pivot x 1.005 — so nothing but marginal touches
+                # could ever fill.
+                back = 2 if hyp["confirm_before_entry"] else 1
+                rows = own_bars(valid, j, t, back=back)
+                if rows is None:
+                    continue
+                apct = sg.atr_fraction(H[rows, j], L[rows, j], C[rows, j])
+                base = sg.base_scan(H[rows, j], L[rows, j], C[rows, j],
+                                    min_age=int(hyp["min_base_age"]),
+                                    max_depth=_tolerance(apct, hyp["depth_atr_mult"]))
+                # Two doors, tried in that order. §3.2 has only the first; a valid base that did
+                # not trigger today must not shut the second, which is what an if/elif on the base
+                # would do — the recovering name has an intact old pivot overhead for months.
+                got = None
+                # A2 enters on new highs ONLY (E3: "breakout to a new 252-day high close, plus the
+                # M2 trend template"). The base door is not merely unused by it — leaving it open
+                # meant A2's first live run entered on pivots and died in `initial_stop`, which has
+                # no contraction low to work with when the arm carries no flat stop cap. The
+                # preset's comment claimed the doors were shut; nothing was actually shutting them.
+                if not hyp["entry_new_high"] \
+                        and base["valid"] and fired.get(tk) != round(float(base["pivot"]), 4):
+                    if not _blacked_out(frame, conf, tk, day):
+                        got = base_trigger(j, t, base, rows)
+                if got is None and hyp["screen"] == "deep_recovery":
+                    rows1 = own_bars(valid, j, t, back=1)
+                    if rows1 is not None and sg.resumed(C[rows1, j], window=20) \
+                            and not _blacked_out(frame, conf, tk, day):
+                        px = O[t, j]
+                        if np.isnan(px):
+                            px = C[rows1[-1], j]
+                        got = dict(kind="recovery", fill=px, pivot=px, confirmed=True)
+                if got is None and hyp["entry_new_high"]:
+                    # A2a (E3). A fourth door, and the only one A2 opens — its preset switches the
+                    # base and recovery doors off. A close at a new N-session high, gated by M2 for
+                    # quality, and nothing else: no base, no pivot, no volume multiple, and M4
+                    # deliberately dropped because the earnings gate starves breadth and breadth is
+                    # the entire thesis. Every extra condition here is a name not bought.
+                    #
+                    # Same timing discipline as the other doors: judged on bars through LAST
+                    # NIGHT'S close, filled at this open. Reading today's bar to decide today's
+                    # entry is the look-ahead this engine has already paid for once.
+                    nh_rows = own_bars(valid, j, t, back=1)
+                    if nh_rows is not None \
+                            and sg.new_high_breakout(C[nh_rows, j],
+                                                     lookback=int(hyp["entry_new_high"])) \
+                            and sg.trend_template(C[nh_rows, j]) \
+                            and not _blacked_out(frame, conf, tk, day):
+                        # The order that actually rests at the broker is a BUY STOP-LIMIT at the
+                        # level, exactly as §3.2 specifies for the base door — and this door had
+                        # none, which is not a variant but an unimplementable fill. Run 67's
+                        # hero gapped down 25% from its signal close and the engine BOUGHT it at
+                        # the collapsed open, because the signal read the prior close and
+                        # nothing checked how far the open had travelled from it. Three cases,
+                        # all of them what the resting order does:
+                        #   * open above the ceiling — gapped past the limit, no fill (§3.2's
+                        #     own `gap_no_fill`, and the measured 1.28% premium pushes pay);
+                        #   * open at or above the level — the stop is already through, fill at
+                        #     the open;
+                        #   * open below the level — the stop has NOT triggered; it fills at the
+                        #     level only if the session trades up through it, and otherwise the
+                        #     order simply rests another day.
+                        lvl = float(C[nh_rows[-1], j])
+                        op_t, hi_t = O[t, j], H[t, j]
+                        if np.isnan(op_t):
+                            continue
+                        if op_t > lvl * cfg["confirm_limit"]:
+                            conf["gap_no_fill"] += 1
+                            continue
+                        if op_t >= lvl:
+                            px = op_t
+                        elif np.isfinite(hi_t) and hi_t >= lvl:
+                            px = lvl
+                        else:
+                            continue
+                        # The fill is the pivot: there is no base, so any ladder measures off
+                        # entry. The LEVEL is carried separately and is a different number —
+                        # last night's close, the price that cleared the 252-session high. The
+                        # study's episodes are defined against the level ("a close back below
+                        # it"), and pushes open 1.28% ABOVE it on average, so a stop anchored on
+                        # the fill is 1.28% tighter than the one the evidence measured — a
+                        # breakeven stop on day one, which is precisely the defect run 54 died
+                        # of. Run 65 carried it: 8.7-session holds and 39% of the move kept,
+                        # against A2's 68 sessions and 80%.
+                        got = dict(kind="new_high", fill=px, pivot=px, confirmed=True, level=lvl)
+                if got is None and _reentry_ready(tk, j, t, valid, C, exited, hyp):
+                    # X1. No base, or one that will not trigger for months: a name that corrected
+                    # 42% needs that long to build another, and by then the move it was going to
+                    # make has happened. The way back in is the market's own statement that the
+                    # move resumed — a close above every close of the prior `reentry_window`
+                    # sessions, on a name that still passes M2, M4 and the MCN floor. Not our exit
+                    # price: where we happened to sell is our history, not the stock's, and 96% of
+                    # stopped-out names traded back through it inside 60 days anyway.
+                    #
+                    # Same timing discipline as E1 — judged at last night's close, filled at this
+                    # open. The new high IS the confirmation, so no volume multiple is demanded on
+                    # top of it; that is the clause to falsify if the bucket churns.
+                    if not _blacked_out(frame, conf, tk, day):
+                        px = O[t, j]
+                        if np.isnan(px):
+                            px = C[own_bars(valid, j, t, back=1)[-1], j]
+                        # the pivot is the fill: the adds ladder off the entry, there being no base
+                        got = dict(kind="reentry", fill=px, pivot=px, confirmed=True)
+                if got is None:
+                    continue
+                kind, fill, pivot = got["kind"], got["fill"], got["pivot"]
+                born_confirmed = got["confirmed"]
+                if not np.isfinite(fill) or fill <= 0:
+                    continue
+                # R1: the stop is the name's own noise, not a fixed percentage floored at the
+                # contraction low — that floor is what makes the law's stop tight enough to fire
+                # before any multi-month move can happen. A re-entry has no base and therefore no
+                # contraction low, so it takes the volatility stop or a flat cap.
+                if hyp["atr_stop_mult"]:
+                    a14 = sg.atr(H[rows, j], L[rows, j], C[rows, j],
+                                 window=int(hyp["atr_window"] or 14))
+                    stop = sg.volatility_stop(fill, float(a14[-1]) if len(a14) else None,
+                                              mult=hyp["atr_stop_mult"], max_stop=hyp["max_stop"])
+                    if stop is None:
+                        continue      # no ATR and no flat cap (A2): no stop, so no position
+                else:
+                    stop = sg.initial_stop(fill, None if kind == "reentry"
+                                           else base["contraction_low"], max_stop=hyp["max_stop"])
+                dist = max((fill - stop) / fill, 1e-4)
+                if hyp["size_nav_frac"]:
+                    # A3: equal weight, one Nth of NAV per slot. A level stop has no distance to
+                    # size from — risk_size would divide by ~zero and mint an infinite position —
+                    # and M1's lesson is honored by there being no size decision at all.
+                    size = {"size_pct": float(hyp["size_nav_frac"])}
+                elif hyp["risk_per_trade"]:
+                    # A2c: the stop sets the size, never conviction. M1 is the reason this is
+                    # structural rather than advisory — positive expectancy of +2.21% and still a
+                    # -39.89% drawdown, because conviction chose the size while the stop chose the
+                    # loss. A wide stop now buys fewer shares and every position risks the same
+                    # dollars. Note this deliberately ignores `mcn` — A2 does not rank on MCN.
+                    shares = sg.risk_size(nav=nav, entry=fill, stop=stop,
+                                          risk_frac=float(hyp["risk_per_trade"]))
+                    size = {"size_pct": shares * fill / nav} if shares > 0 else None
+                else:
+                    budgets = ((hyp["budget_lo"], hyp["budget_hi"])
+                               if hyp["budget_lo"] and hyp["budget_hi"] else (0.007, 0.009))
+                    size = sg.momentum_size(nav=nav, mcn_score=row["mcn"], stop_distance=dist,
+                                            budgets=budgets,
+                                            band=(0.08, hyp["band_hi"] or 0.12))
+                if not size:
+                    continue
+                # The vol governor (Barroso-Santa-Clara via WO-A3 §3, reviving WO-17): entry
+                # sizes scale by target-over-realized account volatility, trailing vol_window
+                # sessions, capped at 1 — the governor only ever shrinks. Applied at ENTRY, not
+                # as daily book rescaling, for the same reason §2.1 trues up on a band: a rule
+                # Zak cannot execute by hand is not a rule (the O4 lesson). Deviation from the
+                # paper declared: B-SC scale the factor leg daily by its own vol; this scales
+                # new entries by the ACCOUNT's realized vol, park included.
+                if hyp["vol_target"]:
+                    g = _vol_scalar(equity, float(hyp["vol_target"]), int(hyp["vol_window"]))
+                    size = {"size_pct": size["size_pct"] * g}
+                    if size["size_pct"] <= 0:
+                        continue
+                target = size["size_pct"] * nav
+                if exposure + target > (hyp["sleeve_cap_pct"] or cfg["sleeve_cap"]) * nav:
+                    continue
+                # ---- H1: total open risk. The sleeve cap limits how much is INVESTED; nothing
+                # limited how much could be LOST. Under the capital regime a 25% position behind a
+                # 20% stop puts 5% of NAV at risk, and four of them put 20% at risk at once — run
+                # 34 drew down 53.5% while its average trade was +1.27%, which is what over-betting
+                # a real edge looks like. Heat is the missing primitive: the sum of (what we would
+                # lose if every open stop fired today), capped as a fraction of NAV.
+                if hyp["heat_cap"]:
+                    open_heat = sum(q["qty"] * max(q["avg_cost"] - (q["stop"] or 0.0), 0.0)
+                                    for q in book.values())
+                    if open_heat + target * dist > float(hyp["heat_cap"]) * nav:
+                        conf["heat_refused"] += 1
+                        continue
+                # §3.2 buys half now and the rest at +2%/+4%, because at the pivot the breakout is
+                # still unconfirmed. Under E1 it is confirmed before a share is bought, so the
+                # hedge is paying for a risk that no longer exists — Z1 lets the caller take the
+                # whole position at entry, and marks it full so the pyramid does not add again.
+                frac = float(hyp["entry_fraction"])
+                dollars = target * frac
+                # MOMENTUM KEEPS FIRST CALL ON THE MONEY (K1/K2, and the a1v preset says so in
+                # as many words). The park is where idle capital WAITS; it is not a position
+                # competing for slots, so an entry the cash balance cannot cover sells the index
+                # to fund itself.
+                #
+                # This was documented and never implemented, and §2.1's banded true-up turned the
+                # omission into a silent capital constraint: under the old daily rebalance cash
+                # was restored to exactly the target every session, so a first tranche needing
+                # ~8.3% of NAV always fit; under the band, cash drifts toward 5% and the entry
+                # was simply skipped. Measured cost — run 71 never bought MU AT ALL, where run 53
+                # made +$206,464 on it, and MU is the whole of A1V's headline. Learnings #21: a
+                # rule stored is not a rule enforced.
+                need = dollars * (1 + 0.01)
+                if cash < need and park_on:
+                    cash += park_sell(park_price(day) or park["mark"], need - cash)
+                if cash < need:
+                    continue
+                paid = dollars * (1 + spread(j, t))
+                cash -= paid
+                exposure += dollars
+                if kind == "base":
+                    fired[tk] = round(float(pivot), 4)
+                elif kind == "recovery":
+                    conf["recoveries"] += 1
+                elif kind == "new_high":
+                    # Counted at its own door. Before this counter existed, A2's entries landed in
+                    # `reentries` and the conformance table read every one of them as an undeclared
+                    # violation of a §3.2 clause about re-entry — runs 54, 55 and 56 all "failed"
+                    # conformance on exactly that misfiling.
+                    conf["new_high_entries"] += 1
+                else:
+                    conf["reentries"] += 1
+                conf["entries"] += 1
+                book[tk] = dict(ticker=tk, kind=kind,
+                                lots=[(dollars, fill, A[t, j] if np.isfinite(A[t, j]) else fill)],
+                                qty=dollars / fill, invested=paid, gross_invested=dollars,
+                                avg_cost=paid / (dollars / fill), stop=stop, pivot=pivot,
+                                # the price the signal cleared, which for every door but the
+                                # new-high one IS the pivot; only A3 reads it
+                                level=float(got.get("level", pivot)),
+                                hi_close=fill, hi_at=t, step=3 if frac >= 1.0 else 1,
+                                target=target, mcn=row["mcn"], trimmed=set(),
+                                qty_peak=dollars / fill,
+                                entry_date=day, entry_idx=t, stall_from=t, init_stop=stop,
+                                size=size["size_pct"], mfe=0.0, mae=0.0, last_mark=fill,
+                                confirmed=born_confirmed, stale=0)
 
         # ---- mark
         held = 0.0
         for p in book.values():
-            px = C[p["ticker"]].iloc[t]
+            px = C[t, col[p["ticker"]]]
             if np.isnan(px):
-                px = p["last_mark"]                        # carry, never drop to zero
+                px = p["last_mark"]
             else:
                 p["last_mark"] = px
             held += p["qty"] * px
-        nav = cash + held
-        b = w["close"]["SPY.US"].iloc[t] if "SPY.US" in w["close"].columns else np.nan
-        equity.append((day, nav, held / nav if nav else 0, len(book), "ON" if on else "OFF", b))
+        # ---- park whatever momentum is not using (K1/K2)
+        # Rebalanced daily toward the cash target. NAV here already includes the park at today's
+        # mark, so the target moves with the account rather than with the starting capital. Only
+        # the delta is traded, and only the delta is charged — the park is not churned.
+        # The benchmark does not print on every date the tape carries — market holidays are in the
+        # date axis because other names have bars there. On those days the park cannot be TRADED,
+        # but it is still OWNED, so it is carried at its last mark exactly as a momentum position
+        # is. The first cut dropped it from NAV entirely on those dates, which read as the account
+        # falling to its cash balance and back: a fake -91.5% drawdown on a run that made money.
+        if park_on:
+            ppx = park_price(day)
+            if ppx is not None:
+                park["mark"] = ppx
+                nav = cash + held + park["qty"] * ppx
+                target_cash = nav * float(hyp["cash_target"])
+                # BANDED TRUE-UP (§2.1). Checked weekly, and traded only when cash has drifted more
+                # than the band off target. The first cut rebalanced daily to the exact target,
+                # which is arithmetically tidy and operationally impossible: Zak places every order
+                # by hand, and daily would have been ~2,300 of them. Bands also beat calendar and
+                # daily rebalancing in the literature the work order cites, so this is cheaper AND
+                # better. Only the drift beyond the band is traded, never the whole position.
+                drift = (cash - target_cash) / nav if nav else 0.0
+                if t % PARK_CHECK_EVERY == 0 and abs(drift) > PARK_BAND:
+                    if cash > target_cash:
+                        cash -= park_buy(ppx, cash - target_cash)
+                    else:
+                        cash += park_sell(ppx, target_cash - cash)
+            held_total = held + park["qty"] * park["mark"]
+        else:
+            held_total = held
+        nav = cash + held_total
+        # NO IMPLICIT LEVERAGE. The momentum sleeve is unlevered — §2.5's facilities are a separate
+        # layer this engine does not model — so cash below zero means the backtest bought with money
+        # it never had, and every later return compounds on the loan. Sizing is a fraction of NAV
+        # while the money available is CASH, so the two can diverge whenever the book is already
+        # full; nothing in the fill path enforces the difference. A negative balance would not show
+        # up in any summary statistic, so it halts here instead.
+        if cash < -0.01:
+            raise AccountingError(
+                f"cash went negative on {day}: {cash:,.2f} with {len(book)} positions held and NAV "
+                f"{nav:,.2f}. The sleeve is unlevered, so this is the simulation borrowing.")
+        equity.append((day, nav, held / nav if nav else 0.0, len(book),
+                       "ON" if on else "OFF", frame["bench_by_day"].get(day)))
 
-    # liquidate whatever is open at the end, so every trade has an exit
-    t = len(dates) - 1
     for tk in list(book):
-        px = C[tk].iloc[t]
-        if not np.isnan(px):
-            cash += book[tk]["qty"] * px
-            close_trade(book, trades, tk, dates[t], px, "end of test", t)
-    return trades, equity, diag
+        j = col[tk]
+        px = C[n - 1, j]
+        cash += close_position(tk, dates[n - 1], px if not np.isnan(px) else book[tk]["last_mark"],
+                               "end_of_test", n - 1)
+
+    # THE BOOKS MUST BALANCE. Every position is closed by the loop above, so the account is pure
+    # cash and there is exactly one number it can legally be: the starting capital plus every
+    # realised trade. `pnl_usd` is `proceeds - invested` and `invested` is what left the account, so
+    # the identity is exact rather than approximate — the tolerance below is float noise on ~1e5
+    # dollars across ~400 round trips, nothing more.
+    #
+    # This is the check that would have caught a position closed without crediting cash, a trim
+    # counted twice, or a fill debited at one price and booked at another. None of those change a
+    # single summary statistic in a way a reader could notice: the return, the drawdown and the win
+    # rate all stay plausible while the money quietly stops adding up.
+    # The park is liquidated with the book, so the closing account is pure cash and the identity
+    # below stays exact rather than becoming "cash plus something we still hold".
+    if park["qty"] > 0:
+        ppx = park_price(dates[n - 1]) or park["mark"]         # last mark if the final day is dark
+        if ppx:
+            cash += park_sell(ppx, park["qty"] * ppx * 2)      # oversized ask: sell the lot
+    conf["park"] = dict(realised=park["realised"], cost=park["cost"],
+                        buys=park["buys"], sells=park["sells"])
+
+    _assert_books_balance(cash, cfg["start_nav"], trades, park_realised=park["realised"])
+    return trades, equity, conf
 
 
-def close_trade(book, trades, tk, day, price, reason, t):
-    p = book.pop(tk)
-    pnl = (price - p["entry"]) * p["qty"]
-    trades.append(dict(ticker=tk, entry_date=p["entry_date"], entry_price=p["entry"],
-                       qty=p["qty"], exit_date=day, exit_price=price, mcn=p["mcn"],
-                       pivot=p["pivot"], initial_stop=p["init_stop"], size_pct=p["size"],
-                       pyramid_steps=p["step"], pnl_cad=pnl,
-                       pnl_pct=price / p["entry"] - 1, bars_held=t - p["entry_idx"],
-                       max_favorable=p["mfe"], max_adverse=p["mae"], exit_reason=reason))
+def _gate_series(spx):
+    """M1 for every week of the test, latched — `market_gate` carrying its own previous state.
+
+    The rule returns one verdict for one moment and needs the prior state to latch, so the driver
+    walks it forward week by week. The walking is the driver's job; the verdict is never the
+    driver's job, which is why this calls §3.2's own function 520 times rather than reimplementing
+    the comparison once.
+    """
+    dates, closes = list(spx.index), list(spx.values)
+    weeks = sg.weekly_closes(dates, closes)
+    ends, states, prev = [], [], None
+    for i, (week_end, _) in enumerate(weeks):
+        k = bisect.bisect_right(dates, week_end)
+        try:
+            out = sg.market_gate(dates[:k], closes[:k], previous=prev)
+        except ValueError:
+            continue                              # not yet 35 weekly closes — no verdict exists
+        prev = out["state"]
+        ends.append(week_end)
+        states.append(prev)
+    return ends, states
 
 
-# ------------------------------------------------------------------ stats + persistence
-def summarise(trades, equity, spx):
+def _gate_on(ends, states, day):
+    """The M1 decision in force — the most recent weekly verdict at or before `day` (§3.2 latch)."""
+    i = bisect.bisect_right(ends, day) - 1
+    return bool(i >= 0 and states[i] == "ON")
+
+
+def _next_report(reports, day):
+    if not reports:
+        return None
+    i = bisect.bisect_left(reports, day)
+    return reports[i] if i < len(reports) else None
+
+
+def _knowable(nxt, day, horizon=CALENDAR_HORIZON):
+    """Did we actually know when this name next reports — or just find *a* date?
+
+    Coverage has to mean the second thing. The `earnings` ledger reaches back only as far as the
+    calendar sweep has run, so on any earlier date the "next report" it returns is whatever the
+    modern calendar holds — often years ahead. `in_blackout` correctly declines to fire on a date
+    that far out, so nothing is wrongly blocked; but counting it as coverage told the conformance
+    table the blackout was enforceable over 99.9% of a window where it was mostly unenforceable.
+    A clause that reports itself covered when it is blind is the exact failure this table exists
+    to catch, so the horizon is one quarter.
+    """
+    return nxt is not None and (nxt - day).days <= horizon
+
+
+# =============================================================================== conformance
+def _declare(hyp, key, law_text, variant_text):
+    """What a clause was actually enforced at. A widened threshold is not a violation, but a
+    conformance table that still prints the law's number while the run used another one is a lie."""
+    mult = (hyp or {}).get(key)
+    return law_text if not mult else variant_text.format(mult)
+
+
+def conformance(conf, trades, equity, hyp=None):
+    """Every §3.2/§3.3 clause the run claims to implement, and how much of the window had the data
+    to enforce it. A green tick on a clause that was unenforceable for most of the test is the
+    failure this table exists to end (learnings #19 — green is not a result)."""
+    reasons = {t["exit_reason"] for t in trades}
+    legal = {"stop", "gap", "gate_off", "unconfirmed", "template", "score", "earnings",
+             "stalled", "delisted", "end_of_test"}
+    # A hypothesis may introduce an exit the law does not name. That is not a violation, but it is
+    # not conformance either — it has to be declared, so a variant can never quietly pass as
+    # law-v0. law-v0 declares nothing and so still fails on any unknown reason.
+    declared = {"stagnant"} if (hyp or {}).get("stagnation_days") else set()
+    declared |= {f"trim{int(round(x * 100))}" for x in ((hyp or {}).get("trim_at") or ())}
+    if (hyp or {}).get("forever"):
+        declared.add("profitability")
+    if (hyp or {}).get("level_stop"):
+        declared.add("level_stop")
+    if (hyp or {}).get("screen_exit"):
+        declared.add("no_longer_cheap")
+    if (hyp or {}).get("momentum_exit_r3") is not None:
+        declared.add("momentum_died")
+    cov = lambda a, b: (a / b) if b else None
+    return [
+        dict(clause="M1 latch — weekly, 30-week SMA", fn="signals.market_gate", coverage=1.0),
+        dict(clause="M2 trend template — six conditions", fn="signals.trend_template",
+             coverage=1.0, off_high=_declare(hyp, "off_high_atr_mult", "25% flat",
+                                             "max(25%, {} x ATR), capped 60%")),
+        dict(clause="M3 base detection, checked daily", fn="signals.base_scan", coverage=1.0,
+             depth=_declare(hyp, "depth_atr_mult", "25% flat",
+                            "max(25%, {} x ATR), capped 60%"),
+             min_age=int((hyp or {}).get("min_base_age", 25))),
+        dict(clause="M4 earnings acceleration", fn="signals.m4_acceleration",
+             coverage=cov(conf["m4_known"], conf["m4_evaluated"])),
+        dict(clause="MCN — three components, windows end t-10", fn="signals.mcn", coverage=1.0),
+        dict(clause="Entry — GTC stop-limit, pivot / pivot+2%", fn="signals.entry_order",
+             coverage=1.0,
+             # §3.2 knows one way into a name: a fresh valid base. A run that bought any other way
+             # has to say so here, with the count, or a variant could pass as law-v0.
+             reentries=conf.get("reentries", 0), recoveries=conf.get("recoveries", 0),
+             new_highs=conf.get("new_high_entries", 0),
+             screen=(hyp or {}).get("screen") or "M2 trend template + M3 base (§3.2)",
+             m4_required=bool((hyp or {}).get("require_m4", True)),
+             # The queue's order decides who claims a scarce slot, and runs 54-56 proved it can
+             # silently BE the strategy — so it is declared on every run, the law included.
+             slot_order=(hyp or {}).get("slot_order") or "MCN descending (§3.2)",
+             # E1: the names this run refused to enter, listed so the exclusion is reviewable —
+             # a filter nobody can see is indistinguishable from a silent one.
+             excluded_names=sorted((hyp or {}).get("exclude_names") or ()),
+             violations=((0 if (hyp or {}).get("reentry_window") else conf.get("reentries", 0))
+                         + (0 if (hyp or {}).get("screen") else conf.get("recoveries", 0))
+                         # A2's new-high door is E3's entry RULE, not a deviation from one. Runs
+                         # 54-56 each failed conformance here: every entry was misfiled as an
+                         # undeclared re-entry, because this waiver knew only the doors earlier
+                         # variants had declared. An undeclared new-high entry still fails.
+                         + (0 if (hyp or {}).get("entry_new_high")
+                            else conf.get("new_high_entries", 0))
+                         # ... and the E1 leak guard: an excluded name that traded anyway means
+                         # the filter did not hold, and the run is not the run it claims to be.
+                         + sum(1 for t in trades
+                               if t.get("ticker") in ((hyp or {}).get("exclude_names") or ())))),
+        dict(clause="EOD confirmation, freeze at 50%, late window",
+             fn="signals.confirmation_state", coverage=1.0),
+        dict(clause="Pyramid +2%/+4%, both limits pivot x 1.05", fn="signals.pyramid_orders",
+             coverage=1.0),
+        dict(clause="Stops — initial, breakeven, 10% trail, euphoria", fn="signals.ratchet_stop",
+             coverage=1.0,
+             # An arm that replaces the ladder has to say so here, or a run whose winners were
+             # being clipped 10% off their highs reads as one that simply did not have winners.
+             ladder_enforced=bool((hyp or {}).get("stop_ladder", True)),
+             replaced_by=("chandelier" if (hyp or {}).get("chandelier_mult")
+                          else "level_stop" if (hyp or {}).get("level_stop")
+                          else None)),
+        # `unknown_reasons` catches an exit the law does not name. `suppressed` catches the other
+        # direction — a §3.2 exit the run stopped enforcing, which no count of reasons can show,
+        # because a rule that never fires looks exactly like a rule with nothing to fire on.
+        dict(clause="Exits — stop, template, MCN < 55", fn="driver",
+             coverage=1.0, unknown_reasons=sorted(reasons - legal - declared),
+             variant_reasons=sorted(reasons & declared),
+             # every §3.2 exit the run stopped enforcing, BY NAME. Run 58 is why the list grew:
+             # score, earnings and gate_off closed 1,013 of its 1,648 positions on an arm whose
+             # spec names none of them, and nothing in this table said so.
+             suppressed=sorted(
+                 (["template"] if (not (hyp or {}).get("template_exit", True)
+                                   or (hyp or {}).get("screen")) else [])
+                 + (["score"] if not (hyp or {}).get("score_exit", True) else [])
+                 + (["earnings"] if not (hyp or {}).get("earnings_exit", True) else [])
+                 + (["gate_off"] if not (hyp or {}).get("gate_off_exit", True) else []))),
+        dict(clause="Earnings blackout — 5 trading days", fn="signals.in_blackout",
+             coverage=cov(conf["blackout_known"], conf["blackout_decisions"])),
+        dict(clause="Sizing — budget / stop distance", fn="signals.momentum_size", coverage=1.0,
+             heat_cap=(hyp or {}).get("heat_cap"), heat_refused=conf.get("heat_refused", 0),
+             band_ceiling=(hyp or {}).get("band_hi") or 0.12,
+             entry_fraction=(hyp or {}).get("entry_fraction", 0.5),
+             sleeve_cap=(hyp or {}).get("sleeve_cap_pct"),
+             # A3's declarations: 1/N sizing and the vol governor are rule surfaces, and a table
+             # that omitted them would let a governed run pass as an ungoverned one.
+             equal_weight=(hyp or {}).get("size_nav_frac"),
+             vol_governor=(dict(target=(hyp or {}).get("vol_target"),
+                                window=(hyp or {}).get("vol_window"))
+                           if (hyp or {}).get("vol_target") else None)),
+        # §3.2 has no partial exit: a position is opened once and closed once. The trim ladder
+        # sells slices, so the rungs are named here and the count is reported — a run that sold
+        # part of a position without declaring it is not law-v0 however its exits are labelled.
+        dict(clause="Position is opened once and closed once", fn="driver", coverage=1.0,
+             trims=conf.get("trims", 0),
+             violations=(0 if (hyp or {}).get("trim_at") else conf.get("trims", 0)),
+             rungs=list((hyp or {}).get("trim_at") or ()),
+             runner_immunity=bool((hyp or {}).get("runner_immunity"))),
+        dict(clause="MCN < 70 never tickets", fn="signals.enterable", coverage=1.0,
+             refused=conf["entries_refused_below_70"],
+             # E3 (ruled 2026-08-13): A2's door is breakout + M2, no score — the floor off is a
+             # declared clause of that arm, so a sub-70 entry under it is the rule working, not a
+             # violation. Under the law and every floor-keeping variant, it stays a violation.
+             floor_enforced=bool((hyp or {}).get("entry_mcn_floor", True)),
+             violations=(0 if not (hyp or {}).get("entry_mcn_floor", True)
+                         else sum(1 for t in trades if t["mcn"] is not None and t["mcn"] < 70))),
+        dict(clause="Stalled pyramid — 4 weeks", fn="signals.stalled_pyramid", coverage=1.0),
+        dict(clause="Survivorship — delisted retained", fn="driver", coverage=1.0,
+             delisted_exits=sum(1 for t in trades if t["exit_reason"] == "delisted")),
+    ]
+
+
+def summarise(trades, equity, frame, conf, hyp=None):
     eq = pd.DataFrame(equity, columns=["d", "nav", "exposure", "positions", "gate", "bench"])
     eq["d"] = pd.to_datetime(eq["d"])
     nav = eq.nav
     years = max((eq.d.iloc[-1] - eq.d.iloc[0]).days / 365.25, 1e-9)
-    total = nav.iloc[-1] / nav.iloc[0] - 1
-    cagr = (nav.iloc[-1] / nav.iloc[0]) ** (1 / years) - 1
-    peak = nav.cummax()
-    dd = nav / peak - 1
+    dd = nav / nav.cummax() - 1
     wins = [t for t in trades if t["pnl_pct"] > 0]
     losses = [t for t in trades if t["pnl_pct"] <= 0]
-    s = pd.Series(spx.values, index=pd.to_datetime(spx.index))
-    s = s.loc[eq.d.iloc[0]:eq.d.iloc[-1]]
-    bench_total = (s.iloc[-1] / s.iloc[0] - 1) if len(s) > 1 else None
+    b = eq.bench.dropna()
+    bench_total = (b.iloc[-1] / b.iloc[0] - 1) if len(b) > 1 else None
+    invested = sum(t["qty"] * t["entry_price"] for t in trades) or 1.0
+    full = [t for t in trades if not str(t["exit_reason"]).startswith("trim")]
+    deployed = sum(t["qty"] * t["entry_price"] for t in trades)
+    table = conformance(conf, trades, equity, hyp=hyp)
     return dict(
         start_date=eq.d.iloc[0].date(), end_date=eq.d.iloc[-1].date(), trading_days=len(eq),
         start_nav=float(nav.iloc[0]), end_nav=float(nav.iloc[-1]),
-        total_return=float(total), cagr=float(cagr),
+        total_return=float(nav.iloc[-1] / nav.iloc[0] - 1),
+        cagr=float((nav.iloc[-1] / nav.iloc[0]) ** (1 / years) - 1),
         max_drawdown=float(dd.min()), max_dd_date=eq.d.iloc[int(dd.idxmin())].date(),
         trades=len(trades), wins=len(wins),
         win_rate=(len(wins) / len(trades)) if trades else None,
         avg_win=float(np.mean([t["pnl_pct"] for t in wins])) if wins else None,
         avg_loss=float(np.mean([t["pnl_pct"] for t in losses])) if losses else None,
+        # Equal-weighted over trade ROWS. Kept for continuity with runs 1-32, but once a variant
+        # trims, a row is a *slice* rather than a position and this number stops meaning what it
+        # meant — see `expectancy_full_exits` and `return_on_deployed` below, which are the ones to
+        # compare across the M-series.
         expectancy=float(np.mean([t["pnl_pct"] for t in trades])) if trades else None,
         avg_exposure=float(eq.exposure.mean()),
         avg_hold_days=float(np.mean([t["bars_held"] for t in trades])) if trades else None,
         benchmark_return=float(bench_total) if bench_total is not None else None,
         benchmark_cagr=float((1 + bench_total) ** (1 / years) - 1) if bench_total is not None else None,
         stats=dict(
+            benchmark=BENCH, gate_source=frame["gate_source"], currency="USD",
+            conformance=table,
+            conformance_ok=all(c.get("coverage") not in (None, 0) for c in table)
+                           and not any(c.get("unknown_reasons") for c in table)
+                           and not any(c.get("violations") for c in table),
             exits={r: sum(1 for t in trades if t["exit_reason"] == r)
-                   for r in {t["exit_reason"] for t in trades}},
+                   for r in sorted({t["exit_reason"] for t in trades})},
+            cost_usd=float(sum(t["cost_usd"] for t in trades)),
+            expectancy_gross=float(np.mean([t["pnl_gross_usd"] / (t["qty"] * t["entry_price"])
+                                            for t in trades])) if trades else None,
+            dividend_bps=float(10_000 * sum(t["dividend_usd"] for t in trades) / invested)
+                         if trades else None,
             days_gate_on=int((eq.gate == "ON").sum()), days_gate_off=int((eq.gate == "OFF").sum()),
             pct_time_invested=float((eq.positions > 0).mean()),
             best=max((t["pnl_pct"] for t in trades), default=None),
             worst=min((t["pnl_pct"] for t in trades), default=None),
-            biases=["survivorship — L0 is today's listings only",
-                    "no M4 gate (point-in-time EPS not stored)",
-                    "no earnings blackout (historical report dates not stored)",
-                    "fills modelled at the pivot; no slippage or FX cost charged"]),
+            # A trim rung can only be hit by a position that is already up 50% or 100%, so the
+            # slices are winners *by construction* and averaging them beside full exits flatters
+            # the run. Run 36 reads +2.208% on `expectancy` and -1.45% on the dollar it actually
+            # deployed: five slices averaging +69.85% on $3.4k positions against 122 full exits
+            # averaging -0.56% on $18.2k positions. These two are the honest measures.
+            expectancy_full_exits=float(np.mean([t["pnl_pct"] for t in full])) if full else None,
+            return_on_deployed=(float(sum(t["pnl_usd"] for t in trades) / deployed)
+                                if deployed else None),
+            trim_slices=len(trades) - len(full),
+            trim_usd=float(sum(t["pnl_usd"] for t in trades if t not in full)) if trades else 0.0,
+            diagnostics=conf,
+            # Named, not just counted: an exclusion nobody can review is indistinguishable from a
+            # silent filter, and some of these are real bankruptcies whose absence biases the run.
+            excluded_discontinuous=frame.get("excluded_discontinuous") or {},
+            biases=["vendor serves the current version of a past statement (restatements)",
+                    "industry mappings are today's",
+                    "L0 census rebuilt from stored bars — names never ingested are still absent",
+                    f"{len(frame.get('excluded_discontinuous') or {})} names dropped for a "
+                    f"discontinuous series — some are real bankruptcies, so the survivorship "
+                    f"correction is imperfect in that direction"]),
     )
 
 
+# =============================================================================== entry point
 def main():
     with connect() as conn:
         with Heartbeat(conn, "backtest") as hb:
             with conn.cursor() as cur:
-                w, ind, spx = load(cur)
-            hb.detail["tickers"] = int(w["close"].shape[1])
-            hb.detail["bars"] = int(w["close"].shape[0])
-            print(f"backtest: {w['close'].shape[1]} tickers x {w['close'].shape[0]} bars")
-            m1 = m1_series(spx)
-            trades, equity, diag = run(w, ind, m1, hb)
-            hb.detail["diagnostics"] = diag
-            print("  diagnostics:", diag)
-            summary = summarise(trades, equity, spx)
-            summary["stats"]["diagnostics"] = diag
-            print(f"  {summary['trades']} trades | CAGR {summary['cagr']:.1%} | "
-                  f"maxDD {summary['max_drawdown']:.1%} | win {summary['win_rate'] or 0:.0%}")
-            if not dry():
-                with conn.cursor() as cur:
-                    cur.execute("""insert into backtest_runs(label,params,start_date,end_date,trading_days,
-                          start_nav,end_nav,total_return,cagr,max_drawdown,max_dd_date,trades,wins,
-                          win_rate,avg_win,avg_loss,expectancy,avg_exposure,avg_hold_days,
-                          benchmark_return,benchmark_cagr,stats)
-                        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        returning id""",
-                        (LABEL, json.dumps(dict(start_nav=START_NAV, max_names=4, sleeve_cap=0.40,
-                                                budgets={"70": 0.007, "85": 0.009}, warmup=WARMUP)),
-                         summary["start_date"], summary["end_date"], summary["trading_days"],
-                         summary["start_nav"], summary["end_nav"], summary["total_return"],
-                         summary["cagr"], summary["max_drawdown"], summary["max_dd_date"],
-                         summary["trades"], summary["wins"], summary["win_rate"],
-                         summary["avg_win"], summary["avg_loss"], summary["expectancy"],
-                         summary["avg_exposure"], summary["avg_hold_days"],
-                         summary["benchmark_return"], summary["benchmark_cagr"],
-                         json.dumps(summary["stats"], default=str)))
-                    rid = cur.fetchone()[0]
-                    cur.executemany("""insert into backtest_trades(run_id,ticker,entry_date,entry_price,
-                          qty,exit_date,exit_price,mcn,pivot,initial_stop,size_pct,pyramid_steps,
-                          pnl_cad,pnl_pct,bars_held,max_favorable,max_adverse,exit_reason)
-                        values (%(run_id)s,%(ticker)s,%(entry_date)s,%(entry_price)s,%(qty)s,
-                          %(exit_date)s,%(exit_price)s,%(mcn)s,%(pivot)s,%(initial_stop)s,%(size_pct)s,
-                          %(pyramid_steps)s,%(pnl_cad)s,%(pnl_pct)s,%(bars_held)s,%(max_favorable)s,
-                          %(max_adverse)s,%(exit_reason)s)""",
-                        [{**t, "run_id": rid} for t in trades])
-                    cur.executemany("""insert into backtest_equity(run_id,d,nav,exposure,positions,gate,benchmark)
-                                       values (%s,%s,%s,%s,%s,%s,%s)""",
-                        [(rid, d, n, e, p, g, None if (b is None or (isinstance(b, float) and np.isnan(b))) else b)
-                         for d, n, e, p, g, b in equity])
-                conn.commit()
-                hb.detail["run_id"] = rid
-            hb.rows = len(trades) + len(equity)
-            hb.detail.update({k: v for k, v in summary.items() if k != "stats"})
-            hb.detail["exits"] = summary["stats"]["exits"]
+                hyp = hypothesis()
+                t_load = time.monotonic()
+                frame = load(cur)
+                load_secs = time.monotonic() - t_load
+                # The SAME config rows the nightly reads, spelled the same way. Inventing
+                # `momentum_min_mcn` here would have read a row that does not exist, fallen
+                # through to a default, and measured a threshold nobody set — learnings #21,
+                # which this repo has already paid for once (`score_thresholds.enter` was
+                # decorative for weeks because the code asked for `enterable`).
+                thresholds = config(cur, "score_thresholds", {}) or {}
+                ceilings = config(cur, "sleeve_ceiling", {"momentum": 0.40}) or {}
+                base_max_names = int(config(cur, "momentum_max_names", 4))
+                cfg = dict(start_nav=START_NAV,
+                           max_names=int(hyp["max_names"] or base_max_names),
+                           sleeve_cap=float(ceilings.get("momentum", 0.40)),
+                           min_mcn=float(thresholds.get("enter", 70)),
+                           mcn_exit=float(thresholds.get("hold", 55)),
+                           cushion=float(config(cur, "holdthrough_cushion", 1.08)),
+                           max_stop=hyp["max_stop"], limit_over=0.02,
+                           pyramid_ceiling=1.05, confirm_limit=1.05, hyp=hyp,
+                           spread_bps=(5.0, 15.0), addv_break=50_000_000.0,
+                           spread_curve=SPREAD_CURVE,
+                           # Ruled 2026-08-10: wait out the window. The rejected reading stays
+                           # runnable so the ruling can be priced against its alternative.
+                           hair_trigger_while_pending=HAIR_TRIGGER_PENDING)
+                # Behaviour lives in the database as well as in git, so the run stamps what it
+                # ran under. A config change with no re-test is then a visible condition rather
+                # than a silent one (Phase 5 of the backtest plan).
+                config_stamp = config_digest(cur)
+
+            if START_DATE or END_DATE:
+                keep = [i for i, d in enumerate(frame["dates"])
+                        if (not START_DATE or str(d) >= START_DATE)
+                        and (not END_DATE or str(d) <= END_DATE)]
+                frame["dates"] = [frame["dates"][i] for i in keep]
+                frame["arrays"] = {k: v[keep] for k, v in frame["arrays"].items()}
+            frame["bench_by_day"] = {d: float(v) for d, v in frame["bench"].items()}
+
+            hb.detail.update(tickers=len(frame["cols"]), bars=len(frame["dates"]),
+                             benchmark=BENCH, gate_source=frame["gate_source"],
+                             load_secs=round(load_secs, 1),
+                             hair_trigger_while_pending=HAIR_TRIGGER_PENDING)
+            print(f"backtest {VARIANT}: {len(frame['cols'])} tickers x {len(frame['dates'])} bars "
+                  f"| bench {BENCH} | gate {frame['gate_source']} | load {load_secs:.0f}s")
+
+            # ---- THE SWEEP (performance, 2026-08-13). Loading the tape is the dominant cost of a
+            # run — ~2.2M price rows off Supabase for every dispatch — and a ladder of N cells was
+            # paying it N times, plus N times the egress. `HYPOTHESES` prices a whole ladder
+            # against ONE load: same frame, same config, one resolved surface per cell. Sequential
+            # dispatches also could not overlap, because the workflow's concurrency group keyed
+            # only on the ref and cancelled its own predecessor.
+            cells = [c.strip() for c in os.environ.get("HYPOTHESES", "").split(",") if c.strip()]
+            cells = cells or [HYPOTHESIS]
+            written, t_sim = [], time.monotonic()
+            for cell in cells:
+                hyp = hypothesis(cell)
+                cfg = dict(cfg, hyp=hyp, max_stop=hyp["max_stop"],
+                           max_names=int(hyp["max_names"] or base_max_names))
+                label = LABEL if len(cells) == 1 else f"{LABEL} · {cell}"
+                variant = VARIANT if len(cells) == 1 else cell
+                rid = run_one(conn, frame, cfg, hyp, cell, label, variant, config_stamp)
+                if rid is not None:
+                    written.append(rid)
+            hb.detail.update(sweep=cells, run_ids=written,
+                             sim_secs=round(time.monotonic() - t_sim, 1))
+            if written:
+                pathlib.Path("/tmp/run_ids.txt").write_text("\n".join(str(r) for r in written))
     return 0
+
+
+def run_one(conn, frame, cfg, hyp, cell, label, variant, config_stamp):
+    """One cell of a sweep: simulate, summarise, write. Returns the run id, or None on DRY_RUN."""
+    trades, equity, conf = simulate(frame, cfg)
+    summary = summarise(trades, equity, frame, conf, hyp=hyp)
+    print(f"  {summary['trades']} trades | CAGR {summary['cagr']:.1%} "
+          f"vs {BENCH} {summary['benchmark_cagr'] or 0:.1%} | "
+          f"maxDD {summary['max_drawdown']:.1%} | "
+          f"conformance {'OK' if summary['stats']['conformance_ok'] else 'FAILED'}")
+    for c in summary["stats"]["conformance"]:
+        if c.get("coverage") is not None and c["coverage"] < 1.0:
+            print(f"    coverage {c['coverage']:.0%} — {c['clause']}")
+
+    if not dry():
+        params = dict(variant=variant, law_stamp=LAW_STAMP, currency="USD",
+                      config_stamp=config_stamp,
+                      # P1, both halves: the digest below covers the resolved params, and
+                      # this covers the code that interpreted them. Folded into the digest
+                      # via the extras, so a code-only change moves param_hash too.
+                      code_stamp=code_stamp(),
+                      benchmark=BENCH, start_nav=START_NAV, warmup=WARMUP,
+                      # The curve that ACTUALLY priced this run (§2.2). Recording the
+                      # retired flat deep/thin pair here would have made the stored params
+                      # describe a costing the engine no longer uses — the exact class of
+                      # drift P1 exists to end.
+                      costs=dict(commission_per_trade=0.0, fx_fee_per_side=0.0,
+                                 half_spread_bps_by_addv=[
+                                     dict(addv_floor=f, bps=b)
+                                     for f, b in cfg["spread_curve"]]),
+                      max_names=cfg["max_names"], sleeve_cap=cfg["sleeve_cap"],
+                      min_mcn=cfg["min_mcn"],
+                      hair_trigger_while_pending=HAIR_TRIGGER_PENDING,
+                      hypothesis=cell or "law", hyp=cfg["hyp"],
+                      park=dict(check_every=PARK_CHECK_EVERY, band=PARK_BAND))
+        # P1: two runs are the same experiment iff this matches. Derived last, from the
+        # assembled params, so nothing decision-bearing can be added above without moving
+        # it — which is precisely what law_stamp failed to do.
+        params["param_hash"] = param_digest(
+            cfg["hyp"], {k: v for k, v in params.items() if k != "hyp"})
+        with conn.cursor() as cur:
+            cur.execute("""insert into backtest_runs(label,params,start_date,end_date,
+                  trading_days,start_nav,end_nav,total_return,cagr,max_drawdown,max_dd_date,
+                  trades,wins,win_rate,avg_win,avg_loss,expectancy,avg_exposure,
+                  avg_hold_days,benchmark_return,benchmark_cagr,stats)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                returning id""",
+                (label, json.dumps(params),
+                 summary["start_date"], summary["end_date"], summary["trading_days"],
+                 summary["start_nav"], summary["end_nav"], summary["total_return"],
+                 summary["cagr"], summary["max_drawdown"], summary["max_dd_date"],
+                 summary["trades"], summary["wins"], summary["win_rate"],
+                 summary["avg_win"], summary["avg_loss"], summary["expectancy"],
+                 summary["avg_exposure"], summary["avg_hold_days"],
+                 summary["benchmark_return"], summary["benchmark_cagr"],
+                 json.dumps(summary["stats"], default=str)))
+            rid = cur.fetchone()[0]
+            cur.executemany("""insert into backtest_trades(run_id,ticker,entry_date,
+                  entry_price,qty,exit_date,exit_price,mcn,pivot,initial_stop,size_pct,
+                  pyramid_steps,pnl_cad,pnl_pct,bars_held,max_favorable,max_adverse,
+                  exit_reason,entry_kind)
+                values (%(run_id)s,%(ticker)s,%(entry_date)s,%(entry_price)s,%(qty)s,
+                  %(exit_date)s,%(exit_price)s,%(mcn)s,%(pivot)s,%(initial_stop)s,
+                  %(size_pct)s,%(pyramid_steps)s,%(pnl_usd)s,%(pnl_pct)s,%(bars_held)s,
+                  %(max_favorable)s,%(max_adverse)s,%(exit_reason)s,%(entry_kind)s)""",
+                [{**t, "run_id": rid} for t in trades])
+            cur.executemany("""insert into backtest_equity(run_id,d,nav,exposure,positions,
+                                 gate,benchmark) values (%s,%s,%s,%s,%s,%s,%s)""",
+                [(rid, d, nv, e, p, g, None if bch is None or
+                  (isinstance(bch, float) and np.isnan(bch)) else bch)
+                 for d, nv, e, p, g, bch in equity])
+        conn.commit()
+        print(f"  run {rid} written · {cell}"
+              f"{'' if summary['stats']['conformance_ok'] else ' · CONFORMANCE FAILED'}")
+        return rid
+    return None
 
 
 if __name__ == "__main__":
