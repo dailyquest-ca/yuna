@@ -236,11 +236,23 @@ is why the four foreign names are excluded by name.
 
 ### The three questions 050 held back, now measured
 
-| Question | Answer | What it needs |
+| Question | Answer | Ruling (Zak, 2026-08-16) |
 |---|---|---|
-| `APPS.US` / `BDN.US` — is the identical series still there? | **No.** 762 shared sessions, not the same series | **Your ruling to RELEASE.** Two live tradable common stocks are excluded on a defect that no longer exists |
-| `VGNT.US` / `VGNT-W.US` | **Yes**, still one series over 96 shared sessions | Nothing — the exclusion stands on its own evidence |
-| `TBSI`/`TBSIQ` and `VVUS`/`VVUSQ` — which line prints later? | **Neither.** Both pairs die on the same session | **Your ruling.** §3.2's clause does not reach them |
+| `APPS.US` / `BDN.US` — is the identical series still there? | **No.** 762 shared sessions, not the same series | *"If the defect is gone then we can allow them."* → **released** in migration 056 |
+| `VGNT.US` / `VGNT-W.US` | **Yes**, still one series over 96 shared sessions | The ruling was conditional on the defect being gone. Here it is not — **exclusion stands** |
+| `TBSI`/`TBSIQ` and `VVUS`/`VVUSQ` — which line prints later? | **Neither.** Both pairs die on the same session | *"You tell me. I don't really care."* → **the `Q` line goes**, both times |
+
+**Why the `Q` line.** A trailing `Q` is appended by the exchange to a company in Chapter 11. It
+marks a *status*, not a security — the company's own ticker is the unsuffixed one, and that is the
+line carrying the primary history. The two pairs are not equally consequential and 056 says so
+rather than smoothing it: `TBSI`/`TBSIQ` are one series (100.0% of 1,675 sessions), so no backtest
+could tell which was kept; `VVUS`/`VVUSQ` agree on only 96.1% of **3,853** sessions — far more
+shared history than a bankruptcy window, which means the vendor back-filled the `Q` symbol with the
+base line's own past and then diverged on the tail. Keeping `VVUS` keeps the company's real series.
+
+Both are delisted, so neither reaches today's ranking. This binds on the historical tape, which is
+where §3.2's one-company-one-line rule is enforced and where `verify_run.py` B7 found one company
+held in two of five slots.
 
 The third one caught a mistake of mine worth recording. My first version of that check said *"the
 later last-print decides"* and then printed a confident keep/exclude — off a tie that Postgres broke
