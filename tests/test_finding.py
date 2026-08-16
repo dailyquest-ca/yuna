@@ -104,3 +104,34 @@ def test_the_bootstrap_is_reproducible_or_it_is_an_opinion():
 def test_the_oos_boundary_is_the_work_orders_month():
     assert finding.OOS_START == dt.date(2025, 8, 1), (
         "§2.5(a) names Aug-2025; moving the boundary is a work-order edit, not a code edit")
+
+
+def test_a_run_that_ends_before_the_cut_cannot_read_proven():
+    """The third case, found on run 607 in CI.
+
+    A historical window — the 2007-2017 half of a disjoint split — has no Aug-2025 sessions to be
+    tested on. `cut()` raised on it, and under the workflow's `bash -e` loop that killed the
+    finding step for every remaining run in the batch. Both obvious repairs are wrong: crashing
+    loses the whole batch, and skipping quietly lets an UNTESTABLE claim score as a TESTED one.
+
+    §2.5(a) makes the OOS cut part of the definition of proven, so the absence of an OOS window is
+    a reason the definition cannot be met — never a reason to stop asking. This pins the direction:
+    no OOS cut means the verdict cannot read `proven`, whatever the full window did.
+    """
+    ends_before = dt.date(2017, 8, 14)
+    assert ends_before < finding.OOS_START, "fixture must predate the cut to be the case at issue"
+
+    equity = [(dt.date(2007, 1, 5) + dt.timedelta(days=i), 100.0 + i, 100.0 + i) for i in range(40)]
+    assert equity[-1][0] < finding.OOS_START
+    with pytest.raises(RuntimeError, match="nothing to measure"):
+        finding.cut(equity, [], since=finding.OOS_START)
+
+    # and the guard that keeps that from being reached: applicability is decided by the last
+    # session, not by whether the slice happens to be empty.
+    assert not (equity[-1][0] >= finding.OOS_START), (
+        "a path ending before the cut must be judged inapplicable, not merely empty")
+
+    after = [(dt.date(2025, 7, 20) + dt.timedelta(days=i), 100.0 + i, 100.0 + i) for i in range(40)]
+    assert after[-1][0] >= finding.OOS_START, "a path reaching past the cut stays testable"
+    c = finding.cut(after, [], since=finding.OOS_START)
+    assert c["sessions"] > 0
