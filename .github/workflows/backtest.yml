@@ -43,7 +43,7 @@ on:
         description: 'drawdown kill bar for the §2.5 verdict (E3 cells declare -0.34; blank = the arm declares none)'
         default: ''
       research:
-        description: 'run a research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger, `concentrated` = WO-A4 the winner-catcher, `dedupe` = the duplicate-listing scan, `verify` = audit stored runs and compute NOTHING'
+        description: 'run a research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger, `concentrated` = WO-A4 the winner-catcher, `dedupe` = the duplicate-listing scan, `verify` = audit stored runs and compute NOTHING, `census` = the exchange census'
         default: ''
       run_ids:
         description: 'verify only: comma-separated run ids to audit (e.g. 589,607). READ-ONLY — verify_run.py issues no INSERT, UPDATE, DELETE or COMMIT, so this cannot alter a stored run or the tape.'
@@ -195,6 +195,23 @@ jobs:
             echo "::endgroup::"
           done
           exit $rc
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  census:
+    # Read-only. Prints what `universe.exchange` actually holds, so the NYSE/NASDAQ allow-list
+    # Zak asked for is written against the column's real contents rather than against the vendor's
+    # word — which was wrong about `currency` on exactly these names.
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'census'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python src/exchange_census.py
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
