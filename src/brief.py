@@ -19,7 +19,7 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from db import connect, dry, Heartbeat                                     # noqa: E402
+from db import connect, dry, freeze_state, Heartbeat                       # noqa: E402
 
 # §5.2, verbatim: "Pager at −10% engine DD; informational lines at −20 / −30 / −40 / −50. **No
 # mechanical intervention exists at any level.**" The pager threshold and the informational ladder
@@ -132,17 +132,30 @@ def dd_lines(p):
     return out
 
 
-def tranche_lines(p):
+def tranche_lines(p, frozen=False):
     """§2.3's ramp. Eligibility is stated, never acted on — every draw is Zak's (§0.2)."""
     out = []
+    headroom = None
     for f in (p["facilities"] or []):
         head = f.get("headroom_to_cap")
+        headroom = float(head) if head is not None else headroom
         out.append(f"  {f['account']}: drawn {float(f['drawn'] or 0):,.2f} of a "
                    f"{float(f['credit_limit'] or 0):,.2f} limit · cap {float(f['cap'] or 0):,.2f} "
                    f"(§2.3, 50%) · headroom to cap {float(head or 0):,.2f}")
     if not out:
         out.append("  no facility balance recorded — §2.3's cap is 50% of the LIMIT, and the "
                    "limit is Zak's to state (a `balances` row)")
+
+    # §2.3's cap is HARD, and a ramp is a plan of draws — so the two can disagree arithmetically
+    # without either being wrong on its own. Nothing else in the system compares them, and a $100
+    # overshoot discovered at tranche three is discovered at the worst possible moment.
+    remaining = [t for t in (p["tranches"] or []) if t["status"] == "planned"]
+    planned = sum(float(t["amount_cad"]) for t in remaining)
+    if headroom is not None and planned > headroom:
+        out.append(f"  ** §2.3 BREACH AHEAD: {len(remaining)} planned tranche(s) total "
+                   f"{planned:,.2f} against {headroom:,.2f} of headroom to the cap — over by "
+                   f"{planned - headroom:,.2f}. The cap is hard; the ramp is a plan. One of them "
+                   f"needs Zak's ruling before the last tranche. **")
 
     gate_on = (p["gate"] or {}).get("gate_on")
     for t in (p["tranches"] or []):
@@ -153,7 +166,14 @@ def tranche_lines(p):
             out.append(f"  tranche {t['seq']}: ${float(t['amount_cad']):,.0f} — skipped; §2.3 "
                        f"shifts it one month, and never two tranches in one month")
         else:
-            why = "gate ON this week" if gate_on else "**held: §2.3 requires the gate ON that week**"
+            # §5.5 names levered tranches explicitly among the buys a freeze halts, so the freeze
+            # is checked before the gate — a frozen tranche is held whatever the gate says.
+            if frozen:
+                why = "**held: FROZEN — §5.5 halts levered tranches with every other buy**"
+            elif gate_on:
+                why = "gate ON this week"
+            else:
+                why = "**held: §2.3 requires the gate ON that week**"
             out.append(f"  tranche {t['seq']}: ${float(t['amount_cad']):,.0f} planned {when} — {why}")
     return out
 
@@ -228,15 +248,26 @@ def saturday_lines(cur, p):
     return out
 
 
-def render(p):
+def render(p, frozen=False, words=None):
     g = p["gate"] or {}
     out = [f"# Yuna · {g.get('session_date') or 'no session'}", ""]
+    if frozen:
+        # Above the freshness line, because it governs everything below it. §5.5 is Zak's word and
+        # the brief repeats it back to him rather than paraphrasing — a freeze lifted "only by
+        # Zak's word" needs the original words legible to compare against.
+        out.append("## ❄ FROZEN — buys halted (§5.5)")
+        out.append(f"> {words}" if words else "> (no words recorded)")
+        out.append("")
+        out.append("Entries, refills, displacement buys and levered tranches are all halted. "
+                   "**Exits fire normally and proceeds park** (§5.4, §5.5). Lifted only by "
+                   "Zak's word.")
+        out.append("")
     out.append(freshness_line(p))
     out += ["", gate_line(p), "", "## Order sheet (§4.3)", ""]
     out += sheet_lines(p)
     out += ["", "## Book (§4.2)", ""] + book_lines(p)
     out += ["", "## NAV & drawdown (§5.2)", ""] + dd_lines(p)
-    out += ["", "## Levered layer (§2.3)", ""] + tranche_lines(p)
+    out += ["", "## Levered layer (§2.3)", ""] + tranche_lines(p, frozen=frozen)
 
     top = p["top12"] or []
     if top:
@@ -266,7 +297,8 @@ def main():
     with connect() as conn, Heartbeat(conn, "compose", dry_run=dry()) as hb:
         with conn.cursor() as cur:
             p = payload(cur)
-            report = render(p)
+            frozen, words, froze_at, _ = freeze_state(cur)
+            report = render(p, frozen=frozen, words=words)
             if slot == "saturday":
                 report += "\n\n## The week (§4.1)\n\n" + "\n".join(saturday_lines(cur, p))
         print(report)
@@ -274,7 +306,8 @@ def main():
         g = p["gate"] or {}
         session = g.get("session_date")
         hb.detail.update(session=str(session) if session else None, slot=slot,
-                         gate="ON" if g.get("gate_on") else "OFF",
+                         gate="ON" if g.get("gate_on") else "OFF", frozen=frozen,
+                         freeze_words=words, frozen_at=str(froze_at) if froze_at else None,
                          orders=len(p["order_sheet"] or []),
                          held=len(p["book"] or []))
         if session is None:

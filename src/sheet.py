@@ -33,7 +33,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import desk                                                                # noqa: E402
 import engine                                                              # noqa: E402
-from db import config, connect, dry, Heartbeat                             # noqa: E402
+from db import config, connect, dry, freeze_state, Heartbeat              # noqa: E402
 
 # §2.1 houses the engine in the TFSA and nowhere else, so every ticket it writes names that account
 # and that sleeve. Not a default — a placement ruling, quoted.
@@ -104,6 +104,26 @@ def write_ranks(cur, s, mode):
     return len(rows)
 
 
+def apply_freeze(s, frozen, words):
+    """§5.5 — "A freeze halts all buys (entries, refills, displacement buys, levered tranches).
+    Exits fire normally; proceeds park."
+
+    The buys are DROPPED from the sheet rather than written and marked, and the asymmetry with the
+    NAV case is deliberate. An unknown NAV is a gap in what the system knows, so the proposal still
+    stands and only its quantity is missing. A freeze is a decision Zak has already made — the
+    engine is not proposing those buys, so writing them would put a row in front of him that his
+    own word has already refused.
+
+    Every sell survives untouched. §5.4: exits are protective-direction and are never blocked, "not
+    by freeze, not by amber, not by any throttle" — the clause names the freeze first.
+    """
+    if not frozen:
+        return s
+    kept = [o for o in s["orders"] if o["action"] != "buy"]
+    dropped = [o["ticker"] for o in s["orders"] if o["action"] == "buy"]
+    return dict(s, orders=kept, frozen=True, freeze_words=words, frozen_buys=dropped)
+
+
 def write_tickets(cur, s, mode="live"):
     """§4.3's proposals. One row per order, state `proposed`, idempotent on (close, ticker, action).
 
@@ -163,7 +183,8 @@ def main():
     with connect() as conn, Heartbeat(conn, "score", dry_run=dry()) as hb:
         with conn.cursor() as cur:
             nav = engine_nav(cur)
-            s = desk.sheet(cur, as_of, nav)
+            frozen, words, froze_at, _ = freeze_state(cur)
+            s = apply_freeze(desk.sheet(cur, as_of, nav), frozen, words)
             digest = engine.digest()
             report = desk.render(s)
             print(report)
@@ -182,7 +203,14 @@ def main():
                 conn.commit()
                 hb.rows = ranks + proposed
                 hb.detail.update(ranks=ranks, proposed=proposed, withdrawn=withdrawn)
-            if nav is None:
+            if frozen:
+                # Not amber. A freeze is a state Zak CHOSE, not a fault the pipeline found, and
+                # colouring it amber would put his own instruction in the same column as a broken
+                # ingest. The run is green and says plainly what it did.
+                hb.detail.update(frozen=True, freeze_words=words,
+                                 frozen_at=str(froze_at) if froze_at else None,
+                                 frozen_buys=s.get("frozen_buys", []))
+            if nav is None and not frozen:
                 # §4.3's amber: no new buy tickets. The rows exist and are unsized, the sells
                 # stand (§5.4), and the reason is stated rather than inferred from a null.
                 hb.amber("engine NAV unknown — buys written unsized and must not be executed; "

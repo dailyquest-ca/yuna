@@ -336,3 +336,25 @@ is `roadmap-2026-07-31.md`.
     "more than zero" would have passed for ever. **Add the table to the truncate list in the same
     commit that creates it**, and prefer assertions that pin an exact count over assertions that
     pin a direction.
+45. **Law with no code behind it is worse than a missing feature, because it reads as present.**
+    §5.5 has said since v1.0 that "Zak may halt buying at any time, in any words; that state is a
+    freeze" — and nothing in this repository implemented it. Every other clause of §5 had a job
+    behind it, the plan was the law and the law said freeze, so the natural reading of the system
+    was that a freeze worked. It would have been discovered the first time Zak said *stop buying*
+    and the next morning's sheet proposed five entries. **When a plan clause names a control, grep
+    for the control before assuming the clause is implemented** — an audit of §4 and §6 found the
+    engine gaps because those clauses name jobs, and §5.5 names no job, so nothing pointed at it.
+46. **A safety default depends on which direction the control acts.** §3.4's gate reads OFF when it
+    cannot be evaluated, and §5.5's freeze reads *not frozen* when there is no row — which look
+    contradictory until you notice that OFF **sells the whole book** and a freeze only ever *stops*
+    action. The safe default of a control that takes action is on; the safe default of a control
+    that halts action is off. Copying the gate's fail-closed instinct to the freeze would have
+    halted buying permanently on an empty table, and the reasoning that produced it would have
+    sounded exactly like caution.
+47. **A test-isolation filter that keys on WHO wrote a row misses rows a test writes as somebody
+    else.** The integration conftest deletes `config where set_by='test'` — and a test simulating
+    Zak's freeze has to write `set_by='zak'`, or the ledger it is testing is not the ledger that
+    runs. So the row leaked, and a leaked freeze does not fail a later test: it silently stops that
+    test from exercising a buy at all. Caught only because one assertion counted rows exactly
+    (`== 2`) instead of asserting a direction. **Isolate by WHAT the row is, not by who claims to
+    have written it** — the key is the identity, the author is a field.
