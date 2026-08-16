@@ -218,28 +218,74 @@ def check_foreign(results, cur, run_id):
 
     The tell is the CALENDAR, not the currency column, because the currency column is wrong: a
     name that is active but silent on many sessions the benchmark trades is listed somewhere else.
+
+    **But a calendar shortfall has three causes, and only one of them is a foreign listing.** The
+    first version of this check reported all three as "probable foreign listings", which overstated
+    the population by nearly two to one and sent the reader looking for Moscow in Longs Drug Stores.
+    The shapes separate cleanly on ONE extra number — the largest CONTIGUOUS run of benchmark
+    sessions the name missed:
+
+      foreign calendar   misses are SCATTERED. Istanbul and New York disagree a few days a month,
+                         every month, so the shortfall is spread and the largest single gap is
+                         small. MGROS misses 40 of 960.
+      backfill hole      one CONTIGUOUS block, because a fetch covered part of the history and
+                         stopped. LDG misses exactly 252 sessions and SGT 251 — a year each, which
+                         is a fetch boundary rather than anything the market did.
+      ticker reuse       one LARGE contiguous block with a different company on each side. RXDX
+                         misses 777 of 1,723: it was Ignyta until Roche bought it in 2018, then the
+                         symbol was reissued to Prometheus Biosciences in 2021. That is the
+                         dangerous one — a formation window spanning the gap computes a return
+                         across two unrelated companies.
+
+    So the check still fails on all three, and it now says WHICH, because the remedy differs: an
+    exclusion, a re-fetch, and a split into two tickers respectively.
     """
     cur.execute("""
         with traded as (select distinct ticker from backtest_trades where run_id = %s),
         span as (select t.ticker, min(p.d) a, max(p.d) b
                    from traded t join prices p on p.ticker = t.ticker group by t.ticker),
-        gaps as (select s.ticker,
+        gaps as (select s.ticker, s.a, s.b,
                         (select count(*) from prices bm
                           where bm.ticker = 'SPY.US' and bm.d between s.a and s.b) as bench_days,
                         (select count(*) from prices p
                           where p.ticker = s.ticker and p.d between s.a and s.b) as own_days
-                   from span s)
-        select ticker, bench_days, own_days
-          from gaps where bench_days >= 250
-           and own_days::numeric / nullif(bench_days,0) < 0.97
-         order by own_days::numeric / nullif(bench_days,0)""", (run_id,))
+                   from span s),
+        short as (select * from gaps where bench_days >= 250
+                    and own_days::numeric / nullif(bench_days,0) < 0.97),
+        -- the largest CONTIGUOUS run of benchmark sessions the name did not print on. Islands of
+        -- absence, numbered by the classic gaps-and-islands trick: benchmark sessions the name is
+        -- missing, grouped by (row_number - row_number over present-runs).
+        miss as (select sh.ticker, bm.d,
+                        row_number() over (partition by sh.ticker order by bm.d) rn
+                   from short sh
+                   join prices bm on bm.ticker = 'SPY.US' and bm.d between sh.a and sh.b
+                  where not exists (select 1 from prices p
+                                     where p.ticker = sh.ticker and p.d = bm.d)),
+        runs as (select ticker, count(*) len
+                   from (select ticker, d, rn,
+                                d - (rn * interval '1 day') grp from miss) g
+                  group by ticker, grp)
+        select sh.ticker, sh.bench_days, sh.own_days,
+               coalesce((select max(len) from runs r where r.ticker = sh.ticker), 0) as longest_gap
+          from short sh
+         order by sh.own_days::numeric / nullif(sh.bench_days,0)""", (run_id,))
     rows = cur.fetchall()
     if not rows:
         return _ok(results, "B4 listed where we think", "every traded name keeps the US calendar")
-    worst = ", ".join(f"{r[0]} ({r[2]}/{r[1]} sessions)" for r in rows[:6])
+    def shape(missing, longest):
+        # A judgement about WHICH defect, from the ratio of the biggest single gap to the total
+        # shortfall. Scattered absence is a calendar; one block is a hole in the history.
+        if missing <= 0:
+            return "?"
+        if longest >= 0.5 * missing:
+            return "one contiguous gap — backfill hole or REUSED TICKER, not a calendar"
+        return "scattered — probable foreign listing"
+
+    worst = "; ".join(
+        f"{r[0]} ({r[2]}/{r[1]}, longest gap {r[3]}: {shape(r[1] - r[2], r[3])})"
+        for r in rows[:6])
     _fail(results, "B4 listed where we think",
-          f"{len(rows)} traded names miss >3% of the benchmark's sessions while active — "
-          f"probable foreign listings: {worst}")
+          f"{len(rows)} traded names miss >3% of the benchmark's sessions while listed — {worst}")
 
 
 def check_tape(results, cur, run_id):
