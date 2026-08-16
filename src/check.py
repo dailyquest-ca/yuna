@@ -26,7 +26,7 @@ import datetime as dt
 import sys
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-from db import connect, config, dry, freshness, get, Heartbeat
+from db import connect, config, config_digest, dry, freshness, get, Heartbeat
 import signals as sg
 
 HURDLE_TOLERANCE = 0.005      # half a percent of price between stored and re-derived hurdle
@@ -216,6 +216,37 @@ def check_blackout_wall_has_its_dates(cur, stale_days):
     return [r[0] for r in cur.fetchall()]
 
 
+def check_backtest_is_current(cur, max_age_days=8):
+    """The verification instrument has to be testing the machine we actually run.
+
+    Two ways it stops being true, and a paths-filtered CI trigger can only see the first:
+
+      * the code changed — that fires a run, and `params.law_stamp` records which plan it tested;
+      * a **config row** changed — no commit, no diff, nothing for git to notice, and the newest
+        backtest is now evidence about a machine with different thresholds.
+
+    So the run stamps `config_digest` and this compares it with today's. Also catches the quieter
+    failure: the weekly re-run silently stopped happening.
+    """
+    stamp = config_digest(cur)
+    cur.execute("""select id, ran_at, params->>'config_stamp', params->>'law_stamp'
+                     from backtest_runs where params->>'variant' = 'law-v0'
+                    order by id desc limit 1""")
+    row = cur.fetchone()
+    if row is None:
+        return [dict(why="no law-v0 run exists", stamp=stamp)]
+    rid, ran_at, ran_stamp, law_stamp = row
+    out = []
+    if ran_stamp != stamp:
+        out.append(dict(why="config changed since the last backtest", run=rid,
+                        tested=ran_stamp, now=stamp))
+    cur.execute("select (now() - %s) > make_interval(days => %s)", (ran_at, max_age_days))
+    if cur.fetchone()[0]:
+        out.append(dict(why=f"newest law-v0 run is older than {max_age_days} days",
+                        run=rid, ran_at=str(ran_at)))
+    return out
+
+
 def check_queue_matches_the_book(cur):
     """§3.0: membership lists never drop a name the book owns, and never keep one it has sold."""
     cur.execute("""select 'missing_holding' as why, b.ticker from book b
@@ -345,6 +376,7 @@ def main():
                 ruled = check_rulings_are_honoured(cur)
                 blind = check_blackout_wall_has_its_dates(cur, calendar_stale)
                 queue_gaps = check_queue_matches_the_book(cur)
+                backtest_stale = check_backtest_is_current(cur)
                 mixed_ccy = check_one_currency(cur)
 
                 # §4.1: "the brief alarms past ~70% of daily quota". The reading lives here rather
@@ -402,6 +434,12 @@ def main():
                          detail="the hurdle's share count tracks today's quote rather than the "
                                 "close on the cap's as_of date (§3.1)",
                          names=[b["ticker"] for b in drift][:20]),
+                    dict(check="backtest_tests_the_machine_we_run",
+                         failures=len(backtest_stale),
+                         detail="the newest law-v0 backtest was decided under different config "
+                                "rows than today's, or is more than a week old — the verification "
+                                "instrument is describing a machine we no longer run",
+                         names=[b["why"] for b in backtest_stale][:5]),
                     dict(check="one_fundamentals_row_per_bench_name", failures=len(doubled),
                          detail="a bench name resolves to more or fewer than one fundamentals "
                                 "row — any join written against the history table instead of "

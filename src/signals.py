@@ -69,8 +69,14 @@ def market_gate(dates, closes, previous=None, window=30, lookback_weeks=4):
 # ---------------------------------------------------------------------------- M2 trend template
 
 
-def trend_template(close):
-    """M2 — Minervini's six conditions, at the current price (§3.2)."""
+def trend_template(close, *, off_high=0.25):
+    """M2 — Minervini's six conditions, at the current price (§3.2).
+
+    `off_high` is the last condition — how far below the 52-week high the price may sit. The law's
+    25% rejects the names that produce +100% years 36% of the time, because those names correct
+    hard on the way up; a caller may scale it to the stock's own volatility (see
+    `volatility_tolerance`). Default is the law.
+    """
     c = np.asarray(close, dtype=float)
     if len(c) < 252:
         return False
@@ -78,10 +84,46 @@ def trend_template(close):
     s200_21 = float(np.mean(c[-221:-21]))
     lo52, hi52, px = float(np.min(c[-252:])), float(np.max(c[-252:])), float(c[-1])
     return bool(px > s150 and px > s200 and s150 > s200 and s200 > s200_21 and px > s50
-                and px >= lo52 * 1.30 and px >= hi52 * 0.75)
+                and px >= lo52 * 1.30 and px >= hi52 * (1 - off_high))
 
 
 # ---------------------------------------------------------------------------- M3 base detection
+
+
+def volatility_tolerance(atr_pct, *, floor, mult, ceiling=0.60):
+    """How much give a rule should allow a name, scaled to how much it actually moves.
+
+    §3.2's numbers — a base no deeper than 25%, a price no more than 25% off its 52-week high —
+    describe an orderly stock. A stock that doubles in a year corrects **42% on the way**, so those
+    two clauses reject it seven times out of eight and a third of the time respectively. Measured
+    over the names that produced +100% years, relaxing depth to 40% takes their valid-base
+    frequency from 5.9% of days to 29.3%; shortening the base from 25 sessions to 12 moves it to
+    6.8%. Depth is worth twenty-three points and base length is worth one.
+
+    A flat 40% would hand a quiet name a licence it does not need, so this scales: the floor is
+    the law's number, and a name gets more only in proportion to its own ATR.
+    """
+    if atr_pct is None or not np.isfinite(atr_pct) or atr_pct <= 0:
+        return floor
+    return float(min(max(floor, mult * float(atr_pct)), ceiling))
+
+
+def resumed(closes, *, window=20):
+    """Buying back into strength — the close clears the highest close of the prior `window`.
+
+    Deliberately not anchored on our own exit price. Of 200 positions stopped out, 96% traded back
+    above the exit inside 60 days and the average best subsequent move was +26.8% — we are wrong
+    about the moment, not the name. But where we happened to sell is our history, not the stock's,
+    and §3.2 has no way back in at all: re-entry needs a fresh valid base, which for a name that
+    corrects 42% takes months it does not have. A new high is the market's own statement that the
+    move resumed.
+    """
+    c = np.asarray(closes, dtype=float)
+    if len(c) < window + 1 or not np.isfinite(c[-1]):
+        return False
+    prior = c[-(window + 1):-1]
+    prior = prior[np.isfinite(prior)]
+    return bool(len(prior) and c[-1] > prior.max())
 
 
 def base_scan(high, low, close, *, look_back=120, min_age=25, grace=0.005, max_depth=0.25,
@@ -128,8 +170,14 @@ def base_scan(high, low, close, *, look_back=120, min_age=25, grace=0.005, max_d
 # ---------------------------------------------------------------------------- MCN
 
 
-def momentum_quality(adj_close, *, window=90):
-    """Annualised slope of the log-price regression x R^2, divided by volatility (§3.2)."""
+def momentum_quality(adj_close, *, window=90, vol_divisor=True):
+    """Annualised slope of the log-price regression x R^2, divided by volatility (§3.2).
+
+    `vol_divisor=False` is hypothesis S1. The divisor is Clenow's, and it belongs with
+    volatility-scaled position sizing; §3.2's stop cap flattens sizing to near-uniform, so the
+    law takes the ranking penalty without the sizing benefit and systematically de-ranks the only
+    names that produce a tail. Default is the law.
+    """
     a = np.asarray(adj_close, dtype=float)
     if len(a) < window + 1 or np.any(a[-(window + 1):] <= 0):
         return np.nan
@@ -140,6 +188,8 @@ def momentum_quality(adj_close, *, window=90):
     resid = y - (slope * xc + y.mean())
     ss_tot = float(((y - y.mean()) ** 2).sum()) or 1e-12
     r2 = max(0.0, 1.0 - float((resid ** 2).sum()) / ss_tot)
+    if not vol_divisor:
+        return slope * 252.0 * r2
     vol = float(np.std(np.diff(np.log(a[-(window + 1):])))) or 1e-9
     return slope * 252.0 * r2 / vol
 
@@ -151,6 +201,20 @@ def atr(high, low, close, *, window=14):
         return np.array([])
     tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
     return np.convolve(tr, np.ones(window) / window, mode="valid")
+
+
+def atr_fraction(high, low, close):
+    """ATR(14) as a fraction of the last close — the unit `volatility_tolerance` scales by.
+
+    Distinct from `setup_proximity`'s `atr_pct`, which is an inverted own-history *percentile*
+    (0..100) used for ranking. This is the raw amount the name moves in a day, and on our own
+    L1-M names it runs 2.86% at the median.
+    """
+    a = atr(high, low, close)
+    px = float(np.asarray(close, dtype=float)[-1]) if len(close) else np.nan
+    if not len(a) or not np.isfinite(px) or px <= 0:
+        return None
+    return float(a[-1]) / px
 
 
 def setup_proximity(high, low, close, volume, *, own_window=252):
@@ -203,14 +267,161 @@ def breakout_confirmed(volumes, baselines, *, multiple=CONFIRM_MULTIPLE):
     return False
 
 
-def pyramid_orders(pivot, *, ceiling=1.05):
+def confirmation_state(volumes, baselines, *, closes=None, pivot=None,
+                       sessions=CONFIRM_SESSIONS, multiple=CONFIRM_MULTIPLE,
+                       hair_trigger_while_pending=False):
+    """§3.2 breakout confirmation as one state machine — the mechanic ratified 2026-07-31.
+
+    `volumes`, `baselines` and `closes` all run from the breakout session forward, one entry per
+    session since entry, the breakout day included. Each baseline is that session's *own* trailing
+    50-day average (`volume_baseline` in the nightly, the shifted rolling mean in the backtest) —
+    a session is never its own baseline.
+
+    Three states, and the freeze is the point of all of them:
+
+      * **confirmed** (`True`) — some session in the window printed >= 1.4x its own baseline. The
+        pyramid arms and the full target may ride.
+      * **pending** (`None`) — inside the window, not yet confirmed. Frozen at 50%. It may still
+        confirm late.
+      * **failed** (`False`) — the window closed with no qualifying session. Frozen at 50% for
+        good; the stalled-pyramid rule resolves it, and normal stops still apply.
+
+    Volume never exits a position — that was the pre-amendment rule, it cost 171 trades and 4.7%
+    of NAV in run 5, and it is gone. The only exit here is the **hair-trigger**: while the breakout
+    is unconfirmed, a close back below the pivot means the breakout failed by the only judge that
+    matters, and the position leaves at the next open.
+
+    **Ruled 2026-08-10 (Zak): the position waits out the window.** §3.2's wording — the
+    hair-trigger applies "while unconfirmed" — could be read as arming it from the breakout EOD,
+    pending included. It does not: a name inside its three-session window has not yet failed, and
+    cutting it there forfeits every late confirmation. The hair-trigger arms once the window
+    closes, which is what `arming.py` was already doing.
+
+    **What limits the wait is the stop, which is placed at entry and never lifts** —
+    `max(final-contraction low, entry - 8%)`, and never wider than 8% (§3.2 Stops). A name that
+    falls apart inside the window is stopped out on price like any other; it is not unprotected,
+    it is protected by the rule that protects everything else.
+
+    `hair_trigger_while_pending=True` keeps the discarded reading available so the backtest can
+    price the ruling rather than assume it — on the ten-year run the hair-trigger was the single
+    largest loss bucket, 158 trades at -1.61%, so the difference is worth measuring, not asserting.
+    """
+    v = list(volumes or [])
+    b = list(baselines or [])
+    seen = len(v)
+    confirmed = breakout_confirmed(v, b, multiple=multiple)
+    expired = seen >= sessions
+
+    state = True if confirmed else (False if expired else None)
+    unconfirmed = state is False or (state is None and hair_trigger_while_pending)
+
+    below = False
+    if closes is not None and pivot is not None and len(closes):
+        last = closes[-1]
+        below = last is not None and np.isfinite(last) and float(last) < float(pivot)
+
+    return dict(confirmed=state,
+                pyramid_armed=state is True,
+                fraction=1.0 if state is True else 0.5,
+                exit_next_open=bool(unconfirmed and below),
+                closed_below_pivot=bool(below),
+                sessions_seen=seen,
+                sessions_left=max(0, sessions - seen))
+
+
+def stagnant(*, sessions_since_high, limit):
+    """H4 — a position that has stopped making progress, whatever size it reached.
+
+    §3.2's stalled-pyramid rule turned out to be the law's only profit centre: +$29,284 of a
+    -$9,090 total, exiting at +4.39% after 21 sessions. Nobody designed it as profit-taking. It
+    read as housekeeping — "no permanent sub-scale positions" — and it only fired on positions
+    *below full size*, which under the law was two thirds of the book by accident of a 29%
+    volume-confirmation rate.
+
+    Confirming before entry completes the pyramid on 56-62% of positions, so the clock stops
+    firing and the profit centre disappears with it. This generalises what the clock was actually
+    doing, without depending on the pyramid: resolve a position that has not made a new high in
+    `limit` sessions. A name still printing new highs never triggers, so it keeps the runners the
+    fixed four-week clock would have cut.
+    """
+    return bool(limit) and sessions_since_high >= limit
+
+
+def stalled_pyramid(*, pyramid_step, sessions_held, full_step=3, weeks=4, sessions_per_week=5):
+    """§3.2: "A pyramid stalled below full size for 4 weeks either completes on the next base or
+    exits — no permanent sub-scale positions." Four weeks is 20 sessions, not 28 days."""
+    return pyramid_step < full_step and sessions_held >= weeks * sessions_per_week
+
+
+def m4_acceleration(eps_by_quarter, *, strong=0.25, accelerating=0.15, swing=False):
+    """§3.2 M4 — latest reported quarter YoY EPS growth >= 25%, **or** accelerating for two
+    consecutive quarters with the latest >= 15%.
+
+    `eps_by_quarter` is newest-first: an ordered sequence of EPS values, one per *reported*
+    quarter. Each quarter is compared with the one four reported quarters back, so a skipped
+    filing shifts the comparison rather than inventing a base. A non-positive base year yields no
+    growth rate at all — a swing from a loss is not a growth rate, and dividing by it invents one.
+
+    The point-in-time caller filters by filing date before calling; the nightly passes what it
+    holds. Same arithmetic either way, which is the point of it living here.
+    """
+    eps = [e for e in eps_by_quarter if e is not None and np.isfinite(e)]
+    yoy, swung = [], False
+    for i, v in enumerate(eps[:8]):
+        base = eps[i + 4] if i + 4 < len(eps) else None
+        if base is not None and base <= 0 and v > 0:
+            # Hypothesis S3: a swing from a loss to a profit. No growth rate exists — you cannot
+            # divide by a negative base — so the law scores it as unknown and the name never
+            # reaches L1-M. MU went -$1.07 to +$1.18 across 2024, stayed invisible through the
+            # whole recovery, then ran +1,029%. §3.2's intent plainly covers it; the formula
+            # cannot express it.
+            if i == 0:
+                swung = True
+            yoy.append(None)
+            continue
+        yoy.append((v / base - 1) if base and base > 0 else None)
+    y0 = yoy[0] if yoy else None
+    y1 = yoy[1] if len(yoy) > 1 else None
+    passes = bool((y0 is not None and y0 >= strong)
+                  or (y0 is not None and y1 is not None and y0 > y1 and y0 >= accelerating)
+                  or (swing and swung))
+    return dict(passes=passes, yoy_latest=y0, yoy_prev=y1, quarters=len(eps),
+                loss_to_profit=swung)
+
+
+ENTER_FLOOR = 70.0
+
+
+def enterable(mcn_score, *, floor=ENTER_FLOOR):
+    """§3.2 Sizing: "MCN < 70 never tickets — BUY-state names below 70 stay queued."
+
+    A gate, not a size adjustment: a name below the floor is never armed at all. It lives here so
+    that both the nightly and the backtest ask the same question — the backtest never asked it,
+    and 211 of run 5's 296 trades were entries this returns False for.
+    """
+    return bool(mcn_score is not None and np.isfinite(mcn_score)
+                and float(mcn_score) >= float(floor))
+
+
+def pyramid_orders(pivot, *, ceiling=1.05, spacing=None, tranches=3):
     """Steps 2 and 3 as resting add stop-limits: triggers +2% / +4%, both limits pivot x 1.05.
 
     A gap that skips a band completes at the open automatically; a gap beyond the ceiling fills
     nothing. The ceiling enforces itself at the broker, unwatched (§3.2, X2).
+
+    `spacing` widens the ladder for hypothesis A1 — Zak's "3 tranches or so that are 5% apart",
+    against §3.2's 50/25/25 at +0/+2/+4%. Equal thirds rather than a half up front, because the
+    point of averaging in is that the later tranches are worth as much as the first. The ceiling
+    has to move with the spacing or the last tranche can never fill, so it is applied relative to
+    each trigger rather than to the pivot.
     """
-    return [dict(step=2, fraction=0.25, trigger=pivot * 1.02, limit=pivot * ceiling),
-            dict(step=3, fraction=0.25, trigger=pivot * 1.04, limit=pivot * ceiling)]
+    if not spacing:
+        return [dict(step=2, fraction=0.25, trigger=pivot * 1.02, limit=pivot * ceiling),
+                dict(step=3, fraction=0.25, trigger=pivot * 1.04, limit=pivot * ceiling)]
+    share = 1.0 / float(tranches)
+    return [dict(step=k + 1, fraction=share, trigger=pivot * (1 + k * spacing),
+                 limit=pivot * (1 + k * spacing) * ceiling)
+            for k in range(1, int(tranches))]
 
 
 def entry_order(pivot, contraction_low, *, limit_over=0.02, max_stop=0.08):
@@ -221,22 +432,77 @@ def entry_order(pivot, contraction_low, *, limit_over=0.02, max_stop=0.08):
 
 
 def initial_stop(entry, contraction_low, *, max_stop=0.08):
-    """Higher of the base's final-contraction low or entry - 8%. Never wider than 8% (§3.2)."""
-    floor = entry * (1 - max_stop)
+    """Higher of the base's final-contraction low or entry - 8%. Never wider than 8% (§3.2).
+
+    `max_stop=None` means no flat cap, matching `volatility_stop`. With no cap the contraction low
+    is the only stop there is, and without one there is no stop at all — None, so the caller
+    declines rather than being handed a level. Previously this raised a TypeError, which is how
+    A2's first live run died: an arm carrying no percentage cap reached this through a door its
+    preset was supposed to have closed.
+    """
+    floor = None if max_stop is None else entry * (1 - max_stop)
     if contraction_low is None or not np.isfinite(contraction_low):
         return floor
-    return max(float(contraction_low), floor)
+    return float(contraction_low) if floor is None else max(float(contraction_low), floor)
+
+
+def volatility_stop(entry, atr_now, *, mult=5.0, max_stop=0.20):
+    """Hypothesis R1 — a stop set by the name's own noise, not by a fixed percentage.
+
+    §3.2 caps the initial stop at 8% and floors it at the base's final-contraction low, which in
+    practice puts it 7.57% under entry. **65% of entries breach that inside 125 sessions**, so the
+    law's stop and a multi-month hold are mutually exclusive: the stop fires first on two thirds of
+    the names that would have produced the move. A 20% cap survives 73%.
+
+    The multiplier is not the conventional 2.5. ATR(14) across the names this system actually
+    trades runs 2.86% of price at the median, so 2.5x lands at 7.2% — the law's stop, renamed.
+    5x gives roughly 14% on a median name, 11% on a quiet one and the 20% cap on a volatile one.
+
+    Deliberately does NOT floor at the contraction low. The contraction low is what makes the law's
+    stop tight, and tightness is the thing under test. `max_stop` is the widest permitted, not a
+    target — a quiet name still gets a close stop because its ATR is small.
+    """
+    # `max_stop=None` means there is NO flat cap and the ATR alone sets the stop — A2's spec
+    # (E-series E3) is "3xATR(20) from entry", with no percentage floor anywhere in it. Without an
+    # ATR there is then no stop that can be formed at all, and None is the honest answer: the
+    # caller must decline the entry rather than be handed an invented level.
+    if atr_now is None or not np.isfinite(atr_now) or atr_now <= 0:
+        return None if max_stop is None else entry * (1 - max_stop)
+    floor = float(entry) - mult * float(atr_now)
+    return floor if max_stop is None else max(floor, float(entry) * (1 - max_stop))
 
 
 def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_step=0,
                  full_step=3, trail10_from=0.15, trail10=0.10, euphoria_trail=0.05,
-                 euphoria_sd=2.0, sd_window=50):
+                 euphoria_sd=2.0, sd_window=50, breakeven_r=None, init_stop=None,
+                 breakeven=True, euphoria=True, breakeven_on_full_size=True,
+                 breakeven_giveback=0.0):
     """The stop ladder (§3.2 Stops) — ratchets up, never down.
 
     Full size moves the stop to breakeven; +15% from average cost starts a 10% trail below the
     highest close since entry; a close more than 2 standard deviations above its own 50-day
     tightens that trail to 5%. The euphoria rule tightens, it never sells, and it has exactly
     one trigger — the second one was deleted from the plan in the S1-S5 round.
+
+    `breakeven` and `euphoria` switch off the two rungs that shorten a hold rather than protect
+    a gain, for hypotheses B1 and B2. Both default to the law. They are separate switches from
+    `breakeven_r` on purpose: that one *moves* the breakeven trigger, and setting it to None
+    restores §3.2's "at full pyramid size", which under E1 fires on most positions — so there was
+    no way to ask what a position does with no breakeven under it at all.
+
+    B1 answered that question and the answer was two-sided: deleting the rung **doubled the
+    average hold, 11.9 sessions to 23.9, and more than doubled the win rate, 16.7% to 37.2%** —
+    the diagnosis was right — but the average loss went -2.83% to -7.60%, because every loser now
+    runs the full volatility stop. The rung is not the enemy; a rung sitting exactly at cost is,
+    because price oscillates around entry and a stop parked there is a magnet.
+
+    So two further knobs, both interpolating between those poles:
+
+      * `breakeven_on_full_size` — whether *reaching full pyramid size* trips the rung at all, so
+        a caller can keep the earned-it trigger (`breakeven_r`) and drop the sizing one.
+      * `breakeven_giveback` — where the rung sits, as a fraction of the initial risk left under
+        cost. 0.0 is §3.2 (exactly cost); 1.0 leaves the initial stop untouched and reproduces B1;
+        0.5 halves the risk instead of erasing it, which is room without abandoning protection.
     """
     c = np.asarray(closes, dtype=float)
     if not len(c):
@@ -245,17 +511,30 @@ def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_
     hc = float(np.max(c)) if highest_close is None else max(float(highest_close), float(np.max(c)))
 
     euphoric = False
-    if len(c) >= sd_window:
+    if euphoria and len(c) >= sd_window:
         w = c[-sd_window:]
         sd = float(np.std(w))
         euphoric = sd > 0 and px > float(np.mean(w)) + euphoria_sd * sd
+
+    # Hypothesis R2: breakeven when the position has earned back its own risk, rather than when
+    # the pyramid completes. The law ties risk management to a *sizing* milestone that three of
+    # four positions never reach, so 129 stops gave back +6.56% unrealised to exit at -2.05%.
+    at_1r, risk = False, None
+    if avg_cost and init_stop:
+        risk = (float(avg_cost) - float(init_stop)) / float(avg_cost)
+        if breakeven_r is not None:
+            at_1r = risk > 0 and (px / float(avg_cost) - 1) >= breakeven_r * risk
 
     if euphoric:
         candidate, mode = hc * (1 - euphoria_trail), "trail5"
     elif avg_cost and px / float(avg_cost) - 1 >= trail10_from:
         candidate, mode = hc * (1 - trail10), "trail10"
-    elif pyramid_step >= full_step and avg_cost:
-        candidate, mode = float(avg_cost), "breakeven"
+    elif breakeven and avg_cost and ((breakeven_on_full_size and pyramid_step >= full_step)
+                                     or at_1r):
+        rung = float(avg_cost)
+        if breakeven_giveback and risk:
+            rung *= 1 - float(breakeven_giveback) * risk
+        candidate, mode = rung, "breakeven"
     else:
         candidate, mode = current_stop, "initial"
 
@@ -268,6 +547,90 @@ def ratchet_stop(*, closes, avg_cost, current_stop, highest_close=None, pyramid_
         if stop == float(current_stop) and candidate < current_stop:
             mode = "held"
     return dict(stop=stop, mode=mode, highest_close=hc, euphoric=euphoric)
+
+
+def deep_recovery(high, low, close, *, min_range=0.12, min_depth=0.50, min_off_high=0.25,
+                  min_r3=0.10, window=252, quarter=63):
+    """The census screen (docs/backtest-findings-2026-08-10.md §9) — L1-M's replacement candidate.
+
+    §3.2's M2 and M3 select an orderly, calm stock near its highs, and against the 2016-2026 census
+    of every liquid US name that gained 70% inside six months, that description is *anti*-
+    predictive: M3's depth clause has a lift of 0.04 and 99.6% of all winners fail it; M2's off-high
+    clause is 0.64; the moving-average stack is 0.97, indistinguishable from random. The population
+    those two gates admit returned **+1.12% per six months** before costs, which is what nineteen
+    backtest runs produced from it.
+
+    The four conditions here are the census read forwards, in the order that tightened the net:
+
+      1. it moves at all — six-month average monthly range over 12%. Under 6% the hit rate is
+         0.47%; over 12% captures 98% of every winner in the decade.
+      2. it has fallen hard — the 52-week low is more than 50% under the 52-week high. Captures
+         80.6% of winners at 2.33x.
+      3. it is still cheap — price at least 25% under the 52-week high.
+      4. it has turned — up more than 10% over the last quarter, the market's statement that the
+         re-rating has begun.
+
+    Together: 21.67% hit rate against a 6.59% base rate, +19.07% mean six-month return, and — the
+    part that makes it tradeable — the winners' median drawdown after entry is -9.3% against the
+    losers' -24.9%, so a stop separates them instead of taxing them.
+
+    Returns the components as well as the verdict, because a screen whose parts cannot be seen is
+    a screen nobody can debug.
+    """
+    h, l, c = (np.asarray(x, dtype=float) for x in (high, low, close))
+    if len(c) < window or len(h) < window or len(l) < window:
+        return dict(passes=False, rng=None, depth=None, off_high=None, r3=None)
+    hw, lw, cw = h[-window:], l[-window:], c[-window:]
+    hi52, lo52, px = float(np.nanmax(hw)), float(np.nanmin(lw)), float(c[-1])
+    if not (np.isfinite(hi52) and np.isfinite(lo52) and np.isfinite(px)) or hi52 <= 0 or px <= 0:
+        return dict(passes=False, rng=None, depth=None, off_high=None, r3=None)
+
+    # monthly range, as the census measured it: mean of (high-low)/close over 21-session blocks
+    blocks = [(np.nanmax(hw[i:i + 21]), np.nanmin(lw[i:i + 21]), cw[i + 20])
+              for i in range(len(cw) - 21, max(len(cw) - 21 - 6 * 21, -1), -21)]
+    spans = [(bh - bl) / bc for bh, bl, bc in blocks if bc and np.isfinite(bc) and bc > 0]
+    rng = float(np.mean(spans)) if spans else None
+
+    depth = lo52 / hi52 - 1.0
+    off_high = px / hi52 - 1.0
+    base3 = float(c[-quarter - 1]) if len(c) > quarter and c[-quarter - 1] > 0 else None
+    r3 = (px / base3 - 1.0) if base3 else None
+
+    ok = (rng is not None and rng > min_range and depth < -min_depth
+          and off_high < -min_off_high and r3 is not None and r3 > min_r3)
+    return dict(passes=bool(ok), rng=rng, depth=depth, off_high=off_high, r3=r3)
+
+
+def profitability_dead(eps_by_quarter, *, quarters=2, worsening=False):
+    """Has the business stopped making money — the only thing that ends a forever hold.
+
+    Zak's rule (2026-08-11): a name that ran past the last trim rung "rides through the highs and
+    lows unless the financials on the profitability of the company dies". Every other exit in §3.2
+    is a *price* exit, and the whole point of this one is that price no longer speaks. So the test
+    has to be about earnings and nothing else.
+
+    `eps_by_quarter` is newest first, as `m4_acceleration` takes it. Dead means the last `quarters`
+    **reported** quarters are at or below zero — one bad quarter is a stumble, two consecutive is
+    the profitability going away. Unknown is not dead: with no earnings we hold, because the
+    alternative is selling the position on a data gap.
+
+    `worsening` fixes what the census broke. "Two quarters at or below zero" describes the **entry
+    state of 41% of every winner in 2016-2026** — being unprofitable has a lift of 2.71 against
+    the base rate and being profitable 0.69 — so as a release condition it sells the best
+    candidates on the day they are bought. With `worsening=True` the loss must also be **deeper
+    than the same quarter a year ago**: a business losing money and getting better is not a
+    business that died, and it is the single most common shape among the names that go on to run.
+    """
+    vals = [v for v in (eps_by_quarter or []) if v is not None and np.isfinite(v)]
+    if len(vals) < quarters:
+        return False
+    if not all(v <= 0 for v in vals[:quarters]):
+        return False
+    if not worsening:
+        return True
+    if len(vals) <= 4:
+        return False                     # no year-ago quarter to compare: unknown is not dead
+    return bool(vals[0] < vals[4])
 
 
 def momentum_size(*, nav, mcn_score, stop_distance, budgets=(0.007, 0.009), band=(0.08, 0.12),
@@ -713,3 +1076,92 @@ def split_ratio(payload):
         return value or None
     except (TypeError, ValueError, ZeroDivisionError):
         return None
+
+
+# ===================================================================== A2 primitives (E-series E3)
+# The trend-holding-at-breadth arm. These live here rather than in `backtest.py` because
+# `signals.py` is the law expressed as code and production will need them too if A2 ever clears
+# its bars. Every constant below is the work order's; none is a default.
+
+def new_high_breakout(close, *, lookback=252):
+    """True when the latest close is the highest close of the trailing `lookback` sessions.
+
+    A2's entry (E3 center spec), replacing §3.2's pivot-and-base machinery. The trade-off is
+    deliberate: a base breakout tries to buy the moment a trend starts, a new-high breakout simply
+    buys names already making highs. The second is cruder and much broader, and breadth is the
+    whole point of A2 — the sensitivity ladder swaps 252 for the all-time high.
+
+    Compares against the PRIOR window, so the current bar clearing its own high is not circular.
+    """
+    c = np.asarray(close, dtype=float)
+    if len(c) < lookback + 1:
+        return False
+    window = c[-(lookback + 1):-1]
+    if not np.isfinite(c[-1]) or not np.isfinite(window).any():
+        return False
+    return bool(c[-1] > np.nanmax(window))
+
+
+def chandelier_stop(highest_close, atr_value, *, multiple=8.0):
+    """Highest close since entry, less `multiple` ATRs. Ratchets up only — the caller enforces it.
+
+    A2's runner exit. 8x is very wide on purpose: the arm's thesis is that the tail pays for
+    everything, and the way a trend-follower kills its own tail is by exiting on noise. §7f and M1
+    both said the same thing from the other direction — the mechanics were never the problem, the
+    holding was.
+    """
+    if not np.isfinite(highest_close) or not np.isfinite(atr_value) or atr_value <= 0:
+        return None
+    return float(highest_close - multiple * atr_value)
+
+
+def risk_size(*, nav, entry, stop, risk_frac=0.005):
+    """Shares such that a stop-out costs `risk_frac` of NAV. Never conviction-weighted.
+
+    This is the M1 lesson made structural. M1 had a positive per-trade expectancy of +2.21% and
+    still lost 8.07% with a -39.89% drawdown, because size was set by conviction rather than by
+    what the stop would cost. Here the stop distance sets the size, so a wide stop buys less and a
+    tight stop buys more, and every position risks the same fraction of the account.
+
+    Returns 0.0 when the stop is not below the entry — a non-positive risk distance has no size,
+    and inventing one is how a divide-by-zero becomes a position.
+    """
+    if not all(np.isfinite(x) for x in (nav, entry, stop)):
+        return 0.0
+    risk_per_share = entry - stop
+    if risk_per_share <= 0 or nav <= 0 or entry <= 0:
+        return 0.0
+    return float(nav * risk_frac / risk_per_share)
+
+
+def regression_momentum(close, *, window=90, sessions_per_year=252):
+    """How fast the trend runs, times how cleanly it runs — Clenow's momentum score (WO-A3 §3).
+
+    Least-squares fit of ln(price) on time over the trailing `window` sessions: the slope,
+    annualized as exp(m x 252) - 1, answers "what would a year of this trajectory return", and
+    the fit's R² discounts it by how much the path actually hugged that trajectory. A parabolic
+    mover and a grinder can share a slope; the R² separates them — and the frog-in-the-pan
+    result (Da-Gurun-Warachka, RFS 2014: +5.94%/mo continuation for smooth arrivals against
+    -2.07% for gappy ones on the same cumulative gain) is the measured reason the product, not
+    the slope alone, is the score.
+
+    Returns dict(slope_ann, r2, score) or None when the window is short, non-positive, or flat —
+    a trend that cannot be scored is declined, never defaulted.
+    """
+    c = np.asarray(close, dtype=float)
+    if len(c) < window or np.any(~np.isfinite(c[-window:])) or np.any(c[-window:] <= 0):
+        return None
+    y = np.log(c[-window:])
+    x = np.arange(window, dtype=float)
+    xm, ym = x.mean(), y.mean()
+    sxx = ((x - xm) ** 2).sum()
+    if sxx == 0:
+        return None
+    m = ((x - xm) * (y - ym)).sum() / sxx
+    ss_res = ((y - (ym + m * (x - xm))) ** 2).sum()
+    ss_tot = ((y - ym) ** 2).sum()
+    if ss_tot < 1e-18:
+        return None
+    slope_ann = float(np.exp(m * sessions_per_year) - 1.0)
+    r2 = float(1.0 - ss_res / ss_tot)
+    return dict(slope_ann=slope_ann, r2=r2, score=slope_ann * r2)
