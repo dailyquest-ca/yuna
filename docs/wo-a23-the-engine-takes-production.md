@@ -125,6 +125,18 @@ Until you sell, the broker still holds those shares; a book zeroed ahead of you 
 `reconcile` in exactly the state it exists to detect. The book reaches zero through the receipts —
 ticket → transaction → position closed — and that path *is* §6.2's "paper trail reconcile can read".
 
+**§4.3's "amber/red pipeline: no new buy tickets" is enforced at the brief, not by suppressing the
+rows — and a stricter reading exists.** `score` runs before `check`, necessarily: four of §4.4's
+six gauges recompute what `score` wrote, so a check that ran first would have nothing to check. So
+`sheet.py` cannot know tonight's verdict when it writes, and it writes every buy as `proposed` —
+never `approved`, which is your word alone. `gauges` then sets `blocks_buys`, and the brief prints
+**"buys held; exits stand"** above the sheet. Nothing can act on a `proposed` ticket, and §4.3's own
+state machine makes `proposed` the pre-approval state, so I read this as satisfying the clause.
+The stricter reading — that the rows should not exist at all under amber — would require either
+scoring twice or gating on the *previous* night's verdict. **If you want the stricter one, say so
+and I will gate the write on the last check verdict; it is a small change and I would rather you
+choose it than inherit my reading of it.**
+
 ---
 
 ## 5. What is blocking, and whose it is
@@ -221,6 +233,21 @@ STANDS. **The release itself is your ruling, not mine.**
 6,332 stocks — it is EODHD's bulk-feed bucket, not a listing venue. That confirms the WO-A22 §8.1
 finding on today's data: the exchange filter you asked about cannot be built from this column, which
 is why the four foreign names are excluded by name.
+
+### The three questions 050 held back, now measured
+
+| Question | Answer | What it needs |
+|---|---|---|
+| `APPS.US` / `BDN.US` — is the identical series still there? | **No.** 762 shared sessions, not the same series | **Your ruling to RELEASE.** Two live tradable common stocks are excluded on a defect that no longer exists |
+| `VGNT.US` / `VGNT-W.US` | **Yes**, still one series over 96 shared sessions | Nothing — the exclusion stands on its own evidence |
+| `TBSI`/`TBSIQ` and `VVUS`/`VVUSQ` — which line prints later? | **Neither.** Both pairs die on the same session | **Your ruling.** §3.2's clause does not reach them |
+
+The third one caught a mistake of mine worth recording. My first version of that check said *"the
+later last-print decides"* and then printed a confident keep/exclude — off a tie that Postgres broke
+by row order. That is exactly the invention 050 held these rows back to avoid. The report now states
+the facts, says plainly when the rule does not decide, and distinguishes the two cases: `TBSI`/`TBSIQ`
+are one series, so either may be kept and the choice cannot change a backtest; `VVUS`/`VVUSQ` are
+**not**, so excluding the wrong one drops real history and the choice matters.
 
 ---
 

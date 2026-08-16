@@ -188,22 +188,44 @@ def held_back(cur):
                    "tradable common stock a strategy change. Propose RELEASING it.")
         print(f"      {verdict}")
 
-    print("\n=== 050's dead pairs: which line prints later? ===")
+    print("\n=== 050's dead pairs: does §3.2's rule decide? ===")
     for a, b in DEAD_PAIRS:
-        cur.execute("""select ticker, max(d) from prices where ticker in (%s, %s)
-                        group by ticker order by 2 desc""", (a, b))
+        cur.execute("""select ticker, min(d), max(d), count(*) from prices
+                        where ticker in (%s, %s) group by ticker order by 1""", (a, b))
         rows = cur.fetchall()
         if len(rows) < 2:
             print(f"  {a} / {b}: only {len(rows)} of the two has bars at all")
-            for tk, last in rows:
-                print(f"      {tk} last prints {last}")
+            for tk, first, last, n in rows:
+                print(f"      {tk}: {n} bars, {first} .. {last}")
             continue
-        (keep, keep_last), (drop, drop_last) = rows
-        # §3.2: "keep the line still printing". When neither is, the later last-print is the one
-        # the vendor carried furthest, and that is the line to keep.
-        print(f"  {a} / {b}: {keep} last prints {keep_last}, {drop} last prints {drop_last}")
-        print(f"      keep {keep}, exclude {drop} (§3.2 keeps the line still printing; neither is, "
-              f"so the later last-print decides)")
+        for tk, first, last, n in rows:
+            print(f"  {tk:<10} {n:>5} bars   {first} .. {last}")
+
+        ra, rb, _ = _returns(cur, a, b)
+        shared = int((~(ra != ra) & ~(rb != rb)).sum())
+        agree = bars.same_security(ra, rb)
+        lasts = {tk: last for tk, _, last, _ in rows}
+        # §3.2: "keep the line still printing." Neither of these is, so the clause does not reach
+        # them, and the last-print does not break the tie either — both die on the same session.
+        #
+        # This is where the first draft of this report was WRONG. It said "the later last-print
+        # decides" and then printed a confident keep/exclude off a tie that Postgres broke by row
+        # order. That is precisely the invention migration 050 held these rows back to avoid: an
+        # exclusion is permanent in effect, and a name wrongly excluded is never ranked, never
+        # traded, and leaves no trace of what it would have done. The report states the facts and
+        # says plainly when the rule does not decide.
+        if lasts[a] != lasts[b]:
+            keep = a if lasts[a] > lasts[b] else b
+            print(f"      §3.2 DECIDES: keep {keep} — it is the line the vendor carried furthest")
+        elif agree:
+            print(f"      §3.2 does not decide: both lines end {lasts[a]}, and neither is still "
+                  f"printing. They ARE one series ({shared} shared sessions), so either may be "
+                  f"kept and exactly one must go — the choice does not change a backtest. "
+                  f"**Zak's ruling, on a coin that genuinely has two identical faces.**")
+        else:
+            print(f"      §3.2 does not decide, and the choice MATTERS: both lines end "
+                  f"{lasts[a]}, and over {shared} shared sessions they are not the same series. "
+                  f"Excluding the wrong one drops real history. **Needs a ruling, not a default.**")
 
 
 if __name__ == "__main__":
