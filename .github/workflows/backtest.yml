@@ -261,7 +261,16 @@ jobs:
       - name: §2.5 bars
         if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true'
         run: |
-          for rid in $(cat /tmp/run_ids.txt); do RUN_ID=$rid python src/finding.py; done
+          # `bash -e` aborts the loop on the FIRST non-zero exit, so one bad run used to take
+          # every later run in the batch with it — the whole point of batching is that each run
+          # gets its own answer. Score them all, then fail at the end if any failed.
+          rc=0
+          for rid in $(cat /tmp/run_ids.txt); do
+            echo "::group::finding $rid"
+            RUN_ID=$rid python src/finding.py || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DD_BAR: ${{ inputs.dd_bar }}
@@ -274,7 +283,16 @@ jobs:
       - name: audit every run against the raw tape
         if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true'
         run: |
-          for rid in $(cat /tmp/run_ids.txt); do RUN_ID=$rid python src/verify_run.py; done
+          # Same batch-abort as the finding step above, and it bit for real: run 612 failing B4
+          # and B7 aborted the loop before run 613 was audited at all, so the A/B this job existed
+          # to produce came back with only the control half. Audit every run, fail at the end.
+          rc=0
+          for rid in $(cat /tmp/run_ids.txt); do
+            echo "::group::audit $rid"
+            RUN_ID=$rid python src/verify_run.py || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: autopsy on failure
@@ -335,7 +353,16 @@ jobs:
       - name: §2.5 bars
         if: always() && steps.engine.outcome == 'success' && inputs.dry_run != 'true'
         run: |
-          for rid in $(cat /tmp/run_ids.txt); do RUN_ID=$rid python src/finding.py; done
+          # `bash -e` aborts the loop on the FIRST non-zero exit, so one bad run used to take
+          # every later run in the batch with it — the whole point of batching is that each run
+          # gets its own answer. Score them all, then fail at the end if any failed.
+          rc=0
+          for rid in $(cat /tmp/run_ids.txt); do
+            echo "::group::finding $rid"
+            RUN_ID=$rid python src/finding.py || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DD_BAR: ${{ inputs.dd_bar }}
