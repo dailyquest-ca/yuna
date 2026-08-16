@@ -237,3 +237,56 @@ Two things to establish before writing it, and neither is a ruling:
 2. **Which exchange codes count as "the US stock market".** NYSE and NASDAQ are certain. `NYSE ARCA` and `NYSE MKT` are the same market and hold real ETFs and small caps. **OTC / PINK is the live question** — US-quoted, but thinly, and it is where a delisted foreign line would most plausibly sit. That list is a plan constant and needs Zak's word once the census is in.
 
 **Recommendation:** census first — `select exchange, count(*) from universe where kind='stock' group by 1` — then a filter on an explicit allow-list, with the participation gate kept as a **detector** rather than a gate. It is the thing that found this class in the first place, and `verify_run.py` B4 should keep firing on anything the exchange filter lets through.
+
+---
+
+## 8. The census: the exchange filter cannot be built on the column we have
+
+Run [31954402199](https://github.com/dailyquest-ca/yuna/actions/runs/31954402199), read-only.
+
+### 8.1 `universe.exchange` is the FEED, not the venue
+
+| value | rows | active |
+| --- | --- | --- |
+| `US` | 6,332 | 3,211 |
+| `TO` | 1 | 1 |
+
+That is the whole census. The column holds EODHD's **bulk-feed bucket**, not the listing venue — every
+US name, NYSE and NASDAQ and OTC alike, is simply `US`.
+
+**An NYSE/NASDAQ allow-list would keep 0 of 3,212 active stocks and drop the universe entirely.**
+The idea is right; the data as stored cannot express it. All ten flagged names read
+`exchange=US, currency=USD`, exactly as unreliable as the currency field that started this.
+
+### 8.2 And B4 has been over-flagging — two different things in one list
+
+Nine of the ten are `delisted`, and reading the names splits them cleanly:
+
+| genuinely foreign, on a `.US` ticker | real US companies that were acquired |
+| --- | --- |
+| `PLZL` Polyus (Russia) · `NVTK` Novatek (Russia) | `LDG` Longs Drug Stores (CVS, 2008) · `SUG` Southern Union (2012) |
+| `MGROS` Migros Turk · `IVL` Indorama Ventures (Thailand) | `RXDX` Prometheus Biosciences (Merck, 2023) · `AOI` Alliance One · `SGT` Sames |
+
+**A company acquired in 2008 legitimately stops printing.** B4 measures "missed >3% of the
+benchmark's sessions while active", and for a delisted name "while active" is evidently not being
+scoped to the sessions it was actually listed for — so an ordinary acquisition looks identical to a
+Moscow listing.
+
+The four on the left are exactly the four `wo-a16-foreign-listings.md` named originally. **The
+foreign-listing population is four, not seven**, and the rest is a defect in the detector.
+
+### 8.3 What this changes
+
+1. **The exchange filter needs a real venue**, which means asking EODHD for the NYSE and NASDAQ
+   constituent lists and storing the answer — an ingest change, not a filter over a column we
+   already have. Doable, and still better than a participation threshold, but it is work rather
+   than a one-line predicate.
+2. **B4 must scope "while active" to the listed window** before it is trusted again. Until it is,
+   its count overstates the problem and its list mixes two unrelated causes.
+3. **The four genuinely foreign names are a `universe_excluded` matter** and need no threshold at
+   all — they can be excluded by name, on the evidence that they trade in Moscow, Istanbul and
+   Bangkok.
+
+**Nothing here was ruled on a guess, which is the point of having run the census first.** The
+proposal in §7.1 — "filter on the column, it needs no threshold" — was wrong about what the column
+contains, and one query cost less than shipping it would have.
