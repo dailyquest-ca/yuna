@@ -383,9 +383,19 @@ def check_rules(results, cur, run_id, eq):
     spans = cur.fetchall()
     dates = [r[0] for r in eq]
     events = {}
+    # What is being counted is positions held at the CLOSE of each session, which is what
+    # `backtest_equity.positions` records and what §3.6's `Slots = 5` governs. Both events are
+    # applied before the session is counted, so an entry on d counts and an exit on d does not:
+    # `concentrated.py:1603-1605` books the exit and does `held[j] -= qty` on that same date, and
+    # §3.5 sequences sells before buys within the morning.
+    #
+    # This is the whole reason the old check reported a breach that was not there. Counting a name
+    # as live on its exit date AND its entry date double-counts ordinary same-session turnover:
+    # sell one name at the open, buy another at the open, and a five-slot book momentarily reads as
+    # six or seven. The engine was never holding them at once.
     for tk, a, b, _q, _p in spans:
         events.setdefault(a, []).append((1, tk))
-        events.setdefault(b, []).append((-1, tk))     # exit session still counts as held
+        events.setdefault(b, []).append((-1, tk))
     live, worst, worst_d = collections.Counter(), 0, None
     for d in dates:
         for delta, tk in events.get(d, ()):
