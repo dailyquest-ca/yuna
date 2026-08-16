@@ -99,7 +99,10 @@ def sheet(cur, as_of, nav):
 
     ranked = engine.rank(i, adj, raw, dv)
     rank_of = {tickers[j]: r for r, j in enumerate(ranked, start=1)}
-    addv_row = np.nanmedian(dv[max(0, i - engine.ADDV_WINDOW + 1):i + 1], axis=0)
+    addv_row = engine.median_addv(dv, i)
+    # §3.2's survivors BEFORE the top-500 cap. §4.4 gauges this rather than the ranked count,
+    # which is censored at 500 on any ordinary session and cannot move when the tape breaks.
+    screened = len(engine.screen(i, adj, raw, dv, pool=None))
 
     # §3.3's score, recomputed for the record. `engine.rank` returns the ORDER and deliberately
     # keeps the arithmetic private; the store wants the number too, so §4.4 can re-derive a rank
@@ -140,7 +143,8 @@ def sheet(cur, as_of, nav):
                            participation_ok=engine.participation_ok(qty, px, addv) if qty else None))
     return dict(session=sessions[i], gate="ON" if gate_on else "OFF", gate_on=gate_on,
                 gate_green=bool(green), index_close=float(index_px[i]), index_sma=sma, nav=nav,
-                universe=len(tickers), ranked=len(ranked), held=sorted(held), unranked=unranked,
+                universe=len(tickers), ranked=len(ranked), screened=screened,
+                held=sorted(held), unranked=unranked,
                 top=[tickers[j] for j in ranked[:engine.FILL_BAND]], orders=orders,
                 ranks=[dict(ticker=tickers[j], rank=r, score=scores.get(tickers[j]),
                             mark=float(raw[i, j]) if np.isfinite(raw[i, j]) else None,

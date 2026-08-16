@@ -65,17 +65,19 @@ def engine_nav(cur):
 def write_session(cur, s, mode, digest):
     cur.execute("""
         insert into engine_sessions (session_date, gate_on, gate_green, index_close, index_sma,
-                                     universe_count, ranked_count, nav, param_digest, mode, detail)
-        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                     universe_count, ranked_count, screen_count, nav,
+                                     param_digest, mode, detail)
+        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         on conflict (session_date, mode) do update set
             gate_on = excluded.gate_on, gate_green = excluded.gate_green,
             index_close = excluded.index_close, index_sma = excluded.index_sma,
             universe_count = excluded.universe_count, ranked_count = excluded.ranked_count,
+            screen_count = excluded.screen_count,
             nav = excluded.nav, param_digest = excluded.param_digest,
             detail = excluded.detail, created_at = now()
         returning id""",
         (s["session"], s["gate_on"], s["gate_green"], s["index_close"], s["index_sma"],
-         s["universe"], s["ranked"], s["nav"], digest, mode,
+         s["universe"], s["ranked"], s["screened"], s["nav"], digest, mode,
          json.dumps({"top": s["top"], "held": s["held"], "unranked": s["unranked"]})))
     return cur.fetchone()[0]
 

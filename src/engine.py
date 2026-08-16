@@ -20,8 +20,24 @@ These functions return proposals.
 """
 import hashlib
 import json
+import warnings
 
 import numpy as np
+
+
+def median_addv(dv, i, window=None):
+    """§3.2's "50-session median ADDV", NaN where a name has no dollar volume in the window.
+
+    NaN is the CORRECT answer for a name with no bars, and it is load-bearing: every comparison
+    against NaN is False, so an unpriced name fails the liquidity gate rather than passing it. The
+    warning numpy raises for an all-NaN slice is therefore expected on every session that carries a
+    delisted or newly-quarantined name, and it is silenced here rather than in the caller so the
+    reason travels with the arithmetic. Warnings nobody can act on are how real ones get ignored.
+    """
+    lo = max(0, i - (window or ADDV_WINDOW) + 1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.nanmedian(dv[lo:i + 1], axis=0)
 
 # ---- §3.6, the constants of record ------------------------------------------------------------
 # Quoted from the table verbatim. A change to any of these is a plan amendment (§0.3), not a code
@@ -76,10 +92,12 @@ def digest():
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def screen(i, adj, raw, dv):
+def screen(i, adj, raw, dv, *, pool=POOL):
     """§3.2 — who is eligible to be ranked at session `i`. Uses bars <= i only.
 
-    Returns column indices, narrowed to the top `POOL` by ADDV.
+    Returns column indices, narrowed to the top `pool` by ADDV. `pool=None` skips the cap and
+    returns every survivor, which is what §4.4's second gauge measures — the capped count is
+    exactly 500 on any ordinary session and therefore cannot move when the tape breaks.
 
     The pool cap is not decoration. Ranking over all ~3,000 liquid US names rather than the largest
     500 reaches deep into small caps where 12-1 momentum is mostly volatility that mean-reverts;
@@ -92,15 +110,15 @@ def screen(i, adj, raw, dv):
     past, recent = adj[i - FORMATION], adj[i - SKIP]
     live = np.isfinite(past) & np.isfinite(recent) & (past > 0)
     bars = np.isfinite(adj[max(0, i - SCREEN_WINDOW + 1):i + 1]).sum(axis=0)
-    addv = np.nanmedian(dv[max(0, i - ADDV_WINDOW + 1):i + 1], axis=0)
+    addv = median_addv(dv, i)
     with np.errstate(invalid="ignore"):
         ok = (live & (bars >= SCREEN_MIN_BARS) & (raw[i] >= SCREEN_MIN_PRICE)
               & (addv >= SCREEN_MIN_ADDV))
     idx = np.where(ok)[0]
-    if len(idx) > POOL:
+    if pool is not None and len(idx) > pool:
         # Stable, because this sort decides WHO IS IN THE POOL — a tie at the 500th place silently
         # swaps one company for another and the whole book differs downstream.
-        idx = idx[np.argsort(-addv[idx], kind="stable")[:POOL]]
+        idx = idx[np.argsort(-addv[idx], kind="stable")[:pool]]
     return idx
 
 
