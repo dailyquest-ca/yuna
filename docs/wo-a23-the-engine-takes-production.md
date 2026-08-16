@@ -254,6 +254,16 @@ Both are delisted, so neither reaches today's ranking. This binds on the histori
 where §3.2's one-company-one-line rule is enforced and where `verify_run.py` B7 found one company
 held in two of five slots.
 
+**One consequence of the release worth stating before it is discovered.** 041 was applied when run
+589 was scored, so **the cell of record's numbers were measured on a universe that wrongly excluded
+`APPS.US` and `BDN.US`.** Both are ordinary US common stocks — Digital Turbine and Brandywine Realty
+Trust — and neither is any of §3.2's four permitted exclusion categories. Putting them back makes
+the universe *more* correct, not less, so this is a correction rather than a drift; but it does mean
+a fresh run of `b5_12_2_L1_3` would no longer reproduce stamp `235bef5fd174dcab` exactly. Two names
+in ~3,200 that must also clear the top-500 ADDV pool before they can reach §3.5's band, so the
+expected effect is small — and "expected" is not "measured". **Re-stamping the cell of record on the
+corrected universe is one dispatch. Say the word and I will run it and report all three windows.**
+
 The third one caught a mistake of mine worth recording. My first version of that check said *"the
 later last-print decides"* and then printed a confident keep/exclude — off a tie that Postgres broke
 by row order. That is exactly the invention 050 held these rows back to avoid. The report now states
