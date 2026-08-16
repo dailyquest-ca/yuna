@@ -18,6 +18,9 @@ does not.
 **Nothing here places an order.** §0.2 — Yuna rules names inside the plan's gates, Zak executes.
 These functions return proposals.
 """
+import hashlib
+import json
+
 import numpy as np
 
 # ---- §3.6, the constants of record ------------------------------------------------------------
@@ -42,6 +45,35 @@ VOL_WINDOW = 252             # §3.3 "stdev(daily returns, 252)"
 MAX_PARTICIPATION = 0.98     # §3.6 "Participation: <=0.98 ADDV"
 PARK = "SPY.US"              # §3.6
 REGIME_SOURCE = "SPY.US"     # §3.6
+
+
+def constants():
+    """§3.6 as a dict — every number this file decides under, and nothing else.
+
+    Built by NAME rather than by scanning the module, so a constant added here without being added
+    to this list is invisible to the digest. That is the safe direction: a stamp that silently
+    grows is a stamp that cannot be compared across two builds.
+    """
+    return {"SLOTS": SLOTS, "EXIT_RANK": EXIT_RANK, "FILL_BAND": FILL_BAND,
+            "DISPLACE_BAND": DISPLACE_BAND, "GATE_SMA": GATE_SMA, "LATCH_OUT": LATCH_OUT,
+            "LATCH_IN": LATCH_IN, "SCREEN_MIN_BARS": SCREEN_MIN_BARS,
+            "SCREEN_WINDOW": SCREEN_WINDOW, "SCREEN_MIN_PRICE": SCREEN_MIN_PRICE,
+            "SCREEN_MIN_ADDV": SCREEN_MIN_ADDV, "ADDV_WINDOW": ADDV_WINDOW, "POOL": POOL,
+            "FORMATION": FORMATION, "SKIP": SKIP, "VOL_WINDOW": VOL_WINDOW,
+            "MAX_PARTICIPATION": MAX_PARTICIPATION, "PARK": PARK,
+            "REGIME_SOURCE": REGIME_SOURCE}
+
+
+def digest():
+    """A short stable hash of §3.6, stamped on every decision the engine records.
+
+    §0.3 makes a constant change a plan amendment, and this is what makes the amendment visible
+    after the fact: two sessions that disagree while carrying the same digest disagree about the
+    DATA, and two that carry different digests disagree about the LAW. Without the stamp those two
+    failures look identical in the record, and they need opposite responses.
+    """
+    payload = json.dumps(constants(), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def screen(i, adj, raw, dv):

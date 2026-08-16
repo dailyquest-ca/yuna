@@ -82,13 +82,36 @@ def held_book(cur):
 
 
 def sheet(cur, as_of, nav):
-    """Tonight's decision. Returns a dict; prints nothing, writes nothing."""
+    """Tonight's decision. Returns a dict; prints nothing, writes nothing.
+
+    `nav` may be None. §3.5 sizes buys at NAV/5 and there is no defensible default, so an unknown
+    NAV leaves every buy quantity None — but it does NOT suppress the sells. §5.4: "Gate-off exits
+    and rank-exit sells are protective-direction and are never blocked." A sell's quantity comes
+    from the book, not from NAV, so the protective half of the sheet is always complete.
+    """
     sessions, tickers, adj, raw, dv, index_px = load(cur, as_of)
     i = len(sessions) - 1
 
     gate_on = bool(engine.gate_history(index_px)[i])
+    green = engine.gate_green(i, index_px)
+    window = index_px[max(0, i - engine.GATE_SMA + 1):i + 1]
+    sma = float(window.mean()) if len(window) == engine.GATE_SMA and np.isfinite(window).all() else None
+
     ranked = engine.rank(i, adj, raw, dv)
     rank_of = {tickers[j]: r for r, j in enumerate(ranked, start=1)}
+    addv_row = np.nanmedian(dv[max(0, i - engine.ADDV_WINDOW + 1):i + 1], axis=0)
+
+    # §3.3's score, recomputed for the record. `engine.rank` returns the ORDER and deliberately
+    # keeps the arithmetic private; the store wants the number too, so §4.4 can re-derive a rank
+    # from stored scores and §6.4 can say how far apart two rankings were, not merely that they
+    # differed. Same expression, same window, same clause.
+    scores = {}
+    for j in [tickers.index(t) for t in rank_of]:
+        w = adj[max(0, i - engine.VOL_WINDOW):i + 1, j]
+        rets = np.diff(w) / w[:-1]
+        vol = float(np.nanstd(rets))
+        base = float(adj[i - engine.SKIP, j] / adj[i - engine.FORMATION, j] - 1.0)
+        scores[tickers[j]] = base / vol if vol > 0 else None
 
     held = held_book(cur)
     # A holding that has left the universe entirely — delisted, or newly excluded — has no column
@@ -102,24 +125,33 @@ def sheet(cur, as_of, nav):
 
     orders = []
     for tk in sell_tk:
-        orders.append(dict(action="sell", ticker=tk, qty=held.get(tk),
-                           rank=rank_of.get(tk), why="gate off" if not gate_on else "rank"))
+        j = tickers.index(tk) if tk in rank_of else None
+        orders.append(dict(action="sell", ticker=tk, qty=held.get(tk), rank=rank_of.get(tk),
+                           mark=float(raw[i, j]) if j is not None and np.isfinite(raw[i, j]) else None,
+                           clause="gate_off" if not gate_on else "rank_exit",
+                           why="gate off" if not gate_on else "rank"))
     for tk in buy_tk:
         j = tickers.index(tk)
         px = float(raw[i, j])
-        qty = engine.position_size(nav, px)
-        addv = float(np.nanmedian(dv[max(0, i - engine.ADDV_WINDOW + 1):i + 1, j]))
+        qty = engine.position_size(nav, px) if nav else None
+        addv = float(addv_row[j])
         orders.append(dict(action="buy", ticker=tk, qty=qty, rank=rank_of.get(tk),
-                           mark=px, participation_ok=engine.participation_ok(qty, px, addv),
-                           why="fill"))
-    return dict(session=sessions[i], gate="ON" if gate_on else "OFF", nav=nav,
-                universe=len(tickers), ranked=len(ranked), held=sorted(held),
-                top=[tickers[j] for j in ranked[:engine.FILL_BAND]], orders=orders)
+                           mark=px, addv=addv, clause="fill", why="fill",
+                           participation_ok=engine.participation_ok(qty, px, addv) if qty else None))
+    return dict(session=sessions[i], gate="ON" if gate_on else "OFF", gate_on=gate_on,
+                gate_green=bool(green), index_close=float(index_px[i]), index_sma=sma, nav=nav,
+                universe=len(tickers), ranked=len(ranked), held=sorted(held), unranked=unranked,
+                top=[tickers[j] for j in ranked[:engine.FILL_BAND]], orders=orders,
+                ranks=[dict(ticker=tickers[j], rank=r, score=scores.get(tickers[j]),
+                            mark=float(raw[i, j]) if np.isfinite(raw[i, j]) else None,
+                            addv=float(addv_row[j]) if np.isfinite(addv_row[j]) else None)
+                       for r, j in enumerate(ranked, start=1)])
 
 
 def render(s):
+    nav = f"NAV {s['nav']:,.2f}" if s["nav"] else "NAV **unknown — buys unsized**"
     out = [f"### engine · session {s['session']} · gate {s['gate']}", "",
-           f"universe {s['universe']} · ranked {s['ranked']} · NAV {s['nav']:,.2f}", ""]
+           f"universe {s['universe']} · ranked {s['ranked']} · {nav}", ""]
     out.append("top 12: " + ", ".join(f"{t}" for t in s["top"]))
     out.append("held:   " + (", ".join(s["held"]) if s["held"] else "(nothing)"))
     out.append("")
@@ -130,8 +162,9 @@ def render(s):
             out.append(f"  SELL {o['ticker']:<10} qty {o['qty'] or 0:>10,.0f}   "
                        f"rank {o['rank'] or '—'}   ({o['why']})")
         else:
-            warn = "" if o["participation_ok"] else "   ** EXCEEDS 0.98 ADDV **"
-            out.append(f"  BUY  {o['ticker']:<10} qty {o['qty']:>10,.0f}   "
+            qty = f"{o['qty']:>10,.0f}" if o["qty"] else "         —"
+            warn = "" if o["participation_ok"] is not False else "   ** EXCEEDS 0.98 ADDV **"
+            out.append(f"  BUY  {o['ticker']:<10} qty {qty}   "
                        f"rank {o['rank']}   mark {o['mark']:,.2f}{warn}")
     out += ["", "Zak executes at the open: sells first, then buys (§3.5). "
                 "Nothing here has been ordered."]
