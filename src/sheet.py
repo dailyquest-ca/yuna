@@ -104,7 +104,7 @@ def write_ranks(cur, s, mode):
     return len(rows)
 
 
-def write_tickets(cur, s):
+def write_tickets(cur, s, mode="live"):
     """§4.3's proposals. One row per order, state `proposed`, idempotent on (close, ticker, action).
 
     A ticket is only ever written in `proposed`. Nothing in this job may advance a ticket to
@@ -114,7 +114,17 @@ def write_tickets(cur, s):
     Withdrawal is by state, never by delete: a re-run whose decision changed cancels the tickets
     the previous pass proposed and no longer stands behind. The row stays, because "the engine
     proposed this and then withdrew it" is a fact §6.4's shadow has to be able to read.
+
+    **Shadow mode writes no tickets at all**, and that is a correctness fix rather than a policy.
+    `engine_sessions` and `engine_ranks` are keyed by (session, mode); tickets are keyed by
+    (session, ticker, action) because §4.3 makes the sheet "the only source of engine orders" and a
+    ticket carries no mode — Zak either executes it or he does not. A shadow pass over the same
+    close would therefore overwrite the live sheet's rows and, worse, WITHDRAW every live ticket
+    its own decision did not reproduce. §6.4's shadow is meant to produce "order sheets nobody
+    trades"; a proposal sitting in the same queue as ones that should be traded is the opposite.
     """
+    if mode != "live":
+        return 0, 0
     written = []
     for o in s["orders"]:
         cur.execute("""
@@ -168,7 +178,7 @@ def main():
             else:
                 write_session(cur, s, mode, digest)
                 ranks = write_ranks(cur, s, mode)
-                proposed, withdrawn = write_tickets(cur, s)
+                proposed, withdrawn = write_tickets(cur, s, mode)
                 conn.commit()
                 hb.rows = ranks + proposed
                 hb.detail.update(ranks=ranks, proposed=proposed, withdrawn=withdrawn)

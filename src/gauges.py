@@ -241,6 +241,24 @@ def reconciliation_age(cur):
     detail = dict(last_receipt=str(receipt) if receipt else None,
                   last_attested=str(attested) if attested else None,
                   awaiting_receipt=awaiting, oldest_awaiting=str(oldest) if oldest else None)
+
+    # The NEWEST reconcile run, whatever it concluded. `last_attested` deliberately counts only
+    # green and amber runs — it answers "when did the comparison last succeed" — so on its own it
+    # would read yesterday's success right through today's position break, and §4.4's "any red
+    # holds buys" would never fire on the one finding that most obviously should hold them. §3.5
+    # sizes and queues against `book`, so a book the broker contradicts makes every decision
+    # tonight a decision about a position that may not exist.
+    cur.execute("""select status, detail from runs where job = 'reconcile'
+                    order by id desc limit 1""")
+    newest = cur.fetchone()
+    if newest and newest[0] == "red":
+        breaks = (newest[1] or {}).get("breaks") or []
+        return _gauge("reconciliation", "red",
+                      f"the last reconcile went red on {len(breaks)} position break(s): "
+                      + "; ".join(f"{b['ticker']} broker={b['broker']} book={b['book']}"
+                                  for b in breaks[:8]),
+                      breaks=breaks[:8], **detail)
+
     if attested is None:
         return _gauge("reconciliation", "amber",
                       "the book has never been checked against the broker", **detail)

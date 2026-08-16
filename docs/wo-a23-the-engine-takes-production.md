@@ -184,7 +184,7 @@ seed on this record.
 |---|---|
 | `test_sheet.py` (14) | idempotence, withdrawal-not-deletion, the approved ticket that survives a re-score, the unsized-but-protective sheet |
 | `test_reconcile.py` (13) | both break directions, the doubled fold, the negative-position refusal, the dry run that still compares |
-| `test_gauges.py` (16) | every gauge, each with one thing broken |
+| `test_gauges.py` (18) | every gauge, each with one thing broken |
 | `test_brief.py` (13) | §4.2's nine payload items, §5.1's six sections, §2.3's ramp, headroom-to-cap |
 | `test_shadow.py` (7) | live/sim agreement on real arrays, and a divergence that blocks the pass until ruled |
 | `test_closeout.py` (10) | §6.2's five clauses, and the one thing it must not do |

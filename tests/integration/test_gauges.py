@@ -297,3 +297,38 @@ def test_the_suite_survives_a_database_with_no_engine_session(db, migrated):
     assert st["session"] == "amber"
     assert "no engine session has been scored" in got[0]["why"]
     assert verdict in ("amber", "red")
+
+
+def test_a_red_reconcile_today_holds_the_buys_even_after_a_green_yesterday(db, migrated):
+    """The hole `last_attested` leaves on its own. It counts only green and amber runs, because it
+    answers "when did the comparison last succeed" — so yesterday's success would read right
+    through today's position break, and §4.4's "any red holds buys" would never fire on the finding
+    that most obviously should hold them. §3.5 sizes and queues against `book`."""
+    import json
+    with db.cursor() as cur:
+        cur.execute("""insert into runs (job, status, finished_at)
+                       values ('reconcile','green', now() - interval '1 day')""")
+        cur.execute("""insert into runs (job, status, finished_at, detail)
+                       values ('reconcile','red', now(), %s)""",
+                    (json.dumps({"breaks": [{"ticker": "MU.US", "broker": 82.0, "book": 41.0}]}),))
+        db.commit()
+        g = gauges.reconciliation_age(cur)
+
+    assert g["status"] == "red"
+    assert "MU.US broker=82.0 book=41.0" in g["why"]
+    assert g["last_attested"] is not None, "yesterday's success is still reported, just not trusted"
+
+
+def test_a_green_reconcile_after_a_red_one_clears_the_gauge(db, migrated):
+    """The newest run is what governs, in both directions — a gauge that latched red would need a
+    hand to clear it, and §4.4's suite has no such state."""
+    import json
+    with db.cursor() as cur:
+        cur.execute("""insert into runs (job, status, finished_at, detail)
+                       values ('reconcile','red', now() - interval '1 hour', %s)""",
+                    (json.dumps({"breaks": [{"ticker": "MU.US", "broker": 82.0, "book": 41.0}]}),))
+        cur.execute("""insert into runs (job, status, finished_at)
+                       values ('reconcile','green', now())""")
+        db.commit()
+        g = gauges.reconciliation_age(cur)
+    assert g["status"] == "green"

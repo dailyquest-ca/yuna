@@ -26,7 +26,7 @@ def _run(cur, days, nav=200_000.0, mode="live", as_of=None):
     s = desk.sheet(cur, as_of or days[-1], nav)
     sheet.write_session(cur, s, mode, engine.digest())
     ranks = sheet.write_ranks(cur, s, mode)
-    proposed, withdrawn = sheet.write_tickets(cur, s)
+    proposed, withdrawn = sheet.write_tickets(cur, s, mode)
     return s, ranks, proposed, withdrawn
 
 
@@ -265,3 +265,37 @@ def test_the_job_writes_a_green_run_when_it_is_sized(db, migrated):
         status, rows = cur.fetchone()
         assert status == "green"
         assert rows == 25, "20 ranks + 5 proposals"
+
+
+def test_a_shadow_pass_writes_no_tickets_at_all(db, migrated):
+    """`engine_sessions` and `engine_ranks` are keyed by (session, mode); tickets are not, because
+    §4.3 makes the sheet "the only source of engine orders" and a ticket carries no mode — Zak
+    either executes it or he does not.
+
+    So a shadow pass over the same close would overwrite the live sheet's rows and, worse, WITHDRAW
+    every live ticket its own decision did not reproduce. §6.4's shadow produces "order sheets
+    nobody trades"; a proposal sitting in the same queue as ones that should be traded is the
+    opposite of that.
+    """
+    with db.cursor() as cur:
+        days = _world(cur)
+        _run(cur, days, mode="live")
+        db.commit()
+        cur.execute("""select id, state from tickets where session_date = %s order by id""",
+                    (days[-1],))
+        before = cur.fetchall()
+        assert before and all(st == "proposed" for _, st in before)
+
+        # A shadow pass whose decision differs — four of the five slots are now held, so the live
+        # sheet's buys are not on the shadow's sheet at all.
+        for t in ("N00.US", "N01.US", "N02.US", "N03.US"):
+            cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                           values (%s,'TFSA','momentum',100,40.0,'open')""", (t,))
+        _, ranks, proposed, withdrawn = _run(cur, days, mode="shadow")
+        db.commit()
+
+        assert (proposed, withdrawn) == (0, 0)
+        assert ranks > 0, "the shadow still records what it ranked"
+        cur.execute("""select id, state from tickets where session_date = %s order by id""",
+                    (days[-1],))
+        assert cur.fetchall() == before, "the live sheet is untouched, in both directions"
