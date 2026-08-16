@@ -166,3 +166,42 @@ def test_an_entry_priced_at_the_deciding_close_is_reported_as_such(db, migrated)
     assert code != 0
     assert _verdict(text, "C2 execution convention") == "FAIL", text
     assert "CLOSE" in text, "the failure must name the defect, not merely count it"
+
+
+def test_a_breach_shorter_than_the_old_sampling_stride_is_still_caught(db, migrated):
+    """D1 sampled `dates[::5]` and called it "enough to catch a breach". It was not.
+
+    The book re-decides every session and displacement is capped at one per session, so a breach
+    can open and close inside five sessions and never be looked at. This plants exactly that: three
+    extra names held for two sessions, in a world whose equity rows report three slots. Under the
+    old stride, whether it was seen at all depended on where the breach happened to fall.
+
+    The report must also say what the breach COST. A breach in names is not yet a breach in
+    capital: §3.5 sizes at NAV / slots, so the question a reader actually has is whether the extra
+    names carried their own money or are duplicate listings wearing a second symbol.
+    """
+    with db.cursor() as cur:
+        rid = _world(cur, lie_about_dd=False, foreign=False, overstuff=False)
+        cur.execute("select d from backtest_equity where run_id=%s order by d", (rid,))
+        days = [r[0] for r in cur.fetchall()]
+        brief, back = days[120], days[121]
+        for n in range(3):
+            tk = f"BRF{n}.US"
+            cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                           values (%s,'brief','stock','USD','active')""", (tk,))
+            for i, d in enumerate(days):
+                cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                               values (%s,%s,%s,%s,%s,%s,%s,1000000)""",
+                            (tk, d, 10 + i, 13 + i, 9 + i, 12 + i, 12 + i))
+            cur.execute("""insert into backtest_trades (run_id,ticker,entry_date,entry_price,qty,
+                             exit_date,exit_price,exit_reason)
+                           values (%s,%s,%s,130.0,50,%s,131.0,'rank_band')""",
+                        (rid, tk, brief, back))
+    db.commit()
+    text, _ = _audit(migrated, rid)
+
+    assert _verdict(text, "D1 slot discipline") == "FAIL", (
+        f"a two-session breach must be caught, not sampled past:\n{text}")
+    assert str(brief) in text, f"the report must name the session it broke on:\n{text}"
+    assert "of NAV at cost" in text, (
+        f"a slot breach must report what it cost, not only that it happened:\n{text}")
