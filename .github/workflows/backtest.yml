@@ -43,7 +43,7 @@ on:
         description: 'drawdown kill bar for the §2.5 verdict (E3 cells declare -0.34; blank = the arm declares none)'
         default: ''
       research:
-        description: 'run a research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger, `concentrated` = WO-A4 the winner-catcher, `dedupe` = the duplicate-listing scan, `verify` = audit stored runs and compute NOTHING, `census` = the exchange census'
+        description: 'run a research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger, `concentrated` = WO-A4 the winner-catcher, `dedupe` = the duplicate-listing scan, `verify` = audit stored runs and compute NOTHING, `census` = the exchange census, `desk` = tonight\'s engine sheet (read-only)'
         default: ''
       run_ids:
         description: 'verify only: comma-separated run ids to audit (e.g. 589,607). READ-ONLY — verify_run.py issues no INSERT, UPDATE, DELETE or COMMIT, so this cannot alter a stored run or the tape.'
@@ -214,6 +214,28 @@ jobs:
       - run: python src/exchange_census.py
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  desk:
+    # §6.3's score job and §6.4's shadow, run against the live tape. READ-ONLY: `desk.py` issues no
+    # INSERT, UPDATE, DELETE or COMMIT, and turning a sheet into tickets is a separate step that
+    # does not exist yet — which is exactly what makes a shadow record trustworthy.
+    #
+    # `start_nav` sizes the orders. The NAMES, the ranks and the gate do not depend on it at all,
+    # so a nominal NAV produces a real sheet with illustrative quantities.
+    if: github.event_name == 'workflow_dispatch' && inputs.research == 'desk'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python src/desk.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ENGINE_NAV: ${{ inputs.start_nav || '200000' }}
+          AS_OF: ${{ inputs.end_date }}
 
   push_study:
     if: github.event_name == 'workflow_dispatch' && inputs.research == 'push_study'
