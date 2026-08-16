@@ -290,3 +290,45 @@ foreign-listing population is four, not seven**, and the rest is a defect in the
 **Nothing here was ruled on a guess, which is the point of having run the census first.** The
 proposal in §7.1 — "filter on the column, it needs no threshold" — was wrong about what the column
 contains, and one query cost less than shipping it would have.
+
+---
+
+## 9. The reused-ticker sweep is clean — and my RXDX claim was not supported by the tape
+
+Run [31956013997](https://github.com/dailyquest-ca/yuna/actions/runs/31956013997).
+
+> `=== one ticker, two companies: dead runs longer than a quarter ===`
+> `none — no stock ticker goes dark for a quarter inside its own span`
+
+**Not one of 6,333 tickers.** The class I raised as "the worst tape defect available" is absent.
+
+### 9.1 Withdrawing the claim
+
+I wrote, in a commit message and to Zak, that `RXDX` was Ignyta until Roche bought it in 2018 and
+was then reissued to Prometheus Biosciences in 2021. **That came from outside knowledge, not from
+this tape, and the tape does not corroborate it.** If the symbol carried two companies with a
+multi-year dead period between, the sweep would have found the largest contiguous gap in the
+universe sitting on `RXDX`. It found nothing at all above a quarter.
+
+So `RXDX`'s 777 missing sessions are **scattered in runs shorter than 63 sessions**, which is the
+patchy-history shape, not a reissue. Whatever the symbol's real corporate history, our copy of it
+does not contain the gap that would make a formation window dangerous.
+
+**The lesson is the one this programme keeps paying for from the other direction.** Every previous
+correction here was a number that looked right and was wrong. This is the reverse: a defect that
+sounded right, was reasoned from recall rather than measured, and does not exist. It cost a commit
+message and one dispatch, because the sweep was written before the claim was acted on — but had it
+gone the other way it would have justified re-deriving §3.1 for nothing.
+
+### 9.2 What this leaves
+
+The tape has **three** defect shapes reaching the book, not four:
+
+| | status |
+| --- | --- |
+| duplicate listings, one company two symbols | **fixed at the engine** (§6), six pairs for the exclusion table |
+| genuinely foreign listings — `PLZL`, `NVTK`, `MGROS`, `IVL` | excluded by name, no threshold needed |
+| patchy history — `LDG` −252, `SGT` −251, `RXDX` −777 | re-fetch; these are holes in our copy, not defects in the securities |
+
+No reused tickers. **The sub-windows can run without fear of re-deriving them afterwards**, which
+was the only reason this sweep came first.
