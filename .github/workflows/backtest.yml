@@ -43,7 +43,7 @@ on:
         description: 'drawdown kill bar for the §2.5 verdict (E3 cells declare -0.34; blank = the arm declares none)'
         default: ''
       research:
-        description: 'run a research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger, `concentrated` = WO-A4 the winner-catcher, `dedupe` = the duplicate-listing scan, `verify` = audit stored runs and compute NOTHING, `census` = the exchange census, `desk` = tonight\'s engine sheet (read-only)'
+        description: 'run a research job INSTEAD of the engine: blank = the backtest, `blend` = E4 arms, `push_study` = the episode ledger, `concentrated` = WO-A4 the winner-catcher, `dedupe` = the duplicate-listing scan, `verify` = audit stored runs and compute NOTHING, `census` = the exchange census, `desk` = the engine sheet for a session, read-only'
         default: ''
       run_ids:
         description: 'verify only: comma-separated run ids to audit (e.g. 589,607). READ-ONLY — verify_run.py issues no INSERT, UPDATE, DELETE or COMMIT, so this cannot alter a stored run or the tape.'
