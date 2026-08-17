@@ -318,23 +318,33 @@ def main():
                      "because a brief needs the session date it describes")
         elif not dry():
             with conn.cursor() as cur:
-                # §4.2: `compose` refuses to publish a kind twice for one session date, so the
-                # retry chain costs a few minutes and buys a second chance rather than a duplicate.
+                # One brief per (kind, session), REFRESHED rather than refused.
+                #
+                # The first version of this skipped the write when a brief already existed for the
+                # session, which is wrong in the ordinary case and silently so: `check` runs before
+                # `compose`, so a re-scored night legitimately produces a different verdict, a
+                # different sheet and a different banner — and the desk would have kept serving the
+                # first render of the night for ever. Worse, the retry ingest fires the whole chain
+                # a second time by design, so the stale render was the NORMAL outcome, not the edge
+                # case.
+                #
+                # Upsert on (kind, session_date): the session is the identity, the newest render
+                # wins, and `at` moves with it so the ledger says when the desk last spoke.
                 cur.execute("""insert into briefs (kind, session_date, freshness, summary, body,
                                                    detail)
-                               select %s, %s, %s, %s, %s, %s
-                                where not exists (select 1 from briefs
-                                                   where kind = %s and session_date = %s)
+                               values (%s, %s, %s, %s, %s, %s)
+                               on conflict (kind, session_date)
+                                   where (detail->>'engine') = 'v1' do update set
+                                   freshness = excluded.freshness, summary = excluded.summary,
+                                   body = excluded.body, detail = excluded.detail, at = now()
                                returning id""",
                             (slot, session, freshness_line(p).splitlines()[0],
                              f"gate {'ON' if g.get('gate_on') else 'OFF'} · "
                              f"{len(p['order_sheet'] or [])} order(s)",
-                             report, json.dumps({"composed": True}), slot, session))
+                             report, json.dumps({"composed": True, "engine": "v1"})))
                 wrote = cur.fetchone()
             conn.commit()
             hb.rows = 1 if wrote else 0
-            if not wrote:
-                hb.detail["skipped"] = f"a nightly brief for {session} already exists"
 
         if not p["check_report"]:
             hb.amber("no check has run — the brief carries no proof that tonight's numbers hold")
