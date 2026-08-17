@@ -42,6 +42,38 @@ def config(cur, key, default=None):
     return row[0] if row else default
 
 
+# §5.5, the whole clause: "Zak may halt buying at any time, in any words; that state is a freeze. A
+# freeze halts all buys (entries, refills, displacement buys, levered tranches). Exits fire
+# normally; proceeds park. Lifted only by Zak's word."
+FREEZE_KEY = "freeze"
+
+
+def freeze_state(cur):
+    """Is buying halted? Returns (frozen, words, set_at, set_by). Reads `config`, latest-wins.
+
+    `config` rather than a table of its own, because §5.5 turns on WORDS and `config` is already
+    the append-only ledger this system logs a decision into: the freeze is a row carrying what Zak
+    said, and the lift is another row beside it. Neither overwrites the other, so "when was buying
+    halted, in what words, and when was it lifted" is answerable from the ledger rather than from
+    an absence.
+
+    **Unknown is not frozen.** No row means Zak has never said the word, which is a different state
+    from having said it — and unlike the gate (§3.4, where unevaluable reads OFF and OFF *sells*),
+    reading a missing freeze as frozen would halt buying on nothing at all. The safe default of a
+    control that stops action is off; the safe default of a control that takes action is on. §3.4
+    and §5.5 point opposite ways for that reason.
+    """
+    cur.execute("""select value, set_at, set_by from config where key = %s
+                    order by set_at desc, id desc limit 1""", (FREEZE_KEY,))
+    row = cur.fetchone()
+    if not row:
+        return False, None, None, None
+    value, at, by = row
+    if isinstance(value, dict):
+        return bool(value.get("on")), value.get("words"), at, by
+    return bool(value), None, at, by
+
+
 # The config rows that decide what the machine *does*, as opposed to how it talks or how often it
 # fetches. A backtest is only evidence about the machine these describe.
 DECISION_KEYS = ("score_thresholds", "sleeve_ceiling", "momentum_max_names",

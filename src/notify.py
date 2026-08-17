@@ -29,11 +29,32 @@ from db import connect, config, Heartbeat
 EXPECTED = {"nightly": ["nightly"], "saturday": ["saturday"]}
 
 
-def fresh_composed(cur, kinds, *, hours=3):
+def fresh_composed(cur, kinds):
+    """The composed brief for the CURRENT session, whatever hour it was written.
+
+    Anchored on `session_date`, not on wall clock, and the change is a bug fix rather than a
+    preference. The old window was "written in the last 3 hours", which conflicts with `compose`
+    refusing to write a second brief for one session: the first chain run of a session writes the
+    brief, and every run after the third hour finds it too old and reports the desk silent. On a
+    weekend that is permanent — the newest bar is Friday's and no ingest lands a new session until
+    Tuesday, so Saturday, Sunday and Monday all report a missing brief that was composed correctly
+    and is sitting right there.
+
+    `briefs.session_date` is already this repo's stated freshness anchor: "the market session an
+    output serves, derived from the newest bar, not from `now()::date` in UTC". Delivery uses the
+    same anchor as everything else, and a brief goes stale when a NEW SESSION appears — which is
+    exactly when it should.
+    """
+    cur.execute("select max(session_date) from engine_sessions where mode = 'live'")
+    row = cur.fetchone()
+    session = row[0] if row else None
+    if session is None:
+        return {}
     cur.execute("""select kind, session_date, at, summary, body from briefs
                    where kind = any(%s) and detail->>'composed' = 'true'
-                     and at > now() - make_interval(hours => %s)
-                   order by at desc""", (kinds, hours))
+                     and (detail->>'engine') = 'v1'
+                     and session_date = %s
+                   order by at desc""", (kinds, session))
     rows = {}
     for kind, session_date, at, summary, body in cur.fetchall():
         rows.setdefault(kind, dict(kind=kind, session_date=str(session_date),

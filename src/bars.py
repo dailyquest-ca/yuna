@@ -264,6 +264,14 @@ def verdict(*, ex_top_3_beats_benchmark, bootstrap_median_cagr, benchmark_cagr, 
 TWIN_TOL = 1e-4          # a daily return, in cents-quoted vendor copies, differs in the 5th decimal
 TWIN_MIN_OVERLAP = 30    # fewer shared sessions than this and agreement is not evidence
 TWIN_AGREE = 0.85
+# §3.7(3)'s pair test looks at a trailing year rather than all history: sameness is a property of
+# the present, and two lines that diverged a decade ago are not one security today. 252 is the
+# formation window §3.3 already uses everywhere else, so it introduces no new number.
+#
+# It lives HERE beside the other three rather than in the backtest, because the live engine and the
+# sim both need it and two copies of a constant become two constants the moment one is edited —
+# which is the argument `engine.py` was written to settle.
+TWIN_WINDOW = 252
 
 
 def same_security(ret_a, ret_b, *, tol=TWIN_TOL, min_overlap=TWIN_MIN_OVERLAP, agree=TWIN_AGREE):

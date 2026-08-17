@@ -155,10 +155,10 @@ TRAIL_ATR = dict(mode="atr", atr_init_mult=3.0, atr_init_window=20,
                  atr_arm_r=1.0, atr_chand_mult=8.0, atr_chand_window=22)
 
 # The announced grid (WO-A4). One axis moves per cell against the centre `n12_semi`.
-# §3.7(3)'s pair test looks at a trailing year rather than all history: sameness is a property of
-# the present, and two lines that diverged a decade ago are not one security today. 252 is the
-# formation window this engine already uses everywhere else, so it introduces no new number.
-TWIN_WINDOW = 252
+# §3.7(3)'s pair window now lives in `bars.py` beside the other three twin constants, so the live
+# engine and this sim read one definition. Re-exported under the old name because the cells and the
+# tests below refer to it.
+TWIN_WINDOW = bars_mod.TWIN_WINDOW
 
 CELLS = {
     # centre: twelve names, changed twice a year, risk-adjusted rank, whole account in the sleeve

@@ -87,6 +87,14 @@ def db(migrated):
             # the database outlives pytest. Found exactly that way: a 5% single-name cap from one
             # test blocked six compounder entries in another.
             cur.execute("delete from config where set_by='test'")
+            # `freeze` is deleted regardless of who set it, and it is the sharpest case on this
+            # list. §5.5's freeze is a machine STATE rather than a threshold, a test that simulates
+            # Zak must write it as `set_by='zak'` for the ledger to be realistic, and the filter
+            # above therefore cannot reach it. A leaked freeze row halts buying in every later test
+            # — which does not fail anything, it just quietly stops those tests from exercising a
+            # buy at all. Found the day the freeze was built, by a count assertion that read 5
+            # where it expected 2.
+            cur.execute("delete from config where key='freeze'")
             cur.execute("""insert into accounts (code,label,kind,currency) values
                              ('TFSA','test tfsa','registered','CAD'),
                              ('RRSP','test rrsp','registered','CAD'),

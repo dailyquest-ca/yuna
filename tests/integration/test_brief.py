@@ -256,3 +256,77 @@ def test_the_saturday_slot_writes_its_own_kind(db, migrated):
     with db.cursor() as cur:
         cur.execute("select kind from briefs order by kind")
         assert [r[0] for r in cur.fetchall()] == ["nightly", "saturday"]
+
+
+def test_a_rescored_night_refreshes_the_brief_rather_than_serving_the_first_render(db, migrated):
+    """`check` runs before `compose`, so a re-scored night legitimately produces a different
+    verdict, sheet and banner — and the retry ingest fires the whole chain a second time BY DESIGN,
+    which made the stale render the normal outcome rather than the edge case."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+    db.commit()
+    env = {"DATABASE_URL": migrated, "DB_SSLMODE": "disable", "PATH": "/usr/bin:/bin"}
+    subprocess.run([sys.executable, str(ROOT / "src" / "brief.py")], check=True,
+                   capture_output=True, text=True, env=env)
+    with db.cursor() as cur:
+        cur.execute("select id, body from briefs where kind='nightly'")
+        first_id, first_body = cur.fetchone()
+
+        # the night is re-scored and this time `check` is red
+        cur.execute("""insert into runs (job, status, finished_at, detail)
+                       values ('check','red', now(), %s)""",
+                    (json.dumps({"verdict": "red", "blocks_buys": True,
+                                 "red": ["sheet: qty does not follow from §3.5"]}),))
+    db.commit()
+    subprocess.run([sys.executable, str(ROOT / "src" / "brief.py")], check=True,
+                   capture_output=True, text=True, env=env)
+
+    with db.cursor() as cur:
+        cur.execute("select count(*) from briefs where kind='nightly'")
+        assert cur.fetchone()[0] == 1, "one brief per session, still"
+        cur.execute("select id, body from briefs where kind='nightly'")
+        second_id, second_body = cur.fetchone()
+    assert second_id == first_id, "the same row, refreshed"
+    assert "buys held; exits stand" in second_body, "and it carries the NEW verdict"
+    assert "buys held; exits stand" not in first_body
+
+
+def test_notify_finds_the_brief_however_long_ago_it_was_written(db, migrated):
+    """The weekend case, which was permanent: Friday's bar is the newest session until Tuesday's
+    ingest, so a wall-clock freshness window reports the desk silent for three days over a brief
+    that was composed correctly and is sitting right there."""
+    import notify
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+    db.commit()
+    subprocess.run([sys.executable, str(ROOT / "src" / "brief.py")], check=True,
+                   capture_output=True, text=True,
+                   env={"DATABASE_URL": migrated, "DB_SSLMODE": "disable", "PATH": "/usr/bin:/bin"})
+    with db.cursor() as cur:
+        cur.execute("update briefs set at = now() - interval '3 days' where kind = 'nightly'")
+        db.commit()
+        have = notify.fresh_composed(cur, ["nightly"])
+    assert "nightly" in have, "the session is the anchor, not the clock"
+
+
+def test_notify_reports_silence_when_a_new_session_has_no_brief(db, migrated):
+    """The check must still be able to FAIL — a guard that always passes is not a guard. A brief
+    for yesterday's session does not cover tonight's."""
+    import notify
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+    db.commit()
+    subprocess.run([sys.executable, str(ROOT / "src" / "brief.py")], check=True,
+                   capture_output=True, text=True,
+                   env={"DATABASE_URL": migrated, "DB_SSLMODE": "disable", "PATH": "/usr/bin:/bin"})
+    with db.cursor() as cur:
+        cur.execute("""insert into engine_sessions (session_date, gate_on, gate_green,
+                         universe_count, ranked_count, param_digest, mode)
+                       values (%s, true, true, 20, 20, 'x', 'live')""",
+                    (days[-1] + dt.timedelta(days=1),))
+        db.commit()
+        have = notify.fresh_composed(cur, ["nightly"])
+    assert have == {}, "a new session with no brief is silence, and must read as silence"

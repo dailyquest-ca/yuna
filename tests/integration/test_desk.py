@@ -46,7 +46,21 @@ def _world(cur, *, n_days=700, rising=True, held=(), excluded=()):
             # momentum / stdev, so names must differ in DRIFT and agree on VOLATILITY. The first
             # draft of this fixture used linear ramps, which give a steeper name a higher variance
             # in daily returns and inverted the ladder — the test caught its own fixture.
-            px = 50.0 * float(np.exp((0.0010 - 0.00004 * k) * i + wiggle[i]))
+            #
+            # The rung spacing is 3e-4 and that number is load-bearing. The shared `wiggle` cancels
+            # between any two names, so their daily returns differ by exactly the drift gap — and
+            # at the original 4e-5 that gap sat BELOW `bars.TWIN_TOL` (1e-4), which made every
+            # adjacent pair in this world a §3.7(3) twin. Nothing noticed until the live engine
+            # learned the pair rule and refused to buy any two neighbours. Distinct names in a
+            # fixture have to be distinct securities; 3e-4 is three times the tolerance and leaves
+            # the ladder's ORDER untouched, because vol is identical and drift stays monotone.
+            #
+            # 1.5e-4 rather than more, because the spacing is squeezed from both sides: too small
+            # and the neighbours are twins, too large and the bottom rungs fall through §3.2's $5
+            # floor and stop being ranked at all. Measured, not reasoned: at 1.5e-4 the cheapest
+            # last close is $18.32 and no adjacent pair reads as one security; at 3e-4 the cheapest
+            # is $2.50 and four names silently leave the universe.
+            px = 50.0 * float(np.exp((0.0010 - 0.00015 * k) * i + wiggle[i]))
             cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
                            values (%s,%s,%s,%s,%s,%s,%s,4000000)""",
                         (t, d, px, px * 1.01, px * 0.99, px, px))
@@ -137,3 +151,45 @@ def test_the_rendered_sheet_says_nothing_was_ordered(db, migrated):
         text = desk.render(desk.sheet(cur, days[-1], 200_000.0))
     assert "Nothing here has been ordered" in text
     assert "sells first, then buys" in text
+
+
+def test_the_fixtures_names_are_distinct_securities(db, migrated):
+    """The guard on the fixture itself, added after §3.7(3)'s pair rule caught it out.
+
+    Every name here shares one noise path so that §3.3's vol divisor is identical across the ladder
+    — which means two names differ ONLY by their drift gap, and if that gap sits under
+    `bars.TWIN_TOL` the whole world is one company under twenty symbols. It did, for as long as
+    nothing tested pairs. A fixture whose names are secretly twins does not fail loudly; it just
+    stops testing whatever the pair rule was supposed to govern.
+    """
+    import bars
+    with db.cursor() as cur:
+        days = _world(cur)
+        sessions, tickers, adj, raw, dv, _ = desk.load(cur, days[-1])
+    i = len(sessions) - 1
+    lo = max(1, i - bars.TWIN_WINDOW + 1)
+
+    def ret(j):
+        return adj[lo:i + 1, j] / adj[lo - 1:i, j] - 1.0
+
+    pairs = [(tickers[a], tickers[b])
+             for a in range(len(tickers)) for b in range(a + 1, len(tickers))
+             if bars.same_security(ret(a), ret(b))]
+    assert pairs == [], f"the fixture's names read as one security: {pairs[:5]}"
+
+
+def test_a_twin_pair_in_the_top_twelve_takes_only_one_slot(db, migrated):
+    """§3.7(3), end to end through the real tape loader: "hold at most one of a pair"."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        # N01 is re-priced as an exact copy of N00 — one company, two symbols, both near the top.
+        cur.execute("""update prices p set close = src.close, adj_close = src.adj_close
+                         from prices src
+                        where src.ticker = 'N00.US' and p.ticker = 'N01.US' and p.d = src.d""")
+        db.commit()
+        s = desk.sheet(cur, days[-1], 200_000.0)
+
+    bought = [o["ticker"] for o in s["orders"] if o["action"] == "buy"]
+    assert "N00.US" in bought, "the better-ranked line fills"
+    assert "N01.US" not in bought, "and its twin does not join it"
+    assert len(bought) == engine.SLOTS, "the skipped twin costs no slot — the band reaches deeper"

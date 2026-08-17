@@ -27,7 +27,7 @@ is the record of that changeover.
 | **Judge** | The morning brief and §4.1's Saturday letter, delivered by the Routines in the Yuna chat/cowork project. Judgment happens in chat; arithmetic happens in the pipeline (§5.1) |
 | **Execute** | Zak places every order — at the open, **sells first, then buys** (§3.5) |
 | **Protect** | §3.4's gate. **No stops and no GTC orders exist anywhere in this system** (§4.3) — a red session sells the whole book at the next executable open, and that is the entire defence |
-| **Health** | Heartbeat: every job logs a run · every output opens with freshness · a missing message is the alarm (§4.7) |
+| **Health** | Heartbeat: every job logs a run · every output opens with freshness · a missing message is the alarm (a standing design decision; v1.0 carries no clause for it) |
 
 ## Ground rules
 

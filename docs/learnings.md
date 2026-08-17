@@ -336,3 +336,46 @@ is `roadmap-2026-07-31.md`.
     "more than zero" would have passed for ever. **Add the table to the truncate list in the same
     commit that creates it**, and prefer assertions that pin an exact count over assertions that
     pin a direction.
+45. **Law with no code behind it is worse than a missing feature, because it reads as present.**
+    §5.5 has said since v1.0 that "Zak may halt buying at any time, in any words; that state is a
+    freeze" — and nothing in this repository implemented it. Every other clause of §5 had a job
+    behind it, the plan was the law and the law said freeze, so the natural reading of the system
+    was that a freeze worked. It would have been discovered the first time Zak said *stop buying*
+    and the next morning's sheet proposed five entries. **When a plan clause names a control, grep
+    for the control before assuming the clause is implemented** — an audit of §4 and §6 found the
+    engine gaps because those clauses name jobs, and §5.5 names no job, so nothing pointed at it.
+46. **A safety default depends on which direction the control acts.** §3.4's gate reads OFF when it
+    cannot be evaluated, and §5.5's freeze reads *not frozen* when there is no row — which look
+    contradictory until you notice that OFF **sells the whole book** and a freeze only ever *stops*
+    action. The safe default of a control that takes action is on; the safe default of a control
+    that halts action is off. Copying the gate's fail-closed instinct to the freeze would have
+    halted buying permanently on an empty table, and the reasoning that produced it would have
+    sounded exactly like caution.
+47. **A test-isolation filter that keys on WHO wrote a row misses rows a test writes as somebody
+    else.** The integration conftest deletes `config where set_by='test'` — and a test simulating
+    Zak's freeze has to write `set_by='zak'`, or the ledger it is testing is not the ledger that
+    runs. So the row leaked, and a leaked freeze does not fail a later test: it silently stops that
+    test from exercising a buy at all. Caught only because one assertion counted rows exactly
+    (`== 2`) instead of asserting a direction. **Isolate by WHAT the row is, not by who claims to
+    have written it** — the key is the identity, the author is a field.
+48. **A rule the sim enforces and the live engine does not is the most expensive kind of drift,
+    because the backtest keeps proving the wrong machine.** §3.7(3) — "dual-listed / share-class
+    twins inside the top 12: hold at most one of a pair" — was implemented in `concentrated.py` as
+    `twin_held` and nowhere in `engine.py`. Every number the cell of record was measured under
+    assumed the pair rule; the live book would have filled both lines, one company in two of five
+    slots at 1.25x weight with every cap counting it twice. `verify_run.py` B7 had already found
+    exactly that in run 589, seven times, which is what makes it a known defect rather than a
+    theory. `engine.py` exists to stop two copies of a rule becoming two rules — and it only stops
+    it for the clauses actually moved into it. **Enumerate the clauses, not the functions.**
+49. **A synthetic fixture can be secretly degenerate in exactly the dimension the new rule tests.**
+    The desk fixture gives every name one shared noise path so §3.3's vol divisor is identical
+    across the ladder — which means two names differ only by their drift gap, and that gap was
+    4e-5 against a twin tolerance of 1e-4. Every adjacent pair in that world was one company under
+    two symbols, and nothing noticed for as long as nothing tested pairs. The tell was nine
+    integration failures the moment the pair rule landed. Two lessons, and the second is the one
+    worth keeping: a fixture whose entities are secretly identical does not fail loudly, it just
+    stops testing whatever distinguishes them — so the fixture now carries its own assertion that
+    no two of its names read as one security. And the spacing that fixes it is squeezed from both
+    sides: too small and they are twins, too large and the low rungs fall through §3.2's $5 floor
+    and leave the universe. **It was chosen by measuring both bounds, not by picking a number that
+    made the failure go away.**

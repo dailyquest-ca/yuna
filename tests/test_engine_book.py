@@ -160,3 +160,61 @@ def test_the_latch_walked_forward_never_flips_on_a_single_green():
     for i in flips_off:
         assert not engine.gate_green(i, px), f"session {i} turned OFF on a green session"
     assert flips_on and flips_off, "the fixture must actually exercise both directions"
+
+
+# ---- §3.7(3): at most one of a twin pair ------------------------------------------------------
+#
+# "Dual-listed / share-class twins inside the top 12: hold at most one of a pair; prefer the
+# higher-ADDV line."
+#
+# This went unimplemented in the live engine until 2026-08-16 — `engine.orders` filled slots by
+# rank with no pair test at all, so one company could take two of five slots at 1.25x the intended
+# weight with every cap counting it twice. `verify_run.py` B7 found exactly that in run 589, seven
+# times, which is what makes this a defect the register already knows about rather than a theory.
+
+def test_a_twin_of_a_queued_buy_is_skipped():
+    """The case the register was written for: both lines arrive together in the top 12."""
+    ranked = [0, 1, 2, 3, 4, 5]
+    twins = {(0, 1), (1, 0)}                       # ranks 1 and 2 are one company
+    sells, buys = engine.orders(ranked, [], gate_on=True,
+                                twin_of=lambda a, b: (a, b) in twins)
+    assert buys == [0, 2, 3, 4, 5], "the better-ranked line fills; its twin is passed over"
+    assert 1 not in buys
+
+
+def test_a_twin_of_a_held_name_is_not_bought():
+    """A pair can also arrive one at a time, with the second showing up while the first is held."""
+    ranked = [0, 1, 2, 3, 4, 5]
+    twins = {(1, 0), (0, 1)}
+    sells, buys = engine.orders(ranked, [0], gate_on=True,
+                                twin_of=lambda a, b: (a, b) in twins)
+    assert 0 not in sells, "rank 1 is nowhere near §3.5's exit rank of 12"
+    assert 1 not in buys, "and its twin must not join it"
+    assert buys == [2, 3, 4, 5]
+
+
+def test_the_skipped_twin_does_not_cost_the_slot():
+    """§3.5 fills free slots "from the top 12 by rank" — skipping a twin means reaching further
+    down the band, not leaving a slot empty. A book of four when five were available is a real cost
+    and nothing in the plan asks for it."""
+    ranked = list(range(12))
+    twins = {(0, 1), (1, 0)}
+    _, buys = engine.orders(ranked, [], gate_on=True, twin_of=lambda a, b: (a, b) in twins)
+    assert len(buys) == engine.SLOTS == 5
+
+
+def test_the_pair_test_never_reaches_past_the_fill_band():
+    """A twin sitting at rank 40 is irrelevant: §3.5 only ever fills from the top 12, so the rule
+    must not be able to veto a candidate on the strength of something the book cannot buy."""
+    ranked = list(range(20))
+    # every candidate "twins" a name far outside the band — which must change nothing
+    _, buys = engine.orders(ranked, [], gate_on=True, twin_of=lambda a, b: {a, b} == {0, 19})
+    assert buys == [0, 1, 2, 3, 4]
+
+
+def test_without_the_relation_the_rule_is_inert():
+    """`twin_of=None` is the pre-§3.7(3) behaviour, and the sim's own cell exposes the same switch
+    as `dedupe_pairs`. Keeping them symmetrical is what lets the two be compared."""
+    ranked = [0, 1, 2, 3, 4, 5]
+    _, buys = engine.orders(ranked, [], gate_on=True, twin_of=None)
+    assert buys == [0, 1, 2, 3, 4]

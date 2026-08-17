@@ -49,6 +49,38 @@ Four things worth reading off it:
 
 ---
 
+## 1b. The whole chain, dry-run against production
+
+Dispatched on `main` after the merge, `dry_run=true` — every job computes and writes nothing but
+its own heartbeat row. All seven green, and each one behaved as designed rather than merely exiting
+zero:
+
+```
+reconcile   no manifest to read — the book stands as it was            green
+score       gate ON · universe 3206 · NAV unknown — buys unsized       amber
+            SELL NUE.US 32  ·  BUY SNDK/AXTI/MU/WDC/RVMD, qty —
+shadow      ✓ gate match   ✓ rank match                               green
+check       RED — session gauge has nothing to recompute (dry run)
+```
+
+Three things this proves that no test could:
+
+**§5.4 holds under the exact condition it was written for.** NAV is unknown, so every buy is
+unsized — and `SELL NUE.US 32` still carries its quantity, because a sell is sized from the book.
+The protective half of the sheet is complete while the buy half is explicitly unexecutable.
+
+**§6.4's attestation matched on real data.** `engine.py`'s rank and gate agree with
+`concentrated.py` over 3,206 names and the full stored tape — not the synthetic fixtures
+`test_engine_parity.py` uses, but the actual series the cell of record was measured on. This is the
+strongest evidence to date that the live engine *is* the backtested rule.
+
+**The RED check is an artifact of the dry run, not a defect.** `score` wrote nothing, so there is no
+`engine_session` for the four recomputation gauges to check against, and the freshness gauge reads
+score's amber as price-critical. On a real firing `score` writes the session first and the gauges
+have their subject. Worth knowing before Tuesday so a red banner is not mistaken for a fault.
+
+---
+
 ## 2. What runs now
 
 | §4.1 job | File | Was |

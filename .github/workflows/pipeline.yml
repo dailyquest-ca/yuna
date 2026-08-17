@@ -21,8 +21,11 @@ name: pipeline
 # one session date, so a second pass costs a few minutes and buys a second chance.
 #
 # `if: always()` on the tail is deliberate. When an upstream job dies the desk must still speak:
-# §4.4 gives a red `check` the power to hold the BUYS, §5.4 makes exits unblockable, and §4.7 rules
-# that a missing message is itself the alarm. Silence is the one outcome with no reader.
+# §4.4 gives a red `check` the power to hold the BUYS and §5.4 makes exits unblockable, so a dead
+# upstream job must not take the desk down with it. **Silence is the one outcome with no reader.**
+# That last sentence is a STANDING DESIGN DECISION, not a plan quote: the retired plan carried it
+# as §4.7 and v1.0 does not carry it at all. It is honoured here because the reasoning survives
+# the plan that stated it — flagged to Zak 2026-08-16 as a candidate for re-promotion.
 #
 # Retired from this chain by §6.3, and dispatch-only from here: the fundamentals-and-arming `score`
 # (`src/score.py`), its `check` (`src/check.py`), its `compose` (`src/compose.py`) and the fill
@@ -201,8 +204,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
   notify:
-    # Prove the composed rows exist and are deliverable. §4.7: a missing message is itself the
-    # alarm, so the one thing this job may never do is succeed quietly on nothing.
+    # Prove the composed rows exist and are deliverable. The one thing this job may never do is
+    # succeed quietly on nothing — see the header on why that rule has no clause behind it today.
     needs: [slot, compose]
     if: always()
     runs-on: ubuntu-latest
