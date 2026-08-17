@@ -135,10 +135,17 @@ def dd_lines(p):
 def tranche_lines(p, frozen=False):
     """§2.3's ramp. Eligibility is stated, never acted on — every draw is Zak's (§0.2)."""
     out = []
+    # Headroom across the OPEN facilities only. The first version took whichever row iterated last
+    # — which is MARGIN, unopened, limit zero — and so reported 0.00 of headroom against a live
+    # $37,500. §2.3: "the TFSA-secured LOC is the only live facility... HELOC and margin are not
+    # opened; opening either is a law change." A facility with no limit is not open, so summing the
+    # ones with a limit is the plan's own definition rather than a hardcoded account code, and it
+    # stays right on the day a second one is opened.
     headroom = None
     for f in (p["facilities"] or []):
         head = f.get("headroom_to_cap")
-        headroom = float(head) if head is not None else headroom
+        if head is not None and float(f.get("credit_limit") or 0) > 0:
+            headroom = (headroom or 0.0) + float(head)
         out.append(f"  {f['account']}: drawn {float(f['drawn'] or 0):,.2f} of a "
                    f"{float(f['credit_limit'] or 0):,.2f} limit · cap {float(f['cap'] or 0):,.2f} "
                    f"(§2.3, 50%) · headroom to cap {float(head or 0):,.2f}")

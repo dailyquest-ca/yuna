@@ -188,3 +188,20 @@ def test_no_warning_when_the_ramp_fits(db, migrated):
         text = "\n".join(brief.tranche_lines(brief.payload(cur)))
     assert "BREACH AHEAD" not in text
     assert "cap 37,600.00" in text
+
+
+def test_headroom_counts_only_the_open_facilities(db, migrated):
+    """The first version of the breach check took whichever facility row iterated last — MARGIN,
+    unopened, limit zero — and reported 0.00 of headroom against a live $37,500. §2.3: "the
+    TFSA-secured LOC is the only live facility... HELOC and margin are not opened". A facility with
+    no limit is not open, which is the plan's own definition and not a hardcoded account code."""
+    with db.cursor() as cur:
+        cur.execute("""insert into balances (account, as_of, drawn, credit_limit, source) values
+                         ('LOC',    current_date, 0, 75000, 'zak'),
+                         ('HELOC',  current_date, 0, 0,     'zak'),
+                         ('MARGIN', current_date, 0, 0,     'zak')""")
+        db.commit()
+        text = "\n".join(brief.tranche_lines(brief.payload(cur)))
+
+    assert "against 37,500.00 of headroom" in text, "the LOC's headroom, not MARGIN's zero"
+    assert "over by 100.00" in text
