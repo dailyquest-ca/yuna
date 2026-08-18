@@ -328,6 +328,7 @@ def main():
                 pending_tickets = cur.fetchone()[0]
                 cur.execute("""select count(*) from transactions
                                 where confirmed and applied_at is null
+                                  and superseded_by is null
                                   and side in ('buy','sell')""")
                 pending_txns = cur.fetchone()[0]
                 derived = ([f"{pending_tickets} ticket fill(s) would derive a ledger row"]

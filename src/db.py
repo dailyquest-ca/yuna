@@ -168,6 +168,11 @@ def cash_by_account(cur):
 
     # only movement the anchor cannot already contain — strictly after its date, and only the two
     # sides that are cash. `confirm` rows are R4 restating a share count and move no money.
+    #
+    # `superseded_by is null` since migration 059. When the bank's export lands for a trade Zak had
+    # already described in chat, the stated row STAYS (§0.6) and stops counting — counting both
+    # would take the cost of one purchase out of the account twice, which is a NAV error in the
+    # direction that blocks a real trade for want of funds that are there.
     cur.execute("""with anchor as (
                      select distinct on (account) account, as_of from balances
                       order by account, as_of desc, id desc)
@@ -180,6 +185,7 @@ def cash_by_account(cur):
                      from transactions t
                      join anchor a on a.account = t.account
                     where t.trade_date > a.as_of
+                      and t.superseded_by is null
                     group by 1, 2""")
     since = {}
     for acct, ccy, delta in cur.fetchall():

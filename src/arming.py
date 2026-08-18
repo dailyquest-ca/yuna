@@ -42,7 +42,7 @@ def apply_fills(conn, hb):
                               k.stop, k.stop_limit_price, k.trigger_price, k.target_qty
                        from transactions t
                        left join tickets k on k.id = t.ticket_id
-                       where t.applied_at is null
+                       where t.applied_at is null and t.superseded_by is null
                        order by t.trade_date, t.id""")
         rows = cur.fetchall()
         if dry():
@@ -646,7 +646,7 @@ def arm_entries(conn, arm, bars, nav, fx, gate, caps, holidays):
         # trigger 419.83, offering him a position he already held. `already_owned` is derived from
         # `transactions` instead, so a book that has fallen behind cannot manufacture an entry.
         # R1's runbook carries the session-side check; this is the job side refusing to arm it.
-        cur.execute("""select ticker from transactions group by ticker
+        cur.execute("""select ticker from transactions where superseded_by is null group by ticker
                         having sum(case when side='buy' then qty
                                         when side='sell' then -qty else 0 end) > 1e-6""")
         ledger_owned = {r[0] for r in cur.fetchall()}

@@ -144,3 +144,28 @@ def test_an_account_the_ledger_has_outspent_cannot_fund_another_position(db, fx)
     assert cash_now["usd"] == pytest.approx(2_000)
     assert cash_now["cad"] + cash_now["usd"] * 1.4 < 5_000, \
         "the funding check must see what is left, not what Sunday saw"
+
+
+def test_a_superseded_statement_is_not_paid_for_twice(db):
+    """Migration 059's supersession, from the cash side.
+
+    Zak says in chat that he bought; days later the bank's export lands with the same trade and
+    slightly different pennies. §0.6 keeps both rows — the stated one is stamped `superseded_by` and
+    stops counting — so anything that SUMS the ledger has to say which rows it means.
+
+    `cash_by_account` did not, and the failure is the expensive direction: one purchase taken out of
+    the account twice reads as less cash than exists, and §2.0 only writes a ticket "if that account
+    holds the cash". A trade Zak can afford gets refused for want of money that is there.
+    """
+    with db.cursor() as cur:
+        anchor(cur)
+        held(cur, qty=10, price=400.0)
+        fill(cur, side="buy", qty=10, price=419.83)                 # stated: 4,198.30 out
+        cur.execute("select id from transactions where side = 'buy'")
+        stated = cur.fetchone()[0]
+        fill(cur, side="buy", qty=10, price=419.85)                 # the export, two cents apart
+        cur.execute("""update transactions set superseded_by = (select max(id) from transactions)
+                        where id = %s""", (stated,))
+    db.commit()
+    # the broker's number, once — not both, and not the stated one
+    assert cash(db)["usd"] == pytest.approx(50_000 - 4_198.50)
