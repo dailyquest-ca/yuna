@@ -328,3 +328,130 @@ def test_the_session_role_may_write_the_ledger_and_still_may_not_write_the_book(
         grants = dict(cur.fetchall())
     assert "INSERT" in grants.get("transactions", ""), "§4.3 + Zak 2026-08-18: the chat writes these"
     assert "INSERT" not in grants.get("book", ""), "and never writes a position directly"
+
+
+# ------------------------------------------- Zak's rule: a statement the export passed over
+
+def test_a_stated_trade_the_export_reported_past_is_flagged(db):
+    """Zak, 2026-08-18: *"if a stated transaction in an account pre-dates broker transactions...
+    that's a bad sign and likely the stated transaction should be matched to one of the broker
+    transactions or removed... because I had stated data that didn't actually come to pass."*
+
+    059 gave a stated row one way out — a broker row for the same trade supersedes it — which covers
+    the export CONFIRMING what Zak said. It said nothing about the export arriving, covering the
+    day, and not mentioning the trade at all. That case is not neutral: it means the thing he
+    believed happened did not.
+
+    It is the worst shape the ghost book takes, because the ledger and the book AGREE. A stated sell
+    that never executed empties a slot that is still full, and every later session sizes against it.
+    """
+    with db.cursor() as cur:
+        _universe(cur, "NUE.US", "AXTI.US")
+        _opening(cur, "NUE.US", 32, 267.715)
+        db.commit()                    # the position exists before he says anything about it
+        # Zak says he sold NUE on the 17th
+        ledger.record(cur, dict(ticker="NUE.US", account="TFSA", side="sell", qty=32,
+                                price=266.81, trade_date="2026-08-17"),
+                      "stated", "stated in chat")
+        db.commit()
+        assert _book(cur, "NUE.US")[2] == "closed", "the book moves on his word, as it should"
+
+        # the export lands covering the 19th — and carries no NUE sell
+        ledger.record(cur, dict(ticker="AXTI.US", account="TFSA", side="buy", qty=20,
+                                price=77.21, trade_date="2026-08-19", external_ref="ws-1"),
+                      "broker", "csv ws.csv")
+        db.commit()
+
+        cur.execute("""select account, ticker, side, days_the_export_has_passed_it
+                         from v_stale_statements""")
+        assert cur.fetchall() == [("TFSA", "NUE.US", "sell", 2)]
+
+
+def test_a_statement_the_export_confirmed_is_not_stale(db):
+    """The ordinary case must stay quiet, or the rule is noise. A stated row the export superseded
+    has already done its job and stops counting — it is not a statement that failed."""
+    with db.cursor() as cur:
+        _universe(cur, "NUE.US")
+        _opening(cur, "NUE.US", 32, 267.715)
+        ledger.record(cur, dict(ticker="NUE.US", account="TFSA", side="sell", qty=32,
+                                price=266.81, trade_date="2026-08-17"),
+                      "stated", "stated in chat")
+        ledger.record(cur, dict(ticker="NUE.US", account="TFSA", side="sell", qty=32,
+                                price=266.8111, trade_date="2026-08-17", external_ref="ws-1"),
+                      "broker", "csv ws.csv")
+        db.commit()
+        cur.execute("select count(*) from v_stale_statements")
+        assert cur.fetchone()[0] == 0, "superseded is resolved, not stale"
+
+
+def test_the_rule_is_per_account(db):
+    """An export for the NONREG says nothing about a statement in the TFSA. Accounts reconcile on
+    their own schedules — Zak uploads what the bank gives him, one account at a time."""
+    with db.cursor() as cur:
+        _universe(cur, "NUE.US", "VXC.TO")
+        _opening(cur, "NUE.US", 32, 267.715)
+        ledger.record(cur, dict(ticker="NUE.US", account="TFSA", side="sell", qty=32,
+                                price=266.81, trade_date="2026-08-17"),
+                      "stated", "stated in chat")
+        ledger.record(cur, dict(ticker="VXC.TO", account="NONREG", side="buy", qty=140,
+                                price=85.45, trade_date="2026-08-19", external_ref="ws-9"),
+                      "broker", "csv ws.csv")
+        db.commit()
+        cur.execute("select count(*) from v_stale_statements")
+        assert cur.fetchone()[0] == 0, "a NONREG export does not report past a TFSA statement"
+
+
+def test_an_opening_balance_is_not_a_failed_statement(db):
+    """A `confirm` says a position EXISTS and what it cost. It is not a claim that a trade happened
+    on that date, so an export that covers the day and does not mention the name does not refute it
+    — it just does not explain it. Amber, and its own view."""
+    with db.cursor() as cur:
+        _universe(cur, "SPMO.US", "AXTI.US")
+        ledger.record(cur, dict(ticker="SPMO.US", account="TFSA", side="confirm", qty=810,
+                                price=155.5, trade_date="2026-08-17"),
+                      "stated", "book adoption")
+        ledger.record(cur, dict(ticker="AXTI.US", account="TFSA", side="buy", qty=20,
+                                price=77.21, trade_date="2026-08-19", external_ref="ws-1"),
+                      "broker", "csv ws.csv")
+        db.commit()
+
+        cur.execute("select count(*) from v_stale_statements")
+        assert cur.fetchone()[0] == 0, "an opening balance is not a trade that failed to happen"
+        cur.execute("""select account, ticker, broker_has_this_name
+                         from v_unexplained_opening_balances""")
+        assert cur.fetchall() == [("TFSA", "SPMO.US", False)]
+
+
+def test_an_opening_balance_the_export_now_covers_is_a_double_count(db):
+    """The loose end migration 059 left, made loud. When the export finally carries the purchases
+    behind an adopted balance, BOTH count and the position doubles — 810 adopted plus 810 bought.
+    The system cannot decide which to retire (the file might hold the original purchase or a later
+    top-up, and only Zak knows), so it says so instead of guessing. §0.3."""
+    with db.cursor() as cur:
+        _universe(cur, "SPMO.US")
+        ledger.record(cur, dict(ticker="SPMO.US", account="TFSA", side="confirm", qty=810,
+                                price=155.5, trade_date="2026-08-17"),
+                      "stated", "book adoption")
+        ledger.record(cur, dict(ticker="SPMO.US", account="TFSA", side="buy", qty=810,
+                                price=155.4821, trade_date="2026-08-17", external_ref="ws-spmo"),
+                      "broker", "csv ws.csv")
+        db.commit()
+
+        assert _book(cur, "SPMO.US")[0] == 1620.0, "both count — that is the defect being named"
+        cur.execute("""select account, ticker, broker_has_this_name
+                         from v_unexplained_opening_balances""")
+        assert cur.fetchall() == [("TFSA", "SPMO.US", True)], "and it is flagged, not resolved"
+
+
+def test_the_ledger_opens_a_position_unassigned_not_book(db):
+    """Sleeves are subsets of the book, so `book` is a category error as a sleeve name — it labels a
+    part with the name of the whole. `unassigned` is honest: the ledger knows a trade happened and
+    in which account, and genuinely does not know which sleeve the position belongs to. §0.3."""
+    with db.cursor() as cur:
+        _universe(cur, "MU.US")
+        ledger.record(cur, dict(ticker="MU.US", account="TFSA", side="buy", qty=2,
+                                price=954.58, trade_date="2026-08-14"),
+                      "stated", "stated in chat")
+        db.commit()
+        cur.execute("select sleeve from book where ticker = 'MU.US'")
+        assert cur.fetchone()[0] == "unassigned"

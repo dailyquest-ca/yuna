@@ -243,19 +243,54 @@ def main():
                             if predates else f"diff {diff:+,.4f}  stated_rows={stated or 0}")
                     print(f"  {acct:<7} {tk:<10} ledger {lq or 0:>12,.4f}  book "
                           f"{bq or 0:>12,.4f}  {tail}")
-                hb.detail.update(breaks=breaks, predates_the_ledger=older)
+                # Zak's rule, 2026-08-18: a stated trade the export has already reported past
+                # without confirming is "stated data that didn't actually come to pass". It is
+                # still counting in the book until someone matches or voids it, and a stated SELL
+                # that never executed empties a slot that is still full.
+                cur.execute("""select id, account, ticker, side, qty, trade_date,
+                                      broker_confirmed_through, days_the_export_has_passed_it
+                                 from v_stale_statements""")
+                stale = cur.fetchall()
+                for i, acct, tk, side, qty, when, through, days in stale:
+                    print(f"  ** stale statement #{i}: {acct} {side} {float(qty):g} {tk} on {when}"
+                          f" — the broker has reported through {through} ({days} days later) and"
+                          f" never confirmed it")
+                cur.execute("""select account, ticker, qty, broker_has_this_name
+                                 from v_unexplained_opening_balances""")
+                openings = cur.fetchall()
+                for acct, tk, qty, covered in openings:
+                    tail = ("  ** an export now covers this name — the opening balance and the real "
+                            "purchases are probably BOTH counting; retire one **" if covered
+                            else "cost basis is an estimate until an export explains it")
+                    print(f"  opening balance: {acct} {tk} {float(qty):g} — {tail}")
+
+                hb.detail.update(breaks=breaks, predates_the_ledger=older,
+                                 stale_statements=[f"#{r[0]} {r[1]} {r[3]} {r[2]} {r[5]}"
+                                                   for r in stale],
+                                 opening_balances=[f"{r[0]} {r[1]}" for r in openings])
                 # The two rows in this view are not the same kind of thing and must not carry the
                 # same colour. A genuine disagreement is a defect — something wrote one side and not
                 # the other, which is the ghost book. A position older than its own history is
                 # merely incomplete, it is TRUE of the book today, and it heals itself the moment
                 # the bank's export arrives. Red on the first would make the second cry wolf every
                 # night until then, and a gauge that is always red stops being read.
+                # A stale statement is RED and outranks a book/ledger disagreement, because it is
+                # the one condition here where the two AGREE and are both wrong: the ledger says a
+                # trade happened, the book faithfully reflects it, and the trade did not happen.
+                if stale:
+                    hb.red(f"{len(stale)} stated trade(s) the broker export has passed over "
+                           f"without confirming — match each to a broker row or void it: "
+                           + ", ".join(f"#{r[0]} {r[1]} {r[3]} {r[2]}" for r in stale))
                 if breaks:
                     hb.red(f"{len(breaks)} position(s) disagree between the ledger and the book: "
                            + ", ".join(breaks))
-                elif older:
-                    hb.amber(f"{len(older)} position(s) predate the ledger and have no history "
-                             f"behind them: " + ", ".join(older))
+                doubled = [f"{r[0]} {r[1]}" for r in openings if r[3]]
+                if doubled:
+                    hb.red(f"{len(doubled)} opening balance(s) now covered by an export — the "
+                           f"balance and the purchases are both counting: " + ", ".join(doubled))
+                elif older or openings:
+                    hb.amber(f"{len(older) + len(openings)} position(s) carried in without the "
+                             f"trades that made them; cost basis is an estimate")
                 return 0
 
             if args.cmd == "import":

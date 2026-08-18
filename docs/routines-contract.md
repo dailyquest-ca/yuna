@@ -188,6 +188,48 @@ were today's reading.
 `cash_by_account` carries the newest anchor forward by the ledger, so a fill recorded after the
 reading is already accounted for — do not subtract it by hand.
 
+### A statement the export passed over
+
+Zak, 2026-08-18:
+
+> if a stated transaction in an account pre-dates broker transactions… that's a bad sign and likely
+> the stated transaction should be matched to one of the broker transactions or removed… because I
+> had stated data that didn't actually come to pass.
+
+Supersession covers the export **confirming** what he said. This is the other case: the export
+arrives, covers the day, and does not mention the trade at all. That is not neutral — the thing he
+believed happened did not, and the stated row is still counting.
+
+```sql
+select * from v_stale_statements;
+```
+
+Each row is a stated buy or sell the broker has reported *past* without confirming. It is the worst
+shape the ghost book takes, because the ledger and the book **agree** — a stated sell that never
+executed empties a slot that is still full. Two resolutions, both Zak's:
+
+- **match it** — supersede it with the broker row it was reaching for (the update in the section
+  above), or
+- **void it** — `update transactions set superseded_by = id where id = <n>` marks it self-superseded
+  so it stops counting while the row survives (§0.6).
+
+**Never guess which.** Only Zak knows whether a statement was a mis-remembered fill, a trade that
+was cancelled, or one the export simply has not reached yet.
+
+### An opening balance no export explains
+
+```sql
+select * from v_unexplained_opening_balances;
+```
+
+A `confirm` row says a position **exists** and what it cost — not that a trade happened that day —
+so an export covering the date without mentioning the name does not refute it. It just does not
+explain it, and the cost basis stays an estimate.
+
+`broker_has_this_name = true` is the one to act on: an export now covers the name, so the opening
+balance **and** the real purchases are probably both counting and the position has doubled. Retire
+one. Today that is SPMO in the TFSA and the RRSP.
+
 ### Does it all match?
 
 ```sql

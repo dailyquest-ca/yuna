@@ -53,16 +53,18 @@ def test_a_receipt_opens_the_position_and_settles_its_ticket(db, migrated):
         assert not orphans and len(settled) == 1
         cur.execute("""select qty, avg_cost, entry_fill, status, sleeve from book
                         where ticker = 'SNDK.US'""")
-        # `book` since migration 059: the sleeve is 'book' because the ledger opened the
-        # position and §2.1 makes the ACCOUNT the allocation, so the label decides nothing. Zak,
-        # 2026-08-18: "As for tagging as pre-seed or momentum etc... That's just the book."
+        # `unassigned` since migration 060, and the correction matters. 059 wrote 'book' on the
+        # reading that the label had stopped deciding anything; Zak, 2026-08-18: "Sleeves... are
+        # just subsets of the book... The sum of everything is the book." A part cannot be labelled
+        # with the name of the whole. The ledger knows a trade happened and in which account, and
+        # genuinely does not know which sleeve it belongs to — that judgement is Zak's (§0.3).
         #
         # `approx` on the cost for the same reason the sleeve changed: avg_cost is now DERIVED —
         # sum(qty x price) / sum(qty) over the ledger — where it used to be the receipt's price
         # copied across. One lot at 1650.10 comes back as 1650.0999999999997, and a book that
         # recomputes is worth a float ulp.
         qty, cost, entry, status, sleeve = cur.fetchone()
-        assert (qty, status, sleeve) == (24.0, "open", "book")
+        assert (qty, status, sleeve) == (24.0, "open", "unassigned")
         assert cost == pytest.approx(1650.10) and entry == pytest.approx(1650.10)
         cur.execute("select state, executed_at is not null from tickets where id = %s", (tid,))
         assert cur.fetchone() == ("executed", True)
