@@ -23,8 +23,14 @@ class Beat:
 
 def composed(conn, kind="stopsheet"):
     with conn.cursor() as cur:
+        # `at, id` and not `at` alone. `briefs.at` defaults to `now()`, which is TRANSACTION time in
+        # Postgres, so two briefs written in one transaction carry a byte-identical timestamp and
+        # "order by at" is a coin toss decided by the heap. This helper reads "the newest row",
+        # which under a tie it could not deliver — and the same ambiguity was live in `notify`,
+        # where the loser of the toss is the message Zak reads.
         cur.execute("""select body, detail->>'sha', detail->>'recomposed', at from briefs
-                       where kind=%s and detail->>'composed'='true' order by at""", (kind,))
+                       where kind=%s and detail->>'composed'='true'
+                       order by at, id""", (kind,))
         return cur.fetchall()
 
 

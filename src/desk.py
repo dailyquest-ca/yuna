@@ -216,10 +216,11 @@ def sheet(cur, as_of, nav):
         px = float(raw[i, j])
         addv = float(addv_row[j])
         # §3.5 sizes the SLOT at NAV/5; the ORDER is the slot less whatever the account already
-        # holds of that name. The two were the same number for as long as a buy only ever opened an
-        # empty slot, and they stop being the same the moment the book holds a partial line — which
-        # it does today: 20 shares of AXTI and 2 of MU against ranks 2 and 3. Ordering a full slot
-        # on top of those would buy the position twice and overshoot the weight §3.5 fixes.
+        # holds of that name. Today those are the same number for every buy on the sheet, because
+        # §3.5 fills FREE slots and `engine.orders` keeps a held name in the top 12 rather than
+        # returning it as a buy — so `already` is zero. This is the belt: the netting is one line,
+        # and the failure it prevents is buying a position the account already holds, at full
+        # weight, on top of itself. `underweight` below is the case that actually arises.
         target = engine.position_size(nav, px) if nav else None
         already = held.get(tk, 0.0)
         qty = max(0, int(target - already)) if target is not None else None
@@ -231,11 +232,21 @@ def sheet(cur, as_of, nav):
     # §3.5's slot is a WEIGHT — "Slots: 5, equal weight" — and a slot held at a fraction of that
     # weight is not equal weight. The engine has no rule for it because until now a slot was only
     # ever empty or full: a name is bought at exactly NAV/5 and never bought again, so a partial
-    # line can only arrive from OUTSIDE the engine. Two have (AXTI and MU, from the pre-seed buys).
+    # line can only arrive from OUTSIDE the engine. Two have — 20 shares of AXTI and 2 of MU, from
+    # the pre-seed buys, ranking 2nd and 3rd.
     #
-    # Reported, not acted on. Topping up a kept holding would be a rebalance rule, and rebalancing
-    # a momentum book trims winners — the one thing the strategy must not do. §0.3 makes the weight
-    # rule Zak's, so the shortfall is a line in the brief and not a silent order.
+    # **This is not cosmetic and the numbers say why.** §3.5 fills FREE slots, and `engine.orders`
+    # KEEPS a held name in the top 12 rather than re-buying it. So both of those slots read as
+    # occupied at roughly 4% of their weight, the seed fills the other three, and about 60% of the
+    # account never leaves the park — against §6.5's "all five slots fill from the first live
+    # ranking in one session."
+    #
+    # Reported, not acted on, and the restraint is the point. Topping up a kept holding is a
+    # rebalance rule, and rebalancing a momentum book trims winners — the one thing the strategy
+    # must not do. §3.5 does not carry the rule and §6.5 does not name the arithmetic, so writing
+    # one here would be an invented constant in a position-sizing rule, which is the failure this
+    # repository is most exposed to. §0.3 makes it Zak's; the sheet's job is to put the shortfall
+    # in front of him in dollars.
     underweight = []
     if nav:
         for tk in sorted(held):
@@ -255,8 +266,12 @@ def sheet(cur, as_of, nav):
     # is sold and the five are bought in the same session. While the gate is OFF the opposite
     # holds: §3.4 sends proceeds TO the park and buys nothing, so selling it would move the money
     # into cash to sit there. Hence the condition — sold when, and only when, something buys it.
+    #
+    # The condition reads the ORDERS, not `buy_tk`. A name in the fill band whose slot the account
+    # already holds emits no buy — that is the top-up rule above — so a sheet can name buys and
+    # order none, and funding those would sell the bridge to pay for nothing.
     funding = []
-    if parked and buy_tk and gate_on:
+    if parked and gate_on and any(o["action"] == "buy" for o in orders):
         for tk, qty in sorted(parked.items()):
             # Priced by its own query, like `marked_equity`: the park is not in §3.2's universe, so
             # it has no column on the loaded tape and never will.
@@ -306,18 +321,20 @@ def render(s):
             out.append(f"  BUY  {o['ticker']:<10} qty {qty}   "
                        f"rank {o['rank']}   mark {o['mark']:,.2f}{warn}")
     if s.get("underweight"):
+        short = sum(u["short"] for u in s["underweight"])
         out.append("")
-        out.append("held below §3.5's equal weight — reported, not ordered:")
+        out.append("** held below §3.5's equal weight — reported, NOT ordered **")
         for u in s["underweight"]:
             out.append(f"    {u['ticker']:<10} rank {u['rank']:<3} "
                        f"{u['value']:>12,.2f} of a {u['slot']:,.2f} slot "
                        f"({u['pct_of_slot']:.0%}) — short {u['short']:,.2f}")
-        out.append("    §3.5 sizes a slot at NAV/5 and has no top-up rule: a name is bought once,"
-                   " at weight,")
-        out.append("    and never bought again. A partial line can only come from outside the"
-                   " engine, and")
-        out.append("    topping one up is a rebalance — which on a momentum book means trimming"
-                   " winners. Zak's (§0.3).")
+        out.append(f"    {len(s['underweight'])} slot(s) count as filled while holding"
+                   f" {short:,.2f} less than their weight,")
+        out.append("    so that much capital stays parked. §3.5 fills FREE slots and keeps a held")
+        out.append("    name rather than re-buying it; it carries no top-up rule, because a name is")
+        out.append("    bought once at weight and never bought again. A partial line can only come")
+        out.append("    from outside the engine — and topping one up is a rebalance, which on a")
+        out.append("    momentum book means trimming winners. **This one is Zak's (§0.3).**")
     out += ["", "Zak executes at the open: sells first, then buys (§3.5). "
                 "Nothing here has been ordered."]
     return "\n".join(out)

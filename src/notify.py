@@ -54,7 +54,13 @@ def fresh_composed(cur, kinds):
                    where kind = any(%s) and detail->>'composed' = 'true'
                      and (detail->>'engine') = 'v1'
                      and session_date = %s
-                   order by at desc""", (kinds, session))
+                   order by at desc, id desc""", (kinds, session))
+    # `id desc` is belt to migration 058's braces, not a fix for a live defect. `briefs.at` defaults
+    # to `now()`, which in Postgres is TRANSACTION time, so two briefs written in one transaction
+    # carry a byte-identical timestamp and `order by at desc` is a tie broken by the heap — and the
+    # first row per kind wins below. For v1 briefs that cannot happen: `briefs_engine_kind_session_
+    # key` is unique on (kind, session_date) where engine = 'v1', so there is only ever one row to
+    # pick. The tiebreak costs nothing and means the answer does not depend on that index existing.
     rows = {}
     for kind, session_date, at, summary, body in cur.fetchall():
         rows.setdefault(kind, dict(kind=kind, session_date=str(session_date),

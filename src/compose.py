@@ -287,7 +287,8 @@ def publish(cur, hb, kind, session_date, freshness_line, body, *, meta=None):
     cur.execute("""select detail->>'sha', at > now() - make_interval(hours => %s)
                      from briefs
                     where kind=%s and session_date=%s and detail->>'composed'='true'
-                    order by at desc limit 1""", (RECOMPOSE_AFTER_HOURS, kind, session_date))
+                    order by at desc, id desc limit 1""",
+                (RECOMPOSE_AFTER_HOURS, kind, session_date))
     row = cur.fetchone()
     if row and row[0] == sha and row[1]:
         hb.detail.setdefault("skipped", []).append(f"{kind} unchanged and still deliverable")

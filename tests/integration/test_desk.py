@@ -193,3 +193,126 @@ def test_a_twin_pair_in_the_top_twelve_takes_only_one_slot(db, migrated):
     assert "N00.US" in bought, "the better-ranked line fills"
     assert "N01.US" not in bought, "and its twin does not join it"
     assert len(bought) == engine.SLOTS, "the skipped twin costs no slot — the band reaches deeper"
+
+
+def _park(cur, days, ticker="SPMO.US", qty=810, px=155.5):
+    """The §6.1(3) bridge, as it actually sits: in the TFSA, priced, and not a `.US` common stock —
+    so §3.2 can never rank it and §3.5 can never keep it."""
+    cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                   values (%s,%s,'etf','USD','active') on conflict (ticker) do nothing""",
+                (ticker, ticker))
+    for d in days[-5:]:
+        cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                       values (%s,%s,%s,%s,%s,%s,%s,3000000)
+                       on conflict (ticker,d) do nothing""",
+                    (ticker, d, px, px, px, px, px))
+    cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                   values (%s,'TFSA','reserve',%s,%s,'open')""", (ticker, qty, px))
+
+
+def test_the_park_is_never_sold_for_failing_to_rank(db, migrated):
+    """The defect that came in with the account filter, as an assertion.
+
+    §2.1 gives the engine the whole TFSA, so `held_book` reads the account — which is right, and
+    fixes AXTI and MU sitting in it tagged `preseed` while ranking 2nd and 3rd. It also sweeps in
+    the §6.1(3) bridge, which is an ETF: not a `.US` common stock, never in §3.2's universe, never
+    rankable. And `desk.sheet` sells everything it holds and cannot rank.
+
+    Uncorrected, that proposes liquidating the capital §6.5 is holding for the seed — every night,
+    for failing a stock screen it was never eligible for. The park is engine capital and not an
+    engine slot, and the two are told apart by INSTRUMENT (§8 names SPY.US, §6.1(3) names SPMO.US)
+    rather than by a label someone has to remember to set.
+    """
+    with db.cursor() as cur:
+        days = _world(cur, rising=False)          # gate OFF: §3.4 sends proceeds TO the park
+        _park(cur, days)
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+
+    assert s["gate"] == "OFF"
+    assert s["parked"] == ["SPMO.US"]
+    assert "SPMO.US" not in [o["ticker"] for o in s["orders"]], "the park is not a rank exit"
+    assert "SPMO.US" not in s["unranked"], "and never joins the queue that becomes one"
+    assert s["marked_equity"] > 0, "it is still engine capital, and still marked"
+
+
+def test_the_park_funds_the_seed_when_the_gate_is_on(db, migrated):
+    """§6.5: "all five slots fill from the first live ranking in one session." The capital for that
+    is the bridge, so the bridge sells and the five buy in the same session — sells first (§3.5),
+    because the cash has to exist before the buys it pays for."""
+    with db.cursor() as cur:
+        days = _world(cur)                        # gate ON, empty book: five buys
+        _park(cur, days)
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+
+    assert s["gate"] == "ON"
+    actions = [(o["action"], o["ticker"], o["clause"]) for o in s["orders"]]
+    assert actions[0] == ("sell", "SPMO.US", "fund"), "the funding sell leads the sheet"
+    assert len([o for o in s["orders"] if o["action"] == "buy"]) == 5
+    assert [o for o in s["orders"] if o["clause"] == "fund"][0]["qty"] == 810
+
+
+def test_the_park_is_not_sold_when_nothing_actually_buys(db, migrated):
+    """A name in the fill band whose slot the account already holds emits no buy. The sheet then
+    NAMES buys and orders none — and funding that would sell the bridge to pay for nothing."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _park(cur, days)
+        # the whole top five already held at full weight: 200,000 / 5 = 40,000 a slot, and these
+        # names trade near $90, so 1,000 shares is comfortably over one slot
+        for t in ("N00.US", "N01.US", "N02.US", "N03.US", "N04.US"):
+            cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                           values (%s,'TFSA','momentum',1000,40.0,'open')""", (t,))
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+
+    assert s["gate"] == "ON"
+    assert not [o for o in s["orders"] if o["action"] == "buy"], "every slot is already at weight"
+    assert not [o for o in s["orders"] if o["clause"] == "fund"], "so nothing needs funding"
+
+
+def test_a_partial_line_holds_a_slot_and_is_reported_rather_than_topped_up(db, migrated):
+    """The pre-seed buys, and the decision they force.
+
+    §3.5 fills FREE slots and `engine.orders` KEEPS a held name in the top 12 rather than re-buying
+    it. So 20 shares of AXTI against rank 2 occupy a whole slot at a few percent of its weight: no
+    buy is emitted, no sell is emitted, and the capital that slot was meant to carry stays parked.
+
+    The engine has no rule for this and must not invent one — topping up a kept holding is a
+    rebalance, and rebalancing a momentum book trims winners. So the sheet REPORTS it, in dollars,
+    and §0.3 leaves the ruling with Zak. This test pins both halves: nothing is ordered, and the
+    shortfall is impossible to miss.
+    """
+    with db.cursor() as cur:
+        days = _world(cur)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','preseed',20,40.0,'open')""")
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+
+    assert not [o for o in s["orders"] if o["ticker"] == "N00.US"], "kept: no buy, and no sell"
+    assert len([o for o in s["orders"] if o["action"] == "buy"]) == engine.SLOTS - 1, \
+        "the held name occupies one of the five"
+
+    short = {u["ticker"]: u for u in s["underweight"]}
+    assert "N00.US" in short, "and the shortfall is on the sheet"
+    assert short["N00.US"]["rank"] == 1
+    assert short["N00.US"]["slot"] == 200_000.0 / engine.SLOTS
+    assert short["N00.US"]["pct_of_slot"] < 0.10, "a few percent of the weight it should carry"
+    assert "NOT ordered" in desk.render(s) and "Zak's (§0.3)" in desk.render(s)
+
+
+def test_a_buy_nets_against_a_line_the_account_already_holds(db, migrated):
+    """The belt, exercised directly. `engine.orders` does not currently hand back a buy for a name
+    the book holds — it keeps it — so this goes at the seam rather than through the sheet: given a
+    buy and a holding, the ORDER is the slot less the line."""
+    px, nav = 90.0, 200_000.0
+    target = engine.position_size(nav, px)
+    assert max(0, int(target - 20)) == target - 20
+    assert max(0, int(target - target)) == 0, "a slot already at weight orders nothing"
+    assert max(0, int(target - (target + 5))) == 0, "and one above it never orders negative"

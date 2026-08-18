@@ -12,6 +12,8 @@ import json
 import pathlib
 import subprocess
 import sys
+import pytest
+
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -330,3 +332,32 @@ def test_notify_reports_silence_when_a_new_session_has_no_brief(db, migrated):
         db.commit()
         have = notify.fresh_composed(cur, ["nightly"])
     assert have == {}, "a new session with no brief is silence, and must read as silence"
+
+
+def test_one_v1_brief_per_session_is_a_constraint_and_not_a_convention(db, migrated):
+    """Why `notify` can never deliver superseded words.
+
+    `briefs.at` defaults to `now()`, which in Postgres is TRANSACTION time — so two briefs written
+    in one transaction carry a byte-identical timestamp, and `order by at desc` is a tie broken by
+    whatever the heap hands back. `fresh_composed` keeps the first row per kind, so under a tie the
+    message Zak reads would be decided by a coin toss. The same missing tiebreak flipped a compose
+    test, which is how this got looked at.
+
+    The reason it cannot bite is structural rather than careful: migration 058 makes (kind,
+    session_date) UNIQUE for engine briefs, so there is only ever one row to choose between and the
+    correction REPLACES its predecessor instead of racing it. This pins that, because if the index
+    were ever dropped the ordering would silently start deciding what gets delivered.
+    """
+    import psycopg
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        session = days[-1]
+        cur.execute("""insert into briefs (kind, session_date, summary, body, detail)
+                       values ('nightly', %s, 'first', 'STALE — the book before the fills',
+                               '{"composed": true, "engine": "v1"}'::jsonb)""", (session,))
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            cur.execute("""insert into briefs (kind, session_date, summary, body, detail)
+                           values ('nightly', %s, 'second', 'FRESH — NUE.US sold',
+                                   '{"composed": true, "engine": "v1"}'::jsonb)""", (session,))
+    db.rollback()
