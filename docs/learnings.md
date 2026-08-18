@@ -419,3 +419,21 @@ is `roadmap-2026-07-31.md`.
     **A filter is two claims — what it includes and what it excludes — and replacing one is
     replacing both.** The park is now split off by INSTRUMENT (SPY.US per §8, SPMO.US per §6.1(3)),
     which is what the position IS rather than a label someone must remember to set.
+54. **Check what the change does to PRODUCTION's actual state before shipping it, not to the test
+    world.** The funding rule — sell the park to pay for the buys — is correct in steady state and
+    was correct in every test. Against production it was an accident: the gate reads ON, three of
+    five slots are free, so the first live sheet would have written a real ticket to sell 810 shares
+    of the §6.1(3) bridge — with §6.5's own conditions ("shadow passed · pipeline green · gate ON ·
+    Zak's seed ruling") standing at 2 of 10. Nothing in the tests could have caught it, because the
+    tests do not know the shadow is running. The fix is one clause reading `v_shadow_progress.
+    passes`, which is §6.4's condition verbatim and therefore **clears itself** — a Phase-0 guard
+    that needs a later ruling to remove is a guard someone will forget to remove.
+55. **A new "these rows do not count" column is a sweep, not a column.** `superseded_by` makes the
+    book right by construction and made three other sums quietly wrong, because every one of them
+    had been written when every row counted. The dangerous one was `db.cash_by_account`: a stated
+    buy and the broker row correcting it would both leave the account, so one purchase is paid for
+    twice, the account reads poorer than it is, and §2.0 refuses a ticket for want of cash that is
+    there. Exactly the 2026-08-05 defect this function was written to fix, with the sign flipped.
+    **When you add a filter to one query, grep for every other query over the same table** — and
+    say out loud which ones you deliberately left alone and why (`max(trade_date)` does not move
+    when a row is superseded; `not exists (... ticket_id)` is still true afterwards).
