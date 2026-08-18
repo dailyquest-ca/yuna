@@ -285,3 +285,156 @@ def test_dry_run_writes_nothing_but_still_compares(db, migrated, tmp_path):
         assert cur.fetchone()[0] == 0
         cur.execute("select qty from book where ticker = 'MU.US'")
         assert cur.fetchone()[0] == 41.0, "the book is untouched"
+
+
+# ---- the chat route: §4.3's ORDINARY path, restored 2026-08-18 ---------------------------------
+#
+# The ghost-book morning. A full §6.1 liquidation was reported in chat on the 17th, landed on
+# tickets, and never reached `book` — so the next brief rendered seven positions the broker no
+# longer held and proposed a NUE sell Zak had already executed.
+#
+# The cause was mine. §4.3's write list says a session writes TICKETS and never the ledger: it puts
+# `fill_*` on the ticket and a JOB derives the transaction and folds it. That job was
+# `arming.sync_fills_from_tickets` + `apply_fills`, called by the legacy `score` and `fills` — and
+# §6.3 retired both from the schedule while `reconcile` replaced only the MANIFEST half.
+
+def _filled_ticket(cur, ticker, action, qty, price, *, state="executed", sleeve="momentum"):
+    cur.execute("""insert into tickets (session_date, ticker, account, sleeve, action, clause,
+                                        order_type, qty, state, fill_qty, fill_price, fill_date)
+                   values ('2026-08-14',%s,'TFSA',%s,%s,%s,'market',%s,%s,%s,%s,'2026-08-17')
+                   returning id""",
+                (ticker, sleeve, action, "fill" if action == "buy" else "rank_exit",
+                 qty, state, qty, price))
+    return cur.fetchone()[0]
+
+
+def test_a_fill_reported_in_chat_reaches_the_book_with_no_manifest_at_all(db, migrated):
+    """The whole break, end to end: ticket -> derived ledger row -> book moved."""
+    with db.cursor() as cur:
+        _universe(cur, "NUE.US")
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('NUE.US','TFSA','momentum',32,267.715,'open')""")
+        tid = _filled_ticket(cur, "NUE.US", "sell", 32, 266.8111)
+        db.commit()
+
+        assert reconcile.derive_ticket_fills(cur) != [], "the ledger row is derived from the ticket"
+        assert reconcile.apply_unapplied(cur) != [], "and folded into the book"
+        db.commit()
+
+        cur.execute("select qty, status from book where ticker = 'NUE.US'")
+        assert cur.fetchone() == (0.0, "closed")
+        cur.execute("""select ticket_id, confirmed, applied_at is not null
+                         from transactions where ticker = 'NUE.US'""")
+        assert cur.fetchone() == (tid, True, True)
+
+
+def test_the_chat_route_is_idempotent_in_both_halves(db, migrated):
+    """The chain re-fires on the retry ingest, and a doubled liquidation is not recoverable."""
+    with db.cursor() as cur:
+        _universe(cur, "MU.US")
+        _filled_ticket(cur, "MU.US", "buy", 41, 971.66)
+        db.commit()
+        reconcile.derive_ticket_fills(cur)
+        reconcile.apply_unapplied(cur)
+        db.commit()
+
+        assert reconcile.derive_ticket_fills(cur) == [], "one transaction per ticket"
+        assert reconcile.apply_unapplied(cur) == [], "applied_at is the stamp"
+        db.commit()
+        cur.execute("select count(*), sum(qty) from transactions where ticker = 'MU.US'")
+        assert cur.fetchone() == (1, 41.0)
+        cur.execute("select qty from book where ticker = 'MU.US'")
+        assert cur.fetchone()[0] == 41.0
+
+
+def test_a_manifest_and_a_chat_report_of_the_same_fill_move_the_book_once(db, migrated):
+    """The door the ticket route opens, and the reason `fold_fill` now records `ticket_id`.
+
+    Zak reports a fill in chat AND later exports the manifest containing it. Before this, the
+    manifest transaction carried no ticket link, so `derive_ticket_fills` saw a ticket with no
+    transaction and derived a SECOND row for the same fill — 82 shares of MU where 41 were bought.
+    """
+    with db.cursor() as cur:
+        _universe(cur, "MU.US")
+        tid = _ticket(cur, "MU.US", "buy", 41)                     # proposed, awaiting a receipt
+        db.commit()
+        reconcile.fold_fill(cur, "m.json", "TFSA", _fill("ws-99", "MU.US", "buy", 41, 971.66))
+        db.commit()
+
+        cur.execute("select ticket_id from transactions where broker_ref = 'ws-99'")
+        assert cur.fetchone()[0] == tid, "the manifest row records which ticket it settles"
+
+        # the same fill now also appears on the ticket, reported in chat
+        cur.execute("""update tickets set fill_qty = 41, fill_price = 971.66,
+                              fill_date = '2026-08-17', state = 'executed' where id = %s""", (tid,))
+        db.commit()
+        assert reconcile.derive_ticket_fills(cur) == [], "the ticket already has its ledger row"
+        db.commit()
+
+        cur.execute("select count(*) from transactions where ticker = 'MU.US'")
+        assert cur.fetchone()[0] == 1
+        cur.execute("select qty from book where ticker = 'MU.US'")
+        assert cur.fetchone()[0] == 41.0, "41 bought, 41 in the book"
+
+
+def test_a_provisional_fill_is_recorded_but_does_not_move_the_book(db, migrated):
+    """Confirmation is the boundary, and this is a deliberate CHANGE from the retired
+    `arming.apply_fills`, which folded provisionals because §4.5 gave Sunday a trueing pass. v1.0
+    has no trueing pass, so a provisional applied here would sit in the book with nothing scheduled
+    to correct it — the wrong direction for a number that sizes real orders."""
+    with db.cursor() as cur:
+        _universe(cur, "RS.US")
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('RS.US','TFSA','momentum',10,419.83,'open')""")
+        _filled_ticket(cur, "RS.US", "sell", 10, 419.83, state="provisional")
+        db.commit()
+
+        made = reconcile.derive_ticket_fills(cur)
+        db.commit()
+        assert len(made) == 1 and "provisional" in made[0], "recorded, and flagged"
+        assert reconcile.apply_unapplied(cur) == [], "and NOT folded"
+        cur.execute("select qty, status from book where ticker = 'RS.US'")
+        assert cur.fetchone() == (10.0, "open"), "the book waits for the confirmation"
+
+
+def test_a_receipt_with_no_ticket_never_lands_in_the_momentum_sleeve(db, migrated):
+    """§3.5 counts held momentum slots. A chat-reported buy folded in as 'momentum' would occupy
+    one of the five without the engine ever having ranked it — a plausible wrong value that does
+    not throw."""
+    with db.cursor() as cur:
+        _universe(cur, "SPMO.US")
+        cur.execute("""insert into transactions (ticker, account, side, qty, price, currency,
+                                                 trade_date, confirmed, confirmed_at, source)
+                       values ('SPMO.US','TFSA','buy',810,155.5,'USD','2026-08-17',
+                               true, now(), 'chat')""")
+        db.commit()
+        assert reconcile.apply_unapplied(cur) != []
+        db.commit()
+        cur.execute("select qty, sleeve from book where ticker = 'SPMO.US'")
+        assert cur.fetchone() == (810.0, "unassigned")
+
+        # and the engine cannot see it, while the brief can
+        import desk
+        assert "SPMO.US" not in desk.held_book(cur)
+        cur.execute("select count(*) from book where status='open' and ticker='SPMO.US'")
+        assert cur.fetchone()[0] == 1
+
+
+def test_the_job_folds_chat_receipts_on_a_night_with_no_manifest(db, migrated, tmp_path):
+    """The nightly path, as the chain runs it — this used to return early and do nothing."""
+    with db.cursor() as cur:
+        _universe(cur, "NUE.US")
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('NUE.US','TFSA','momentum',32,267.715,'open')""")
+        _filled_ticket(cur, "NUE.US", "sell", 32, 266.8111)
+    db.commit()
+    out = subprocess.run([sys.executable, str(ROOT / "src" / "reconcile.py")],
+                         capture_output=True, text=True,
+                         env={"DATABASE_URL": migrated, "DB_SSLMODE": "disable",
+                              "RECONCILE_GLOB": str(tmp_path / "none-*.json"),
+                              "PATH": "/usr/bin:/bin"})
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "1 ticket fill(s) derived" in out.stdout and "1 folded into the book" in out.stdout
+    with db.cursor() as cur:
+        cur.execute("select qty, status from book where ticker = 'NUE.US'")
+        assert cur.fetchone() == (0.0, "closed")

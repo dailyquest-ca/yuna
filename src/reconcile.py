@@ -1,11 +1,18 @@
 """reconcile — §4.1's fifth job. The broker's receipt against the book, post-execution.
 
 §4.3: "Yuna writes rows; Zak's execution is the event; reconcile closes the loop with the receipt."
-This is the loop closing. It reads a manifest Zak exports from Wealthsimple and does two separate
-things that are easy to confuse:
+This is the loop closing. A receipt reaches the system by two routes and this job walks both:
 
-  1. **Folds the fills.** Each receipt becomes a `transactions` row and moves the book. The ticket
-     it settles advances `approved -> executed`.
+  0. **The chat route, and it is the ORDINARY one.** §4.3's write list makes a session the routine
+     way a fill enters: Zak reports it, the session writes `fill_*` onto the ticket, and a JOB
+     derives the ledger row and folds it into the book. `derive_ticket_fills` and `apply_unapplied`
+     are those two halves — restored 2026-08-18 after the ghost-book morning, when a full
+     liquidation reported in chat on the 17th never reached `book` and the next brief proposed a
+     sell Zak had already executed. §6.3 had retired the only jobs that walked this path (the
+     legacy `score` and `fills`, via `arming.sync_fills_from_tickets` / `apply_fills`) and this job
+     replaced only the manifest half.
+  1. **Folds the manifest fills.** Each receipt in a `data/reconcile/` export becomes a
+     `transactions` row and moves the book. The ticket it settles advances `approved -> executed`.
   2. **Compares the positions.** The manifest's position block is what the broker says is there.
      Where it agrees with `book`, the executed tickets advance to `reconciled`. Where it does not,
      the run goes RED and says which name and by how much.
@@ -28,6 +35,7 @@ Manifest shape — the same fill record `data/fills/` already uses, plus a posit
 **Nothing here places, modifies or cancels an order** (§0.2). Every row it writes describes
 something that has already happened.
 """
+import datetime as dt
 import glob
 import json
 import os
@@ -72,13 +80,27 @@ def fold_fill(cur, source, account, f):
         raise SystemExit(f"a fill in {source} has qty {f['qty']!r} — a receipt for no shares is "
                          f"not a receipt")
 
-    cur.execute("""insert into transactions (ticker, account, side, qty, price, currency, fx_rate,
-                                             fees, trade_date, confirmed, confirmed_at,
-                                             broker_ref, source, note)
-                   values (%s,%s,%s,%s,%s,%s,%s,%s,%s,true,now(),%s,%s,%s)
+    # Link the transaction to the ticket it settles. Nothing did this before, and it is the door a
+    # second receipt route walks straight through: `derive_ticket_fills` skips a ticket that
+    # already has a transaction, so an unlinked manifest row would let the SAME fill be derived a
+    # second time from the ticket's own `fill_*` fields and folded into the book twice. Same match
+    # as `settle_tickets` — oldest ticket awaiting a receipt for this (ticker, action).
+    action = "buy" if f["side"] == "buy" else "sell"
+    cur.execute("""select id from tickets
+                    where ticker = %s and action = %s and account = %s and session_date is not null
+                      and state in ('proposed','approved')
+                    order by session_date, id limit 1""",
+                (f["ticker"], action, f.get("account", account)))
+    row = cur.fetchone()
+    ticket_id = row[0] if row else None
+
+    cur.execute("""insert into transactions (ticket_id, ticker, account, side, qty, price,
+                                             currency, fx_rate, fees, trade_date, confirmed,
+                                             confirmed_at, broker_ref, source, note)
+                   values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,now(),%s,%s,%s)
                    on conflict (broker_ref) where broker_ref is not null do nothing
                    returning id""",
-                (f["ticker"], f.get("account", account), f["side"], float(f["qty"]),
+                (ticket_id, f["ticker"], f.get("account", account), f["side"], float(f["qty"]),
                  float(f["price"]), f.get("currency", "USD"), f.get("fx"), float(f.get("fees", 0)),
                  f["trade_date"], f["ref"], source, f.get("note")))
     row = cur.fetchone()
@@ -129,6 +151,89 @@ def apply_to_book(cur, account, f):
                               updated_at = now() where id = %s""", (f["trade_date"], bid))
     else:
         cur.execute("update book set qty = %s, updated_at = now() where id = %s", (left, bid))
+
+
+def derive_ticket_fills(cur):
+    """Tickets carrying a fill but no ledger row -> the `transactions` row they imply.
+
+    **This is the step that went missing, and it is the reason chat-reported trades stopped
+    sticking.** §4.3's write list (2026-08-04) says a session writes TICKETS and never the ledger:
+    it hears a fill from Zak, writes `fill_price`/`fill_qty`/`fill_date` onto the ticket, and a JOB
+    derives the transaction. That job was `arming.sync_fills_from_tickets`, called by the legacy
+    `score` and by `fills` — and §6.3 retired both from the schedule. `reconcile` replaced only the
+    MANIFEST half of the path, so from 2026-08-16 a fill reported in chat landed on a ticket and
+    stopped there: no ledger row, no book movement, and the next morning's brief proposed a sell
+    Zak had already executed.
+
+    Idempotent by the same guard the old pass used: one transaction per ticket, and a ticket that
+    already has one is skipped.
+    """
+    cur.execute("""select k.id, k.ticker, k.account, k.action, k.fill_qty, k.fill_price,
+                          coalesce(k.currency, 'USD'), k.fill_fx, k.fill_fees,
+                          coalesce(k.fill_date, current_date), k.state, k.sleeve
+                     from tickets k
+                    where k.fill_price is not null and k.fill_qty is not null
+                      and k.account is not null
+                      and k.state in ('executed', 'confirmed', 'provisional')
+                      and not exists (select 1 from transactions t where t.ticket_id = k.id)
+                    order by coalesce(k.fill_date, current_date), k.id""")
+    made = []
+    for tid, tk, acct, action, qty, price, ccy, fx, fees, when, state, sleeve in cur.fetchall():
+        # A `provisional` ticket is a fill nobody has confirmed. The ledger row is written either
+        # way — §0.6 keeps the record — but `confirmed` is false, and `apply_unapplied` will not
+        # move the book on it. That IS a change from the retired `apply_fills`, which folded
+        # provisionals deliberately because §4.5 gave Sunday a trueing pass. v1.0 has no trueing
+        # pass, so a provisional applied here would sit in the book with nothing scheduled to
+        # correct it — the wrong direction for a number that sizes real orders.
+        confirmed = state != "provisional"
+        cur.execute("""insert into transactions (ticket_id, ticker, account, side, qty, price,
+                                                 currency, fx_rate, fees, trade_date, confirmed,
+                                                 confirmed_at, source)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id""",
+                    (tid, tk, acct, "sell" if action == "sell" else "buy", float(qty),
+                     float(price), ccy, fx, float(fees or 0), when, confirmed,
+                     dt.datetime.now(dt.timezone.utc) if confirmed else None,
+                     f"ticket {tid} ({state})"))
+        made.append(f"{action} {float(qty):g} {tk} @ {float(price):g} ({acct}, {when}) — "
+                    f"derived from ticket {tid}"
+                    + ("" if confirmed else "  ** provisional: the book waits for confirmation **"))
+    return made
+
+
+def apply_unapplied(cur):
+    """Confirmed ledger rows nobody folded -> the book moved. Returns [labels].
+
+    The other half of the path `arming.apply_fills` used to walk. `applied_at` is the idempotence
+    stamp and it has existed since migration 019 — a re-run finds nothing unapplied and folds
+    nothing twice.
+
+    The sleeve of a NEW position comes from the ticket behind the receipt and is never defaulted.
+    A chat-reported buy folded in as 'momentum' would occupy one of §3.5's five slots without the
+    engine ever having ranked it — a plausible wrong value that does not throw, which is the exact
+    failure this repository exists to avoid. With no ticket behind it the sleeve is `unassigned`:
+    `desk.held_book` reads only 'momentum' so the engine ignores it, and §4.2's payload lists every
+    open position regardless of sleeve, so it reaches the brief for Zak to place.
+    """
+    cur.execute("""select t.id, t.ticket_id, t.ticker, t.account, t.side, t.qty, t.price,
+                          t.currency, t.trade_date, k.sleeve
+                     from transactions t left join tickets k on k.id = t.ticket_id
+                    where t.confirmed and t.applied_at is null and t.side in ('buy','sell')
+                    order by t.trade_date, t.id""")
+    applied = []
+    for txn, ticket, tk, acct, side, qty, price, ccy, when, sleeve in cur.fetchall():
+        apply_to_book(cur, acct, dict(ticker=tk, side=side, qty=float(qty), price=float(price),
+                                      currency=ccy or "USD", trade_date=when,
+                                      sleeve=sleeve or "unassigned"))
+        cur.execute("update transactions set applied_at = now() where id = %s", (txn,))
+        if ticket is not None:
+            # `-> executed` is a fact about the broker and this receipt states it. The advance to
+            # `reconciled` stays with the position block — only the outside witness attests.
+            cur.execute("""update tickets set state = 'executed',
+                                  executed_at = coalesce(executed_at, now()), updated_at = now()
+                            where id = %s and state in ('proposed','approved')""", (ticket,))
+        applied.append(f"{side} {float(qty):g} {tk} @ {float(price):g} ({acct}, {when}) "
+                       f"— folded into the book")
+    return applied
 
 
 def settle_tickets(cur, account, fills):
@@ -214,19 +319,32 @@ def close_the_loop(cur, account):
 def main():
     docs = manifests()
     with connect() as conn, Heartbeat(conn, "reconcile", dry_run=dry()) as hb:
-        if not docs:
-            # Not a failure. §4.4 gauges the AGE of the last reconciliation, and a night with no
-            # export is an ordinary night — the gauge, not this job, is what notices a stale one.
-            hb.detail["manifests"] = 0
-            print("reconcile: no manifest to read — the book stands as it was")
-            with conn.cursor() as cur:
-                cur.execute("select * from v_reconciliation_age")
-                cols = [d[0] for d in cur.description]
-                hb.detail["age"] = {c: str(v) for c, v in zip(cols, cur.fetchone())}
-            return 0
-
         folded, settled, orphans, breaks, closed = [], [], [], [], []
         with conn.cursor() as cur:
+            # The chat route runs FIRST and on manifest-less nights too, because it is the ordinary
+            # path: §4.3 makes a session's report of a fill the routine way a receipt enters the
+            # system, and an export is the exception. Derive the ledger row from the ticket, then
+            # fold every unapplied row into the book — the two halves the retired `score` and
+            # `fills` used to walk.
+            if dry():
+                cur.execute("""select count(*) from tickets k
+                                where k.fill_price is not null and k.fill_qty is not null
+                                  and k.state in ('executed','confirmed','provisional')
+                                  and not exists (select 1 from transactions t
+                                                   where t.ticket_id = k.id)""")
+                pending_tickets = cur.fetchone()[0]
+                cur.execute("""select count(*) from transactions
+                                where confirmed and applied_at is null
+                                  and side in ('buy','sell')""")
+                pending_txns = cur.fetchone()[0]
+                derived = ([f"{pending_tickets} ticket fill(s) would derive a ledger row"]
+                           if pending_tickets else [])
+                chat = ([f"{pending_txns} ledger row(s) would fold into the book"]
+                        if pending_txns else [])
+            else:
+                derived = derive_ticket_fills(cur)
+                chat = apply_unapplied(cur)
+
             for name, doc in docs:
                 account = doc.get("account", "TFSA")
                 fills = doc.get("fills", [])
@@ -258,9 +376,10 @@ def main():
             if not dry():
                 conn.commit()
 
-        hb.rows = len(folded)
+        hb.rows = len(folded) + len(derived) + len(chat)
         hb.detail.update(manifests=[n for n, _ in docs], folded=folded, settled=settled,
-                         orphan_fills=orphans, breaks=breaks, reconciled=closed)
+                         orphan_fills=orphans, breaks=breaks, reconciled=closed,
+                         ticket_fills_derived=derived, book_folds=chat)
         with conn.cursor() as cur:
             cur.execute("select * from v_reconciliation_age")
             cols = [d[0] for d in cur.description]
@@ -276,9 +395,18 @@ def main():
                    + "; ".join(f"{b['ticker']} broker={b['broker']} book={b['book']}"
                                for b in breaks))
 
-        print(f"reconcile: {len(folded)} receipt(s) · {len(settled)} ticket(s) executed · "
+        if not docs and not derived and not chat:
+            # Not a failure. §4.4 gauges the AGE of the last reconciliation, and a night with no
+            # export and nothing reported in chat is an ordinary night — the gauge, not this job,
+            # is what notices a stale one.
+            print("reconcile: nothing to fold — no manifest, no ticket fill, no unapplied "
+                  "receipt. The book stands as it was.")
+            return 0
+
+        print(f"reconcile: {len(derived)} ticket fill(s) derived · {len(chat)} folded into the "
+              f"book · {len(folded)} manifest receipt(s) · {len(settled)} ticket(s) executed · "
               f"{len(closed)} reconciled · {len(breaks)} break(s)")
-        for line in folded + settled + orphans + closed:
+        for line in derived + chat + folded + settled + orphans + closed:
             print(f"  {line}")
         for b in breaks:
             print(f"  BREAK {b['ticker']:<10} broker={b['broker']} book={b['book']} — {b['why']}")
