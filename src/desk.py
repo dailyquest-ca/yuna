@@ -261,17 +261,32 @@ def sheet(cur, as_of, nav):
                 underweight.append(dict(ticker=tk, rank=rank_of[tk], value=value, slot=slot,
                                         short=slot - value, pct_of_slot=value / slot))
 
-    # The park funds the buys, and only then. §6.5: "all five slots fill from the first live
-    # ranking in one session" — the capital for that is the §6.1(3) bridge, so at seed the bridge
-    # is sold and the five are bought in the same session. While the gate is OFF the opposite
-    # holds: §3.4 sends proceeds TO the park and buys nothing, so selling it would move the money
-    # into cash to sit there. Hence the condition — sold when, and only when, something buys it.
+    # The park funds the buys, and only then. §3.4 sends every exit's proceeds TO the park while the
+    # gate is OFF and buys nothing, so a sell there would move the money into cash to sit; on the ON
+    # latch the reverse runs and the park pays for the slots. §6.5 is the same trade at the start:
+    # "all five slots fill from the first live ranking in one session", funded by the §6.1(3) bridge.
     #
-    # The condition reads the ORDERS, not `buy_tk`. A name in the fill band whose slot the account
-    # already holds emits no buy — that is the top-up rule above — so a sheet can name buys and
-    # order none, and funding those would sell the bridge to pay for nothing.
+    # Three conditions, and each one has cost something to learn:
+    #
+    #   gate_on          §3.4. Selling the park while gated off is selling the place the plan puts
+    #                    the money.
+    #   a real buy       reads the ORDERS, not `buy_tk`. A name in the fill band whose slot the
+    #                    account already holds emits no buy — the top-up rule above — so a sheet can
+    #                    name buys and order none, and funding those sells the bridge to pay for
+    #                    nothing.
+    #   phase0_done      §6.5 gates the seed on "shadow passed · pipeline green · gate ON · Zak's
+    #                    seed ruling in chat", and the shadow stands at 2 of 10. Without this the
+    #                    first sheet after the account filter landed would have written a LIVE
+    #                    ticket to sell 810 shares of the bridge, eight sessions early, with §6.5's
+    #                    own conditions unmet. The engine proposing it is not the same as Zak
+    #                    executing it, but a proposal is what he acts on.
+    #
+    # `passes` is §6.4's condition verbatim and it clears itself, so this needs no ruling to remove.
+    # No attestations at all reads as not-passed: "no record" is not "passed" (§4.4's habit).
+    cur.execute("select coalesce((select passes from v_shadow_progress), false)")
+    phase0_done = bool(cur.fetchone()[0])
     funding = []
-    if parked and gate_on and any(o["action"] == "buy" for o in orders):
+    if parked and gate_on and phase0_done and any(o["action"] == "buy" for o in orders):
         for tk, qty in sorted(parked.items()):
             # Priced by its own query, like `marked_equity`: the park is not in §3.2's universe, so
             # it has no column on the loaded tape and never will.
@@ -290,7 +305,7 @@ def sheet(cur, as_of, nav):
                 gate_green=bool(green), index_close=float(index_px[i]), index_sma=sma, nav=nav,
                 universe=len(tickers), ranked=len(ranked), screened=screened,
                 marked_equity=equity, unpriced=unpriced, underweight=underweight,
-                parked=sorted(parked), parked_qty=parked,
+                parked=sorted(parked), parked_qty=parked, phase0_done=phase0_done,
                 held=sorted(held), unranked=unranked,
                 top=[tickers[j] for j in ranked[:engine.FILL_BAND]], orders=orders,
                 ranks=[dict(ticker=tickers[j], rank=r, score=scores.get(tickers[j]),
@@ -308,6 +323,9 @@ def render(s):
     if s.get("parked"):
         out.append("parked: " + ", ".join(f"{t} {s['parked_qty'][t]:,.0f}" for t in s["parked"])
                    + "   (engine capital, not a slot — never sold for failing to rank)")
+        if not s.get("phase0_done"):
+            out.append("        held: §6.5 converts this at the seed, and the shadow has not"
+                       " passed yet. Not funding tonight's buys.")
     out.append("")
     if not s["orders"]:
         out.append("**no orders tonight** — the book already matches the rank")

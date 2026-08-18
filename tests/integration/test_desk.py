@@ -210,6 +210,16 @@ def _park(cur, days, ticker="SPMO.US", qty=810, px=155.5):
                    values (%s,'TFSA','reserve',%s,%s,'open')""", (ticker, qty, px))
 
 
+def _shadow_passed(cur, days):
+    """§6.4's pass: ten sessions, every divergence ruled. `v_shadow_progress.passes` reads it, and
+    §6.5 will not convert the park until it is true."""
+    for d in days[-10:]:
+        for what in ("gate", "rank"):
+            cur.execute("""insert into shadow_attestations (session_date, compared, matched)
+                           values (%s, %s, true)
+                           on conflict (session_date, compared) do nothing""", (d, what))
+
+
 def test_the_park_is_never_sold_for_failing_to_rank(db, migrated):
     """The defect that came in with the account filter, as an assertion.
 
@@ -244,6 +254,7 @@ def test_the_park_funds_the_seed_when_the_gate_is_on(db, migrated):
     with db.cursor() as cur:
         days = _world(cur)                        # gate ON, empty book: five buys
         _park(cur, days)
+        _shadow_passed(cur, days)
     db.commit()
     with db.cursor() as cur:
         s = desk.sheet(cur, days[-1], 200_000.0)
@@ -261,6 +272,7 @@ def test_the_park_is_not_sold_when_nothing_actually_buys(db, migrated):
     with db.cursor() as cur:
         days = _world(cur)
         _park(cur, days)
+        _shadow_passed(cur, days)
         # the whole top five already held at full weight: 200,000 / 5 = 40,000 a slot, and these
         # names trade near $90, so 1,000 shares is comfortably over one slot
         for t in ("N00.US", "N01.US", "N02.US", "N03.US", "N04.US"):
@@ -316,3 +328,31 @@ def test_a_buy_nets_against_a_line_the_account_already_holds(db, migrated):
     assert max(0, int(target - 20)) == target - 20
     assert max(0, int(target - target)) == 0, "a slot already at weight orders nothing"
     assert max(0, int(target - (target + 5))) == 0, "and one above it never orders negative"
+
+
+def test_the_bridge_is_held_until_the_shadow_passes(db, migrated):
+    """Production's exact state on 2026-08-18, and the accident it would have been.
+
+    The gate reads ON, the book holds 810 shares of the §6.1(3) bridge, and three of §3.5's five
+    slots are free — so the sheet names buys and the bridge is what pays for them. But the shadow
+    stands at 2 of 10, and §6.5 gates the seed on "shadow passed · pipeline green · gate ON · Zak's
+    seed ruling in chat". Without this condition the first sheet after the account filter landed
+    would have written a LIVE ticket to sell the bridge, eight sessions early.
+
+    `v_shadow_progress.passes` is §6.4's own condition, so this clears itself when Phase 0 finishes
+    and needs no ruling to remove. It fails closed: no attestations at all is not a pass.
+    """
+    with db.cursor() as cur:
+        days = _world(cur)                            # gate ON, free slots, so buys exist
+        _park(cur, days)
+        cur.execute("select count(*) from shadow_attestations")
+        assert cur.fetchone()[0] == 0, "the shadow has attested nothing — the state to fail closed on"
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+
+    assert s["gate"] == "ON" and s["phase0_done"] is False
+    assert [o for o in s["orders"] if o["action"] == "buy"], "the buys still stand"
+    assert not [o for o in s["orders"] if o["clause"] == "fund"], "and the bridge is not sold"
+    assert "SPMO.US" not in [o["ticker"] for o in s["orders"]]
+    assert "§6.5 converts this at the seed" in desk.render(s), "and the sheet says why"
