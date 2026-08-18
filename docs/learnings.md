@@ -437,3 +437,21 @@ is `roadmap-2026-07-31.md`.
     **When you add a filter to one query, grep for every other query over the same table** — and
     say out loud which ones you deliberately left alone and why (`max(trade_date)` does not move
     when a row is superseded; `not exists (... ticket_id)` is still true afterwards).
+56. **Two renderers of one decision drift, and the one that reaches the human is the one nobody
+    tests.** `desk.render` and `brief.py` both describe the same sheet, and after the park split the
+    sheet was correct while the brief told Zak that 810 shares of the Phase-0 bridge were queued to
+    sell — because `book_lines` printed one note for every unranked holding, and "unranked" had
+    silently become two different things. The engine's own output was right; the message was wrong;
+    and only the message is read. The same session found the underweight slots rendered on the
+    sheet and absent from the brief — the one item with nothing to execute, so the order sheet was
+    the wrong home for it in the first place. **After changing what the engine decides, read the
+    words it sends** — and when a fact has two renderers, give the human-facing one its own tests.
+57. **A withdrawn proposal is not an order, and a gauge that counts it describes a sheet nobody is
+    executing.** §4.3 makes the nightly sheet the only source of engine orders and a re-score
+    cancels what it no longer stands behind, so `cancelled` tickets had to leave every gauge query
+    — and did not. Production showed it the same hour: the account filter withdrew two buy tickets
+    and `check` went on reporting "5 buy ticket(s) carry no quantity" against three real ones. The
+    count is the harmless half. The sizing check re-derives §3.5's arithmetic per ticket, so a stale
+    quantity on a retracted proposal goes RED, and §4.4 makes red hold the buys — **a correct sheet
+    held on the strength of an incorrect one nobody was being asked to execute.** When a table gains
+    a "this row no longer counts" state, the sweep includes the gauges, not just the arithmetic.
