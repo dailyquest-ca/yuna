@@ -421,3 +421,63 @@ def test_no_underweight_section_when_every_slot_is_at_weight(db, migrated):
         _score(cur, days)
         db.commit()
         assert brief.underweight_lines(brief.payload(cur)) == []
+
+
+def test_a_position_with_no_mark_is_not_priced_at_zero(db, migrated):
+    """VXC.TO, as production had it: no bars in this store, so `last_close` is null — and the brief
+    rendered `float(None or 0)` as "last 0.00   P/L +0.0%".
+
+    A price the position does not have and a return it has not earned, in the one document Zak reads
+    numbers off. A dash cannot be mistaken for a fact; a zero can, and it also happens to be the
+    most flattering possible lie about a loss.
+    """
+    with db.cursor() as cur:
+        days = _world(cur)
+        cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                       values ('VXC.TO','VXC','etf','CAD','active')""")
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,currency,status)
+                       values ('VXC.TO','NONREG','levered',140,85.45,'CAD','open')""")
+        _score(cur, days)
+        db.commit()
+        lines = "\n".join(brief.book_lines(brief.payload(cur)))
+
+    vxc = [ln for ln in lines.splitlines() if "VXC.TO" in ln][0]
+    assert "0.00" not in vxc.split("@")[1], f"no fabricated price or P/L: {vxc}"
+    assert "no mark" in lines and "NOT in the marked equity" in lines
+
+
+def test_a_holding_outside_the_engines_account_is_not_said_to_be_queued(db, migrated):
+    """§2.1 puts the engine in the TFSA "and nowhere else". A NONREG or RRSP position is unranked
+    because the engine does not rank it — not because §3.5 is about to sell it. Saying otherwise
+    tells Zak the engine is queuing 140 shares of the levered layer it has no authority over."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                       values ('VXC.TO','VXC','etf','CAD','active')""")
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,currency,status)
+                       values ('VXC.TO','NONREG','levered',140,85.45,'CAD','open')""")
+        _score(cur, days)
+        db.commit()
+        lines = "\n".join(brief.book_lines(brief.payload(cur)))
+
+    assert "§2.1 puts the engine in the TFSA and nowhere else" in lines
+    assert "§3.5 treats as below 12" not in lines, "the engine does not queue what it cannot trade"
+
+
+def test_the_underweight_ruling_is_named_even_before_the_nav_lands(db, migrated):
+    """The shortfall's arithmetic needs the slot size and the slot size needs the NAV — but the FACT
+    does not wait: a ranked holding at a fraction of a slot occupies that slot whatever the NAV turns
+    out to be. Staying silent until `config.engine_nav` is set hides the ruling behind the very
+    thing it is waiting on, which is how production looked on 2026-08-18."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','preseed',20,40.0,'open')""")
+        _score(cur, days)
+        db.commit()
+        p = brief.payload(cur)
+        p["nav"] = dict(p["nav"] or {}, engine_nav=None)     # the state the board was actually in
+        lines = "\n".join(brief.underweight_lines(p))
+
+    assert "pending an engine NAV" in lines and "N00.US" in lines
+    assert "config.engine_nav" in lines and "Zak's (§0.3)" in lines

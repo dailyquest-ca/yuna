@@ -113,14 +113,30 @@ def book_lines(p):
     out = []
     for b in rows:
         rank = f"{b['rank']:>3}" if b.get("rank") is not None else "  —"
+        # A missing mark is printed as MISSING, not as zero. `last_close` is null for VXC.TO — the
+        # TSX line has no bars in this store — and `float(None or 0)` rendered that as "last 0.00
+        # P/L +0.0%": a price the position does not have and a return it has not earned, in the one
+        # document Zak reads numbers off. A dash cannot be mistaken for a fact.
+        last = f"{float(b['last_close']):>10,.2f}" if b.get("last_close") is not None else "         —"
+        pnl = f"{float(b['pnl_pct']):>+6.1f}%" if b.get("pnl_pct") is not None else "      —"
         out.append(f"  {b['ticker']:<10} {float(b['qty']):>8,.0f} @ {float(b['avg_cost']):>10,.2f}"
-                   f"   last {float(b['last_close'] or 0):>10,.2f}"
-                   f"   P/L {float(b['pnl_pct'] or 0):>+6.1f}%   rank {rank}   {b['sleeve']}")
+                   f"   last {last}   P/L {pnl}   rank {rank}"
+                   f"   {b.get('account') or '?'}/{b['sleeve']}")
+        if b.get("last_close") is None:
+            out.append("      ** no mark: this position is not priced in this store, so it is NOT "
+                       "in the marked equity below **")
         if b.get("rank") is not None:
             continue
+        # Three reasons a holding has no rank, and they mean three different things. Printing one
+        # note for all of them told Zak the engine was about to sell 810 shares of the Phase-0
+        # bridge and 140 of the levered layer, neither of which it has any authority over.
         if b["ticker"] in desk.PARKED:
             out.append("      park — engine capital, never a slot and never sold for failing to "
                        "rank (§3.4, §6.1(3))")
+        elif (b.get("account") or desk.ENGINE_ACCOUNT) != desk.ENGINE_ACCOUNT:
+            out.append(f"      {b.get('account')} — §2.1 puts the engine in the "
+                       f"{desk.ENGINE_ACCOUNT} and nowhere else; the engine neither ranks nor "
+                       f"trades this")
         else:
             out.append("      ** no rank: this holding is outside §3.2's universe, which §3.5 "
                        "treats as below 12 **")
@@ -139,13 +155,27 @@ def underweight_lines(p):
     this is the thing there is nothing to execute about: at the seed it decides how much of the
     account actually gets deployed, and a line nobody sees is a decision nobody makes.
     """
+    ranked = [b for b in p["book"] or []
+              if b.get("rank") is not None and b["ticker"] not in desk.PARKED
+              and b.get("last_close") is not None
+              and (b.get("account") or desk.ENGINE_ACCOUNT) == desk.ENGINE_ACCOUNT]
     nav = (p.get("nav") or {}).get("engine_nav")
     if not nav:
-        return []
+        # The shortfall needs a slot size and the slot size needs the NAV, so the arithmetic waits.
+        # The FACT does not: a ranked holding at a fraction of a slot occupies that slot whatever
+        # the NAV turns out to be, and saying nothing until the NAV lands hides the ruling behind
+        # the thing it is waiting on.
+        if not ranked:
+            return []
+        return ["", "## Held below §3.5's equal weight — pending an engine NAV",
+                "  " + ", ".join(f"{b['ticker']} ({float(b['qty']):g} sh, rank {b['rank']})"
+                                 for b in ranked),
+                "  These occupy §3.5 slots. Whether each is AT its weight cannot be computed until",
+                "  `config.engine_nav` is set — the slot is NAV/5. §3.5 fills FREE slots and keeps a",
+                "  held name rather than re-buying it, so a partial line holds a whole slot and the",
+                "  rest of that capital stays parked. **The ruling is Zak's (§0.3).**"]
     slot, short = float(nav) / engine.SLOTS, []
-    for b in p["book"] or []:
-        if b.get("rank") is None or b["ticker"] in desk.PARKED or not b.get("last_close"):
-            continue
+    for b in ranked:
         value = float(b["qty"]) * float(b["last_close"])
         if value < slot:
             short.append((b["ticker"], b["rank"], value, slot - value, value / slot))
