@@ -114,13 +114,19 @@ def apply_freeze(s, frozen, words):
     engine is not proposing those buys, so writing them would put a row in front of him that his
     own word has already refused.
 
-    Every sell survives untouched. §5.4: exits are protective-direction and are never blocked, "not
-    by freeze, not by amber, not by any throttle" — the clause names the freeze first.
+    Every PROTECTIVE sell survives untouched. §5.4: exits are protective-direction and are never
+    blocked, "not by freeze, not by amber, not by any throttle" — the clause names the freeze first.
+
+    The `fund` sell is the exception, and it goes with the buys it belongs to. It is not an exit:
+    §6.5 emits it to turn the Phase-0 bridge into the five slots, so it is the cash leg of a buy
+    rather than a protective action. Left standing on a frozen sheet it would sell the bridge to
+    fund nothing, moving the capital §6.5 is holding into cash on the strength of Zak's instruction
+    to stop buying. §5.5 sends proceeds to the park; it does not empty it.
     """
     if not frozen:
         return s
-    kept = [o for o in s["orders"] if o["action"] != "buy"]
-    dropped = [o["ticker"] for o in s["orders"] if o["action"] == "buy"]
+    kept = [o for o in s["orders"] if o["action"] != "buy" and o["clause"] != "fund"]
+    dropped = [o["ticker"] for o in s["orders"] if o["action"] == "buy" or o["clause"] == "fund"]
     return dict(s, orders=kept, frozen=True, freeze_words=words, frozen_buys=dropped)
 
 

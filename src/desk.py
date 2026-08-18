@@ -75,10 +75,46 @@ def load(cur, as_of):
     return sessions, tickers, adj, raw, dv, index_px
 
 
-def held_book(cur):
-    """The momentum sleeve's open positions. §2.1 puts the engine in the TFSA and nowhere else."""
-    cur.execute("""select ticker, qty from book
-                    where status = 'open' and sleeve = 'momentum' order by ticker""")
+# §2.1's table, verbatim: "TFSA | **The engine** | The engine's five names (+ park when gated
+# off)". The account IS the allocation — "there are no percentage targets" — so everything in the
+# TFSA is the engine's to manage, and nothing outside it ever is.
+ENGINE_ACCOUNT = "TFSA"
+
+# The two instruments that hold engine capital WITHOUT being an engine slot, each named by the plan
+# and neither inferred:
+#
+#   SPY.US   §8, glossary: "Park — SPY.US, where engine capital sits while gated off." §3.4 sends
+#            every exit's proceeds here while the gate reads OFF.
+#   SPMO.US  §6.1(3): "TFSA proceeds → SPMO (bridge)", and §6.5: "capital holds in SPMO until the
+#            first ON latch, then seeds." A Phase-0 instrument with an end date, not a park.
+#
+# The distinction is not cosmetic. Both sit in the TFSA, so the account filter above picks them up;
+# neither is a `.US` common stock in §3.2's universe, so neither can ever be ranked; and §3.5 sells
+# what it cannot rank. Left in the ranked book, the engine proposes selling 810 shares of the
+# Phase-0 bridge every single night — moving the capital §6.5 is holding for the seed into cash,
+# for the reason that it failed to appear in a stock screen it was never eligible for.
+PARKED = (engine.PARK, "SPMO.US")
+
+
+def held_book(cur, account=ENGINE_ACCOUNT):
+    """Everything the engine holds. §2.1 puts it in the TFSA and gives it the whole account.
+
+    Filtered by ACCOUNT, not by sleeve, and that is a correction. The sleeve filter was inherited
+    from the machine v1.0 replaced, which ran three sleeves side by side and had to tell them
+    apart. v1.0 has one engine and §2.1 hands it one account, so a sleeve label decides nothing —
+    and while it did, it decided something badly: 20 shares of AXTI and 2 of MU sat in the TFSA
+    tagged `preseed`, invisible to the engine, while AXTI and MU ranked 2nd and 3rd in its own top
+    twelve. The seed would have sized a full NAV/5 slot in each as though none were held.
+
+    A position the engine cannot see is one it can never sell, never count against §3.5's five
+    slots, and never net against a buy. There is no label that makes that safe.
+
+    Zak, 2026-08-18: *"the momentum play should view the whole book and make a plan for how to
+    adjust it to meet the goal portfolio."* This is the whole book; `sheet` splits the park off it.
+    """
+    cur.execute("""select ticker, sum(qty) from book
+                    where status = 'open' and account = %s
+                    group by ticker having sum(qty) > 0 order by ticker""", (account,))
     return {r[0]: float(r[1]) for r in cur.fetchall()}
 
 
@@ -139,7 +175,13 @@ def sheet(cur, as_of, nav):
         base = float(adj[i - engine.SKIP, j] / adj[i - engine.FORMATION, j] - 1.0)
         scores[tickers[j]] = base / vol if vol > 0 else None
 
-    held = held_book(cur)
+    book = held_book(cur)
+    # The park comes out of the ranked book before anything else looks at it. It is engine capital
+    # and it is not an engine slot: it never counts against §3.5's five, never displaces a name, and
+    # above all is never sold for failing to rank — see PARKED for why that last one is not a
+    # hypothetical. What it IS, when the gate is ON, is where the money for the buys comes from.
+    parked = {t: q for t, q in book.items() if t in PARKED}
+    held = {t: q for t, q in book.items() if t not in PARKED}
     # A holding that has left the universe entirely — delisted, or newly excluded — has no column
     # and cannot be ranked. §3.5 queues anything below rank 12, and "not ranked at all" is below it.
     held_cols = [tickers.index(t) for t in held if t in rank_of]
@@ -172,16 +214,68 @@ def sheet(cur, as_of, nav):
     for tk in buy_tk:
         j = tickers.index(tk)
         px = float(raw[i, j])
-        qty = engine.position_size(nav, px) if nav else None
         addv = float(addv_row[j])
+        # §3.5 sizes the SLOT at NAV/5; the ORDER is the slot less whatever the account already
+        # holds of that name. The two were the same number for as long as a buy only ever opened an
+        # empty slot, and they stop being the same the moment the book holds a partial line — which
+        # it does today: 20 shares of AXTI and 2 of MU against ranks 2 and 3. Ordering a full slot
+        # on top of those would buy the position twice and overshoot the weight §3.5 fixes.
+        target = engine.position_size(nav, px) if nav else None
+        already = held.get(tk, 0.0)
+        qty = max(0, int(target - already)) if target is not None else None
+        if qty == 0:
+            continue                       # the slot is already at or above its §3.5 weight
         orders.append(dict(action="buy", ticker=tk, qty=qty, rank=rank_of.get(tk),
-                           mark=px, addv=addv, clause="fill", why="fill",
+                           mark=px, addv=addv, clause="fill", why="fill", already_held=already,
                            participation_ok=engine.participation_ok(qty, px, addv) if qty else None))
-    equity, unpriced = marked_equity(cur, held, sessions[i])
+    # §3.5's slot is a WEIGHT — "Slots: 5, equal weight" — and a slot held at a fraction of that
+    # weight is not equal weight. The engine has no rule for it because until now a slot was only
+    # ever empty or full: a name is bought at exactly NAV/5 and never bought again, so a partial
+    # line can only arrive from OUTSIDE the engine. Two have (AXTI and MU, from the pre-seed buys).
+    #
+    # Reported, not acted on. Topping up a kept holding would be a rebalance rule, and rebalancing
+    # a momentum book trims winners — the one thing the strategy must not do. §0.3 makes the weight
+    # rule Zak's, so the shortfall is a line in the brief and not a silent order.
+    underweight = []
+    if nav:
+        for tk in sorted(held):
+            if tk not in rank_of:
+                continue
+            j = tickers.index(tk)
+            if not np.isfinite(raw[i, j]):
+                continue
+            value = held[tk] * float(raw[i, j])
+            slot = nav / engine.SLOTS
+            if value < slot:
+                underweight.append(dict(ticker=tk, rank=rank_of[tk], value=value, slot=slot,
+                                        short=slot - value, pct_of_slot=value / slot))
+
+    # The park funds the buys, and only then. §6.5: "all five slots fill from the first live
+    # ranking in one session" — the capital for that is the §6.1(3) bridge, so at seed the bridge
+    # is sold and the five are bought in the same session. While the gate is OFF the opposite
+    # holds: §3.4 sends proceeds TO the park and buys nothing, so selling it would move the money
+    # into cash to sit there. Hence the condition — sold when, and only when, something buys it.
+    funding = []
+    if parked and buy_tk and gate_on:
+        for tk, qty in sorted(parked.items()):
+            # Priced by its own query, like `marked_equity`: the park is not in §3.2's universe, so
+            # it has no column on the loaded tape and never will.
+            cur.execute("""select close from prices where ticker = %s and d <= %s
+                            order by d desc limit 1""", (tk, sessions[i]))
+            row = cur.fetchone()
+            mark = float(row[0]) if row and row[0] is not None else None
+            funding.append(dict(action="sell", ticker=tk, qty=qty, rank=None, mark=mark,
+                                clause="fund", why="funds the seed (§6.5)"))
+        # Sells before buys (§3.5), and the funding sell is the first of them: the cash has to
+        # exist before the buys it pays for.
+        orders = funding + orders
+
+    equity, unpriced = marked_equity(cur, book, sessions[i])
     return dict(session=sessions[i], gate="ON" if gate_on else "OFF", gate_on=gate_on,
                 gate_green=bool(green), index_close=float(index_px[i]), index_sma=sma, nav=nav,
                 universe=len(tickers), ranked=len(ranked), screened=screened,
-                marked_equity=equity, unpriced=unpriced,
+                marked_equity=equity, unpriced=unpriced, underweight=underweight,
+                parked=sorted(parked), parked_qty=parked,
                 held=sorted(held), unranked=unranked,
                 top=[tickers[j] for j in ranked[:engine.FILL_BAND]], orders=orders,
                 ranks=[dict(ticker=tickers[j], rank=r, score=scores.get(tickers[j]),
@@ -196,18 +290,34 @@ def render(s):
            f"universe {s['universe']} · ranked {s['ranked']} · {nav}", ""]
     out.append("top 12: " + ", ".join(f"{t}" for t in s["top"]))
     out.append("held:   " + (", ".join(s["held"]) if s["held"] else "(nothing)"))
+    if s.get("parked"):
+        out.append("parked: " + ", ".join(f"{t} {s['parked_qty'][t]:,.0f}" for t in s["parked"])
+                   + "   (engine capital, not a slot — never sold for failing to rank)")
     out.append("")
     if not s["orders"]:
         out.append("**no orders tonight** — the book already matches the rank")
     for o in s["orders"]:
         if o["action"] == "sell":
-            out.append(f"  SELL {o['ticker']:<10} qty {o['qty'] or 0:>10,.0f}   "
+            out.append(f"  SELL {o['ticker']:<10} qty {o['qty'] or 0:>10,.4g}   "
                        f"rank {o['rank'] or '—'}   ({o['why']})")
         else:
             qty = f"{o['qty']:>10,.0f}" if o["qty"] else "         —"
             warn = "" if o["participation_ok"] is not False else "   ** EXCEEDS 0.98 ADDV **"
             out.append(f"  BUY  {o['ticker']:<10} qty {qty}   "
                        f"rank {o['rank']}   mark {o['mark']:,.2f}{warn}")
+    if s.get("underweight"):
+        out.append("")
+        out.append("held below §3.5's equal weight — reported, not ordered:")
+        for u in s["underweight"]:
+            out.append(f"    {u['ticker']:<10} rank {u['rank']:<3} "
+                       f"{u['value']:>12,.2f} of a {u['slot']:,.2f} slot "
+                       f"({u['pct_of_slot']:.0%}) — short {u['short']:,.2f}")
+        out.append("    §3.5 sizes a slot at NAV/5 and has no top-up rule: a name is bought once,"
+                   " at weight,")
+        out.append("    and never bought again. A partial line can only come from outside the"
+                   " engine, and")
+        out.append("    topping one up is a rebalance — which on a momentum book means trimming"
+                   " winners. Zak's (§0.3).")
     out += ["", "Zak executes at the open: sells first, then buys (§3.5). "
                 "Nothing here has been ordered."]
     return "\n".join(out)

@@ -55,31 +55,35 @@ def apply_fills(conn, hb):
         for (tid, tk, acct, side, qty, price, ccy, tdate, step, ticket_id, sleeve, theme,
              stop, stop_limit, pivot, target_qty) in rows:
             qty, price = float(qty), float(price)
-            cur.execute("""select id, qty, avg_cost, pyramid_step from book
+            if side == "confirm":
+                # A `confirm` row restates a share count the book already holds — R4's opening
+                # balances, and since migration 059 the way a position older than the ledger enters
+                # it. It moves nothing. Without this it fell through to the `else` below and was
+                # folded as a SELL, closing the position it existed to establish. `cash_by_account`
+                # has always excluded it for the same reason; this loop never learned.
+                cur.execute("update transactions set applied_at=now() where id=%s", (tid,))
+                continue
+            # **Quantity is no longer this loop's business.** Since migration 059 the ledger owns
+            # it: `ledger_moves_the_book` recomputed the position the moment the transaction was
+            # inserted, so by the time this runs the book already holds the right number of shares
+            # and the position is already open or already closed. Adding the same fill again here
+            # doubled a buy and subtracted a sell twice.
+            #
+            # What is left is the metadata the ledger cannot know — a stop is not a fact about a
+            # trade — and that is what this loop now does. It belongs to §3.2's retired apparatus
+            # (v1.0 has no stops and no pyramids), which is why it survives here and nowhere newer.
+            cur.execute("""select id, qty, trail_mode from book
                            where ticker=%s and account=%s and status='open'""", (tk, acct))
             held = cur.fetchone()
-            if side == "buy":
-                if held:
-                    bid, bqty, bcost, bstep = held
-                    new_qty = float(bqty) + qty
-                    new_cost = (float(bqty) * float(bcost) + qty * price) / new_qty
-                    cur.execute("""update book set qty=%s, avg_cost=%s,
-                                     pyramid_step=greatest(pyramid_step, coalesce(%s, pyramid_step)),
-                                     pyramid_stalled_since = case
-                                       when greatest(pyramid_step, coalesce(%s, pyramid_step)) >= 3
-                                       then null else pyramid_stalled_since end,
-                                     adds_12m = adds_12m + case when %s then 1 else 0 end,
-                                     last_add_at = case when %s then %s else last_add_at end,
-                                     updated_at=now() where id=%s""",
-                                (new_qty, new_cost, step, step, sleeve == "compounders",
-                                 sleeve == "compounders", tdate, bid))
-                else:
-                    # §3.2: "Initial: higher of the base's final-contraction low, or entry − 8%.
-                    # Never wider than 8%." A ticket the machine armed carries that stop already.
-                    # A fill with no ticket behind it — Zak's own trade, reconciled later (R4) —
-                    # carries none, and the ratchet only ever moves an EXISTING stop upward: the
-                    # position would have opened unprotected and stayed that way, with nothing on
-                    # the stop sheet and nothing for §4.6's broker GTC to mirror.
+            if side == "buy" and held:
+                bid, bqty, trail = held
+                if trail is None:
+                    # A bare row: the ledger opened it and knows nothing about stops. §3.2:
+                    # "Initial: higher of the base's final-contraction low, or entry − 8%. Never
+                    # wider than 8%." A ticket the machine armed carries that stop already; a fill
+                    # with no ticket behind it — Zak's own trade, reconciled later (R4) — carries
+                    # none, and the ratchet only ever moves an EXISTING stop upward, so the position
+                    # would have opened unprotected and stayed that way.
                     if stop is None and (sleeve or "momentum") == "momentum":
                         cur.execute("select base_low from candidates where ticker=%s", (tk,))
                         base = cur.fetchone()
@@ -88,27 +92,26 @@ def apply_fills(conn, hb):
                                                float(base[0]) if base and base[0] else None,
                                                max_stop=max_stop)
                         stop_limit = stop * (1 - float(config(cur, "stop_limit_buffer", 0.03)))
-                    cur.execute("""insert into book(ticker,account,sleeve,lot,qty,avg_cost,currency,
-                                     opened_at,stop,stop_limit,highest_close,trail_mode,
-                                     pyramid_step,theme,pivot,target_qty,
-                                     pyramid_stalled_since,status)
-                                   values (%s,%s,%s,'core',%s,%s,%s,%s,%s,%s,%s,'initial',%s,%s,
-                                           %s,%s,%s,'open')""",
-                                # the stall clock starts at entry: §3.2 gives a pyramid four weeks
-                                # to reach full size, and nothing was starting it before
-                                (tk, acct, sleeve or "momentum", qty, price, ccy or "USD", tdate,
-                                 stop, stop_limit, price, step or 1, theme, pivot, target_qty,
-                                 tdate if (sleeve or "momentum") == "momentum" else None))
-            else:
-                if held:
-                    bid, bqty, _, _ = held
-                    left = float(bqty) - qty
-                    if left <= 1e-6:
-                        cur.execute("""update book set qty=0, status='closed', closed_at=%s,
-                                       updated_at=now() where id=%s""", (tdate, bid))
-                    else:
-                        cur.execute("update book set qty=%s, updated_at=now() where id=%s",
-                                    (left, bid))
+                    # the stall clock starts at entry: §3.2 gives a pyramid four weeks to reach full
+                    # size, and nothing was starting it before
+                    cur.execute("""update book set sleeve=%s, lot='core', stop=%s, stop_limit=%s,
+                                     highest_close=%s, trail_mode='initial', pyramid_step=%s,
+                                     theme=%s, pivot=%s, target_qty=%s, opened_at=%s,
+                                     pyramid_stalled_since=%s, updated_at=now() where id=%s""",
+                                (sleeve or "momentum", stop, stop_limit, price, step or 1, theme,
+                                 pivot, target_qty, tdate,
+                                 tdate if (sleeve or "momentum") == "momentum" else None, bid))
+                else:
+                    cur.execute("""update book set
+                                     pyramid_step=greatest(pyramid_step, coalesce(%s, pyramid_step)),
+                                     pyramid_stalled_since = case
+                                       when greatest(pyramid_step, coalesce(%s, pyramid_step)) >= 3
+                                       then null else pyramid_stalled_since end,
+                                     adds_12m = adds_12m + case when %s then 1 else 0 end,
+                                     last_add_at = case when %s then %s else last_add_at end,
+                                     updated_at=now() where id=%s""",
+                                (step, step, sleeve == "compounders", sleeve == "compounders",
+                                 tdate, bid))
             cur.execute("update transactions set applied_at=now() where id=%s", (tid,))
             if ticket_id:
                 cur.execute("""update tickets set state='provisional', updated_at=now()

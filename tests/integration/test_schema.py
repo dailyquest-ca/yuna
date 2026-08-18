@@ -38,11 +38,15 @@ def test_every_job_written_table_is_cleared_between_tests(db):
 def test_the_session_writable_tables_are_not_guarded(db):
     """§4.3's other half: the session write list must actually be writable by a session.
 
-    The list is six things and no more — **briefs, tickets, observations, rulings, learnings,
-    config** (§4.3, 2026-08-04). `transactions` left it that day: a fill now travels as ticket
-    state and the job derives the ledger row, which migration 033's `guard_transactions` enforces.
-    This test asserted the old list for three days and failed on the migration that implemented the
-    new one — the assertion, not the guard, was the thing out of date.
+    **`transactions` rejoined the list on 2026-08-18** and this assertion inverted with it. The
+    2026-08-04 plan took it off — a fill travelled as ticket state and a job derived the ledger row
+    — and migration 033 enforced that with `guard_transactions`. v1.0's §4.3 carries no write list
+    at all, and Zak's instruction that day is explicit: *"I will upload those to the chat so the
+    chat should be able to write them... And know how."* A guard that refuses the write is a guard
+    enforcing a retired law, so migration 059 drops it.
+
+    `book` stays guarded, and that is the point rather than an oversight: the session writes the
+    HISTORY, and `yuna_book_from_ledger` moves the position. One surface, one direction.
     """
     with db.cursor() as cur:
         cur.execute("""select distinct c.relname from pg_trigger t
@@ -50,10 +54,11 @@ def test_the_session_writable_tables_are_not_guarded(db):
                        join pg_proc p on p.oid = t.tgfoid
                        where p.proname = 'yuna_jobs_only' and not t.tgisinternal""")
         guarded = {r[0] for r in cur.fetchall()}
-    assert not guarded & {"briefs", "tickets", "observations", "rulings", "learnings", "config"}
-    assert "transactions" in guarded, (
-        "§4.3 took transactions off the session write list on 2026-08-04 — the guard is the "
-        "enforcement, and R4's runbook routes discretionary fills through tickets because of it")
+    assert not guarded & {"briefs", "tickets", "observations", "rulings", "learnings", "config",
+                          "transactions"}
+    assert "book" in guarded, (
+        "the book is derived, never written by hand — a session writes `transactions` and "
+        "`yuna_book_from_ledger` moves the position (migration 059)")
 
 
 def test_latest_view_exposes_every_fundamentals_column(db):

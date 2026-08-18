@@ -139,7 +139,26 @@ def position(cur, ticker, *, account="TFSA", sleeve="momentum", qty=100, cost=11
                 (ticker, account, sleeve, qty, cost, entry_fill if entry_fill is not None else cost,
                  opened, stop, stop * 0.97 if stop is not None else None, cost, step, theme,
                  pivot, target, confirmed, stalled))
-    return cur.fetchone()[0]
+    bid = cur.fetchone()[0]
+    # The position needs a history, because since migration 059 the book IS the ledger's arithmetic:
+    # `yuna_book_from_ledger` recomputes a position from the rows behind it, and refuses to drive one
+    # negative. A fixture that conjured a holding with nothing behind it described a world that can
+    # no longer exist — and every test that then SOLD that holding was proving the sell worked
+    # against a book no ledger could explain. One `confirm` row, the same one a real pre-ledger
+    # holding gets, and the world is consistent again.
+    #
+    # After the book row, deliberately: the trigger finds the row and updates it, so the stop, pivot
+    # and theme this fixture sets survive. Inserting the ledger row first would have the trigger
+    # create a bare position and this insert collide with it.
+    # `applied_at` is stamped because this position is ALREADY in the book — that is what the insert
+    # above just said. An unstamped row is one the jobs still owe work on, and both fill loops would
+    # duly fold it a second time, doubling the very position it exists to explain.
+    cur.execute("""insert into transactions (ticker,account,side,qty,price,currency,trade_date,
+                                             confirmed,confirmed_at,applied_at,grade,source)
+                   values (%s,%s,'confirm',%s,%s,'USD',%s,true,now(),now(),'stated',
+                           'test fixture')""",
+                (ticker, account, qty, cost, opened))
+    return bid
 
 
 def ticket(cur, ticker, *, action="buy", state="approved", trigger=110.0, qty=100, stop=101.2,

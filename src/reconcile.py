@@ -106,51 +106,31 @@ def fold_fill(cur, source, account, f):
     row = cur.fetchone()
     if row is None:
         return None, "already folded"
-    apply_to_book(cur, f.get("account", account), f)
+    apply_to_book(cur, f.get("account", account), f["ticker"])
     return row[0], "folded"
 
 
-def apply_to_book(cur, account, f):
-    """Move the book by one receipt. §3.5's book is five equal slots — no lots, no pyramids.
+def apply_to_book(cur, account, ticker):
+    """Make the book say what the ledger says about one position (migration 059).
 
-    A buy into an open position averages the cost; §029 fixes `entry_fill` at the FIRST buy and
-    never rewrites it, because an add band that measured from `avg_cost` would measure from a base
-    the previous add had already moved.
+    This used to move the book INCREMENTALLY — read the position, add or subtract the receipt, write
+    it back — and that is now wrong twice over. Zak, 2026-08-18: *"You keep them in the transaction
+    ledger and they should all match. That's our actual history."* The ledger is the history, so the
+    position is a **sum over it**, not a running total that happens to have been nudged correctly
+    every time since the beginning.
+
+    The arithmetic lives in `yuna_book_from_ledger` and this is a call to it. That matters because
+    there are now three ways a row reaches the ledger — a manifest, a ticket fill, and a chat
+    session writing plain SQL — and the third one cannot call Python. A trigger calls the same
+    function, so every route lands identically and a fill that reaches the ledger cannot fail to
+    reach the book. That failure is the one Zak reported.
+
+    The guards did not go away, they moved and got a better basis. A sell of something never bought
+    used to be caught by "the book holds no open position"; it is now caught by the ledger driving
+    the position negative, which is the same event measured against the history rather than against
+    whatever the book happened to say.
     """
-    tk, qty, px = f["ticker"], float(f["qty"]), float(f["price"])
-    cur.execute("""select id, qty, avg_cost from book
-                    where ticker = %s and account = %s and status = 'open'""", (tk, account))
-    row = cur.fetchone()
-
-    if f["side"] == "buy":
-        if row is None:
-            cur.execute("""insert into book (ticker, account, sleeve, qty, avg_cost, currency,
-                                             opened_at, entry_fill, status)
-                           values (%s,%s,%s,%s,%s,%s,%s,%s,'open')""",
-                        (tk, account, f.get("sleeve", "momentum"), qty, px,
-                         f.get("currency", "USD"), f["trade_date"], px))
-        else:
-            bid, held, cost = row
-            total = held + qty
-            cur.execute("""update book set qty = %s, avg_cost = %s, updated_at = now()
-                            where id = %s""", (total, (held * cost + qty * px) / total, bid))
-        return
-
-    if row is None:
-        # A sell of something the book does not hold. Not fixable here and not silently ignorable:
-        # the book is wrong in a direction that matters, and `positions` will say so as red.
-        raise SystemExit(f"receipt sells {qty:g} {tk} in {account} and the book holds no open "
-                         f"position — the book and the broker disagree about what exists")
-    bid, held, _ = row
-    left = held - qty
-    if left < -QTY_TOL:
-        raise SystemExit(f"receipt sells {qty:g} {tk} and the book holds {held:g} — refusing to "
-                         f"drive a position negative")
-    if abs(left) <= QTY_TOL:
-        cur.execute("""update book set qty = 0, status = 'closed', closed_at = %s,
-                              updated_at = now() where id = %s""", (f["trade_date"], bid))
-    else:
-        cur.execute("update book set qty = %s, updated_at = now() where id = %s", (left, bid))
+    cur.execute("select yuna_book_from_ledger(%s, %s)", (account, ticker))
 
 
 def derive_ticket_fills(cur):
@@ -179,51 +159,64 @@ def derive_ticket_fills(cur):
                     order by coalesce(k.fill_date, current_date), k.id""")
     made = []
     for tid, tk, acct, action, qty, price, ccy, fx, fees, when, state, sleeve in cur.fetchall():
-        # A `provisional` ticket is a fill nobody has confirmed. The ledger row is written either
-        # way — §0.6 keeps the record — but `confirmed` is false, and `apply_unapplied` will not
-        # move the book on it. That IS a change from the retired `apply_fills`, which folded
-        # provisionals deliberately because §4.5 gave Sunday a trueing pass. v1.0 has no trueing
-        # pass, so a provisional applied here would sit in the book with nothing scheduled to
-        # correct it — the wrong direction for a number that sizes real orders.
-        confirmed = state != "provisional"
+        # Grade `stated` — always, whatever the ticket's state. A ticket fill reaches this table
+        # because Zak said a number in chat, and Zak's word is exactly what `stated` means: true,
+        # and provisional until the bank's export says the same thing to the penny (migration 059).
+        # The export supersedes it on arrival, so the difference is recorded rather than argued.
+        #
+        # It MOVES THE BOOK, including from a `provisional` ticket, and that reverses the rule this
+        # function shipped with two days ago. Zak, 2026-08-18: *"sometimes those transactions are
+        # lagged... by days... so I will just tell the chat other sales so it can process the books
+        # correctly... **But the engine should run assuming both.**"* The old rule made the book
+        # wait for a confirmation that arrives days later, which is the ghost-book failure written
+        # down as policy: for those days the engine reasons from a position Zak has already sold.
         cur.execute("""insert into transactions (ticket_id, ticker, account, side, qty, price,
                                                  currency, fx_rate, fees, trade_date, confirmed,
-                                                 confirmed_at, source)
-                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id""",
+                                                 confirmed_at, grade, source)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,now(),'stated',%s) returning id""",
                     (tid, tk, acct, "sell" if action == "sell" else "buy", float(qty),
-                     float(price), ccy, fx, float(fees or 0), when, confirmed,
-                     dt.datetime.now(dt.timezone.utc) if confirmed else None,
-                     f"ticket {tid} ({state})"))
+                     float(price), ccy, fx, float(fees or 0), when, f"ticket {tid} ({state})"))
         made.append(f"{action} {float(qty):g} {tk} @ {float(price):g} ({acct}, {when}) — "
-                    f"derived from ticket {tid}"
-                    + ("" if confirmed else "  ** provisional: the book waits for confirmation **"))
+                    f"derived from ticket {tid} as `stated`"
+                    + ("  (provisional ticket — the export will true the pennies)"
+                       if state == "provisional" else ""))
     return made
 
 
 def apply_unapplied(cur):
-    """Confirmed ledger rows nobody folded -> the book moved. Returns [labels].
+    """Ledger rows nobody has stamped -> stamped, their tickets advanced. Returns [labels].
 
-    The other half of the path `arming.apply_fills` used to walk. `applied_at` is the idempotence
-    stamp and it has existed since migration 019 — a re-run finds nothing unapplied and folds
-    nothing twice.
+    Since migration 059 this no longer moves the book, because **the book has already moved**: the
+    `ledger_moves_the_book` trigger recomputes the position on the write itself, so by the time any
+    job looks, the ledger and the book already agree. What is left here is the paperwork that a
+    trigger has no business doing — stamping `applied_at`, and advancing the ticket a receipt
+    settles.
 
-    The sleeve of a NEW position comes from the ticket behind the receipt and is never defaulted.
-    A chat-reported buy folded in as 'momentum' would occupy one of §3.5's five slots without the
-    engine ever having ranked it — a plausible wrong value that does not throw, which is the exact
-    failure this repository exists to avoid. With no ticket behind it the sleeve is `unassigned`:
-    `desk.held_book` reads only 'momentum' so the engine ignores it, and §4.2's payload lists every
-    open position regardless of sleeve, so it reaches the brief for Zak to place.
+    That is a real simplification rather than a shuffle. The fold was a SECOND place the book could
+    be moved, reachable only by a job, on a schedule; a fill that arrived by any other door sat in
+    the ledger until a job ran, and if no job read that door it sat there forever. It did. The
+    recompute is called by every door, so the question "did it fold?" stops existing.
+
+    Sleeve no longer appears here either. Zak, 2026-08-18: *"As for tagging as pre-seed or momentum
+    etc... I'm not so certain why we would do either. That's just the book."* §2.1 makes the account
+    the allocation, `desk.held_book` reads the account, and nothing in the live path branches on the
+    label — so there is no longer a wrong value to guess at.
+
+    `applied_at` stays the idempotence stamp for the ticket advance, so a re-run finds nothing and
+    advances nothing twice.
     """
     cur.execute("""select t.id, t.ticket_id, t.ticker, t.account, t.side, t.qty, t.price,
-                          t.currency, t.trade_date, k.sleeve
-                     from transactions t left join tickets k on k.id = t.ticket_id
-                    where t.confirmed and t.applied_at is null and t.side in ('buy','sell')
+                          t.trade_date
+                     from transactions t
+                    where t.applied_at is null and t.side in ('buy','sell')
+                      and t.superseded_by is null
                     order by t.trade_date, t.id""")
     applied = []
-    for txn, ticket, tk, acct, side, qty, price, ccy, when, sleeve in cur.fetchall():
-        apply_to_book(cur, acct, dict(ticker=tk, side=side, qty=float(qty), price=float(price),
-                                      currency=ccy or "USD", trade_date=when,
-                                      sleeve=sleeve or "unassigned"))
+    for txn, ticket, tk, acct, side, qty, price, when in cur.fetchall():
+        # Belt and braces: the trigger has already done this, and calling it again costs one query
+        # and cannot produce a different answer — it is a recompute, not an increment. If the
+        # trigger is ever missing (a database restored from before 059), this is what still holds.
+        apply_to_book(cur, acct, tk)
         cur.execute("update transactions set applied_at = now() where id = %s", (txn,))
         if ticket is not None:
             # `-> executed` is a fact about the broker and this receipt states it. The advance to
@@ -232,7 +225,7 @@ def apply_unapplied(cur):
                                   executed_at = coalesce(executed_at, now()), updated_at = now()
                             where id = %s and state in ('proposed','approved')""", (ticket,))
         applied.append(f"{side} {float(qty):g} {tk} @ {float(price):g} ({acct}, {when}) "
-                       f"— folded into the book")
+                       f"— in the book, ticket advanced")
     return applied
 
 

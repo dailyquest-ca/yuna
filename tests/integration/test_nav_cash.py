@@ -30,10 +30,29 @@ def anchor(cur, *, cad=10_000.0, usd=50_000.0, as_of=YESTERDAY, account="TFSA"):
 
 
 def fill(cur, *, side, qty, price, ccy="USD", when=None, account="TFSA", fees=0):
+    # The name has to exist. Since migration 059 a ledger row moves the book, and `book.ticker`
+    # references `universe` — so a transaction in a symbol nothing has ever heard of now fails at
+    # the write instead of opening a position in it. That is the intended behaviour and these
+    # tests are about the cash arithmetic, not about inventing instruments.
+    cur.execute("""insert into universe (ticker,name,kind,exchange,currency,status)
+                   values ('AAA.US','AAA','stock','NASDAQ','USD','active')
+                   on conflict (ticker) do nothing""")
     cur.execute("""insert into transactions (ticker, account, side, qty, price, currency,
                                              trade_date, fees, confirmed)
                    values ('AAA.US',%s,%s,%s,%s,%s,%s,%s,true)""",
                 (account, side, qty, price, ccy, when or dt.date.today(), fees))
+
+
+def held(cur, *, qty, price, ccy="USD", account="TFSA", when=None):
+    """An opening position, so a sell has something to sell. Moves no cash by construction."""
+    cur.execute("""insert into universe (ticker,name,kind,exchange,currency,status)
+                   values ('AAA.US','AAA','stock','NASDAQ','USD','active')
+                   on conflict (ticker) do nothing""")
+    cur.execute("""insert into transactions (ticker, account, side, qty, price, currency,
+                                             trade_date, confirmed, confirmed_at, applied_at,
+                                             grade, source)
+                   values ('AAA.US',%s,'confirm',%s,%s,%s,%s,true,now(),now(),'stated','test')""",
+                (account, qty, price, ccy, when or (YESTERDAY - dt.timedelta(days=1))))
 
 
 def cash(conn, account="TFSA"):
@@ -55,6 +74,10 @@ def test_a_buy_after_the_anchor_takes_its_own_currency_out(db):
 def test_a_sell_puts_the_proceeds_back(db):
     with db.cursor() as cur:
         anchor(cur)
+        # There has to be something to sell. A `confirm` row is the opening balance — it establishes
+        # the position and moves no money, which is the whole reason `cash_by_account` skips it —
+        # and without one the sell drives the position to minus ten shares and is refused.
+        held(cur, qty=10, price=400.0)
         fill(cur, side="sell", qty=10, price=419.83, fees=2.5)
     db.commit()
     assert cash(db)["usd"] == pytest.approx(50_000 + 4_198.30 - 2.5)

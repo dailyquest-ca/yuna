@@ -937,9 +937,17 @@ def test_a_name_the_ledger_owns_is_never_armed_as_a_new_entry(db, fx):
 
     Zak filled RS.US at 419.83 on the 4th. No ticket carried the fill, so the book never saw it —
     and the book is the only thing arming consulted. Four briefs then offered him a new momentum
-    entry at trigger 419.83: the same name, at the price he had already paid. Ownership is now
-    read from the ledger, which cannot be behind a fill by construction, and the discrepancy is
-    armed as a `check` so the session sees it instead of a silent skip.
+    entry at trigger 419.83: the same name, at the price he had already paid.
+
+    **Migration 059 made that divergence impossible rather than merely detected.** The fix at the
+    time was to read ownership from the ledger and arm a `check` when the two disagreed; the fix
+    now is that they cannot disagree — the ledger row moves the book on the write, through
+    `yuna_book_from_ledger`, so there is no window in which one holds the name and the other does
+    not. This test can no longer CONSTRUCT the old world, which is the strongest form the
+    assertion can take: the guard it needed is gone because the hole it guarded is filled.
+
+    What it still proves is the outcome Zak paid for: a name in the ledger is never offered as a
+    new entry.
     """
     with db.cursor() as cur:
         world.add_name(cur, "RS.US")
@@ -947,15 +955,18 @@ def test_a_name_the_ledger_owns_is_never_armed_as_a_new_entry(db, fx):
         world.gate(cur)
         world.queued(cur, "RS.US", mcn=77.3)
         tid = world.ticket(cur, "RS.US", state="confirmed")
-        world.fill(cur, tid, "RS.US", qty=10, price=419.83)   # ledger yes, book no
-        cur.execute("update transactions set applied_at = now()")   # already digested, badly
+        world.fill(cur, tid, "RS.US", qty=10, price=419.83)
+        cur.execute("update transactions set applied_at = now()")   # already digested
         world.balances(cur)
     db.commit()
+    with db.cursor() as cur:
+        # after the COMMIT, because `ledger_moves_the_book` is deferred: the book is what the ledger
+        # says at the end of a transaction, not part-way through one
+        cur.execute("select qty from book where ticker='RS.US' and status='open'")
+        assert cur.fetchone()[0] == 10, "the ledger row opened the position with no job in between"
     run()
     assert armed(db, "entry", "RS.US") == [], "no entry for a name we own"
-    flagged = armed(db, "check", "RS.US")
-    assert flagged and flagged[0]["reason"] == "already_owned"
-    assert "the ledger holds this name and the book does not" in flagged[0]["note"]
+    assert armed(db, "check", "RS.US") == [], "and nothing to flag — the two cannot disagree"
 
 
 def test_a_name_fully_sold_is_armable_again(db, fx):

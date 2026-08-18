@@ -13,6 +13,7 @@ import pathlib
 import subprocess
 import sys
 
+import psycopg
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -52,7 +53,17 @@ def test_a_receipt_opens_the_position_and_settles_its_ticket(db, migrated):
         assert not orphans and len(settled) == 1
         cur.execute("""select qty, avg_cost, entry_fill, status, sleeve from book
                         where ticker = 'SNDK.US'""")
-        assert cur.fetchone() == (24.0, 1650.10, 1650.10, "open", "momentum")
+        # `book` since migration 059: the sleeve is 'book' because the ledger opened the
+        # position and §2.1 makes the ACCOUNT the allocation, so the label decides nothing. Zak,
+        # 2026-08-18: "As for tagging as pre-seed or momentum etc... That's just the book."
+        #
+        # `approx` on the cost for the same reason the sleeve changed: avg_cost is now DERIVED —
+        # sum(qty x price) / sum(qty) over the ledger — where it used to be the receipt's price
+        # copied across. One lot at 1650.10 comes back as 1650.0999999999997, and a book that
+        # recomputes is worth a float ulp.
+        qty, cost, entry, status, sleeve = cur.fetchone()
+        assert (qty, status, sleeve) == (24.0, "open", "book")
+        assert cost == pytest.approx(1650.10) and entry == pytest.approx(1650.10)
         cur.execute("select state, executed_at is not null from tickets where id = %s", (tid,))
         assert cur.fetchone() == ("executed", True)
 
@@ -100,13 +111,21 @@ def test_a_full_sell_closes_the_position_rather_than_leaving_a_zero_row(db, migr
         assert (qty, status) == (0.0, "closed") and closed is not None
 
 
-def test_a_sell_of_something_the_book_does_not_hold_stops_the_job(db, migrated):
+def test_a_sell_of_something_never_bought_stops_the_job(db, migrated):
     """Silent failure is the enemy: the book and the broker disagree about what EXISTS, which is
-    the one disagreement that cannot be repaired by arithmetic."""
+    the one disagreement that cannot be repaired by arithmetic.
+
+    Migration 059 moved where this is caught and improved the basis. It used to be "the book holds
+    no open position", read off `book`; it is now the LEDGER refusing to drive a position below
+    zero, which is the same event measured against the history instead of against whatever the book
+    happened to say. The message names the repair, because there is a real one: a holding that
+    predates the ledger needs its opening `confirm` row before the sells that follow it.
+    """
     with db.cursor() as cur:
         _universe(cur, "GHOST.US")
-        with pytest.raises(SystemExit, match="the book holds no open position"):
+        with pytest.raises(psycopg.errors.RaiseException, match="history for this name is incomplete"):
             reconcile.fold_fill(cur, "m.json", "TFSA", _fill("ws-7", "GHOST.US", "sell", 10, 5.0))
+        db.rollback()
 
 
 def test_a_receipt_missing_its_ref_stops_the_job(db, migrated):
@@ -314,6 +333,13 @@ def test_a_fill_reported_in_chat_reaches_the_book_with_no_manifest_at_all(db, mi
         _universe(cur, "NUE.US")
         cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
                        values ('NUE.US','TFSA','momentum',32,267.715,'open')""")
+        # What the account already held, as the ledger sees it. Since migration 059 the book is the
+        # ledger's arithmetic, so a position with no rows behind it cannot be sold: the sell drives
+        # it negative and `yuna_book_from_ledger` refuses.
+        cur.execute("""insert into transactions (ticker,account,side,qty,price,currency,trade_date,
+                                                 confirmed,confirmed_at,applied_at,grade,source)
+                       values ('NUE.US','TFSA','confirm',32,267.715,'USD','2026-08-10',true,now(),
+                               now(),'stated','opening balance')""")
         tid = _filled_ticket(cur, "NUE.US", "sell", 32, 266.8111)
         db.commit()
 
@@ -377,30 +403,57 @@ def test_a_manifest_and_a_chat_report_of_the_same_fill_move_the_book_once(db, mi
         assert cur.fetchone()[0] == 41.0, "41 bought, 41 in the book"
 
 
-def test_a_provisional_fill_is_recorded_but_does_not_move_the_book(db, migrated):
-    """Confirmation is the boundary, and this is a deliberate CHANGE from the retired
-    `arming.apply_fills`, which folded provisionals because §4.5 gave Sunday a trueing pass. v1.0
-    has no trueing pass, so a provisional applied here would sit in the book with nothing scheduled
-    to correct it — the wrong direction for a number that sizes real orders."""
+def test_a_provisional_fill_moves_the_book_and_is_graded_as_stated(db, migrated):
+    """**This assertion inverted on 2026-08-18, on Zak's instruction, and the inversion is the
+    point.**
+
+    It used to read "recorded but does not move the book": confirmation was the boundary, and a
+    provisional fill sat in the ledger waiting for it. Zak: *"sometimes those transactions are
+    lagged... by days... so I will just tell the chat other sales so it can process the books
+    correctly... those are true to me... but they might change or be tweaked by the transactions
+    later. Maybe the pennies are different.... **But the engine should run assuming both.**"*
+
+    The old rule made the book wait days for an export, and for those days the engine reasoned from
+    a position Zak had already sold — the ghost book, written down as policy. The new rule records
+    which KIND of truth the row is (`stated` vs `broker`) instead of refusing the provisional one,
+    so the correction is a supersession rather than a delay.
+    """
     with db.cursor() as cur:
         _universe(cur, "RS.US")
         cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
                        values ('RS.US','TFSA','momentum',10,419.83,'open')""")
+        cur.execute("""insert into transactions (ticker,account,side,qty,price,currency,trade_date,
+                                                 confirmed,confirmed_at,applied_at,grade,source)
+                       values ('RS.US','TFSA','confirm',10,419.83,'USD','2026-08-10',true,now(),
+                               now(),'stated','opening balance')""")
         _filled_ticket(cur, "RS.US", "sell", 10, 419.83, state="provisional")
         db.commit()
 
         made = reconcile.derive_ticket_fills(cur)
         db.commit()
-        assert len(made) == 1 and "provisional" in made[0], "recorded, and flagged"
-        assert reconcile.apply_unapplied(cur) == [], "and NOT folded"
+        assert len(made) == 1 and "stated" in made[0], "recorded, and graded as Zak's word"
+        cur.execute("select grade from transactions where side = 'sell' and ticker = 'RS.US'")
+        assert cur.fetchone()[0] == "stated"
         cur.execute("select qty, status from book where ticker = 'RS.US'")
-        assert cur.fetchone() == (10.0, "open"), "the book waits for the confirmation"
+        assert cur.fetchone() == (0.0, "closed"), "the engine runs on what Zak already knows"
 
 
-def test_a_receipt_with_no_ticket_never_lands_in_the_momentum_sleeve(db, migrated):
-    """§3.5 counts held momentum slots. A chat-reported buy folded in as 'momentum' would occupy
-    one of the five without the engine ever having ranked it — a plausible wrong value that does
-    not throw."""
+def test_the_park_is_held_capital_and_never_one_of_the_five_slots(db, migrated):
+    """§3.5 counts five slots, and the park is not one of them.
+
+    **The protection moved from the sleeve label to the instrument, and got stronger.** It used to
+    rest on folding a ticket-less receipt in as `unassigned`, because `desk.held_book` read only
+    `sleeve = 'momentum'` — a label doing load-bearing work. Zak, 2026-08-18: *"As for tagging as
+    pre-seed or momentum etc... I'm not so certain why we would do either. That's just the book."*
+    He is right, and the label was also failing in the other direction: 20 shares of AXTI and 2 of
+    MU sat in the TFSA tagged `preseed`, invisible to an engine that ranked them 2nd and 3rd.
+
+    So the engine reads the ACCOUNT (§2.1 gives it the whole TFSA) and splits the park off by
+    INSTRUMENT — SPY.US by §8, SPMO.US as §6.1(3)'s Phase-0 bridge. That is not a label anyone can
+    forget to set: it is what the position IS. The park counts as engine capital, is marked in the
+    equity, and can never be sold for failing to rank a stock screen it was never eligible for.
+    """
+    import desk
     with db.cursor() as cur:
         _universe(cur, "SPMO.US")
         cur.execute("""insert into transactions (ticker, account, side, qty, price, currency,
@@ -408,16 +461,14 @@ def test_a_receipt_with_no_ticket_never_lands_in_the_momentum_sleeve(db, migrate
                        values ('SPMO.US','TFSA','buy',810,155.5,'USD','2026-08-17',
                                true, now(), 'chat')""")
         db.commit()
+        # The book moved on the WRITE — `apply_unapplied` only stamps and advances tickets now.
+        cur.execute("select qty, status from book where ticker = 'SPMO.US'")
+        assert cur.fetchone() == (810.0, "open"), "the ledger row opened the position by itself"
         assert reconcile.apply_unapplied(cur) != []
         db.commit()
-        cur.execute("select qty, sleeve from book where ticker = 'SPMO.US'")
-        assert cur.fetchone() == (810.0, "unassigned")
 
-        # and the engine cannot see it, while the brief can
-        import desk
-        assert "SPMO.US" not in desk.held_book(cur)
-        cur.execute("select count(*) from book where status='open' and ticker='SPMO.US'")
-        assert cur.fetchone()[0] == 1
+        assert desk.held_book(cur) == {"SPMO.US": 810.0}, "the engine sees the whole account"
+        assert "SPMO.US" in desk.PARKED, "and knows this one is capital, not a slot"
 
 
 def test_the_job_folds_chat_receipts_on_a_night_with_no_manifest(db, migrated, tmp_path):
@@ -426,6 +477,10 @@ def test_the_job_folds_chat_receipts_on_a_night_with_no_manifest(db, migrated, t
         _universe(cur, "NUE.US")
         cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
                        values ('NUE.US','TFSA','momentum',32,267.715,'open')""")
+        cur.execute("""insert into transactions (ticker,account,side,qty,price,currency,trade_date,
+                                                 confirmed,confirmed_at,applied_at,grade,source)
+                       values ('NUE.US','TFSA','confirm',32,267.715,'USD','2026-08-10',true,now(),
+                               now(),'stated','opening balance')""")
         _filled_ticket(cur, "NUE.US", "sell", 32, 266.8111)
     db.commit()
     out = subprocess.run([sys.executable, str(ROOT / "src" / "reconcile.py")],

@@ -87,11 +87,100 @@ per-name ruling. *The rank is the entire opinion.*
 
 ---
 
+## 4b. Writing the ledger — transactions, from a CSV or from Zak's word
+
+Zak, 2026-08-18:
+
+> There are a list of transactions… And those will always come in with a transaction ledger csv from
+> Wealthsimple or another bank… **Those are law**… You keep them in the transaction ledger and they
+> should all match. That's our actual history. I will upload those to the chat so the chat should be
+> able to write them… And know how… And then additionally sometimes those transactions are lagged…
+> By days… So I will just tell the chat other sales so it can process the books correctly… Those are
+> true to me… But they might change or be tweaked by the transactions later. Maybe the pennies are
+> different…. **But the engine should run assuming both.**
+
+`transactions` is the history and `book` is its arithmetic. **A session writes the ledger and never
+the book** — `yuna_book_from_ledger` moves the position, on a deferred trigger, at commit. There is
+no fold to remember and no job to wait for.
+
+Every row carries a `grade` saying where its authority comes from:
+
+| grade | what it is | when |
+| --- | --- | --- |
+| `broker` | a row from the bank's export | **law** — never contradicted, only replaced by a later export of the same trade |
+| `stated` | Zak's word, ahead of the export | **true, and provisional** — the engine runs on it until the export trues it |
+
+and one of three verbs in `side`: `buy`, `sell`, or `confirm`. **`confirm` is an opening balance** —
+a position that predates the ledger, recorded with its cost basis so the sells that follow it have
+something to net against. It moves no cash.
+
+### Zak says he sold something
+
+```sql
+insert into transactions (ticker, account, side, qty, price, currency, trade_date,
+                          confirmed, confirmed_at, grade, source)
+values ('NUE.US', 'TFSA', 'sell', 32, 266.81, 'USD', '2026-08-17',
+        true, now(), 'stated', 'stated in chat 2026-08-18');
+```
+
+That is the whole operation. The position moves on commit; tonight's sheet sees it.
+
+### Zak uploads a bank export
+
+Same insert per trade row, with `grade = 'broker'`, `source = 'csv <filename>'`, and the bank's own
+identifier in `external_ref`. Then supersede whatever he had already said about the same trade —
+matched on **account, ticker, side and the day, never on quantity or price**, because the whole
+reason the export supersedes his word is that those numbers differ slightly:
+
+```sql
+update transactions s
+   set superseded_by = b.id
+  from transactions b
+ where b.external_ref = 'ws-nue-1'                          -- the row just imported
+   and s.grade = 'stated' and s.superseded_by is null
+   and s.account = b.account and s.ticker = b.ticker
+   and s.side = b.side and s.trade_date = b.trade_date;
+```
+
+Superseded rows stay (§0.6) and stop counting — the history then shows both what Zak believed on the
+day and what the bank confirmed after.
+
+**Read the export's non-trade rows and skip them.** Dividends, interest, contributions and journal
+entries sit beside the trades, and every one folded in as a trade moves a position that never moved.
+`src/ledger.py` does exactly this from a shell (`import` · `state` · `confirm` · `check`) and is the
+reference for the rules; a session does it in SQL because a session has no shell.
+
+### Three things that will stop you, and what each means
+
+- **`ledger drives TFSA SPMO.US to -810 shares — the history for this name is incomplete`** — a sell
+  of a position bought before this ledger existed. Record the opening balance first, as a `confirm`
+  row with the quantity and cost the book already holds, then re-record the sell.
+- **`NOPE.US is not in universe`** — check the symbol in EODHD form (`NUE.US`, `CNQ.TO`).
+- **anything about `guard_book`** — you tried to write `book`. Write `transactions` instead.
+
+### Does it all match?
+
+```sql
+select * from v_ledger_vs_book;
+```
+
+Empty is the goal. A row with `predates_the_ledger = false` is a real break and something wrote one
+side without the other. A row with `predates_the_ledger = true` is a holding older than its own
+history — true of the book today, not a defect, and it heals itself when the export lands. Today
+that is SPMO in the TFSA and the RRSP, bought with the §6.1 proceeds.
+
+---
+
 ## 5. What a Routine must never do
 
 - **Never place, modify or cancel an order** (§0.2). The brief is a proposal; Zak executes.
 - **Never write a ticket to `approved`.** That is Zak's word, in chat, and `reconcile` looks for a
   receipt against it afterwards.
+- **Never write `book` directly.** Write the ledger (§4b) and let the position follow. A book poked
+  by hand is a book that agrees with nothing, and `guard_book` refuses it.
+- **Never invent a price, a quantity or a date to complete a ledger row.** If the export is
+  ambiguous, say which row and which field — a `stated` row with a number Zak did not give is worse
+  than no row, because it looks exactly like one he did.
 - **Never recompute a rank, score or gate in chat** (§0.4). If a number is not in the payload, the
   answer is that the pipeline has not produced it — not that the session should derive it.
 - **Never suppress the brief because the check is red.** §4.4 holds the *buys*; §5.4 makes exits

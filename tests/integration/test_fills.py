@@ -32,6 +32,16 @@ def the_book_before(db):
                                          opened_at,status)
                        values ('VRT.US','TFSA','unassigned','core',0.0031,332.5,'USD',
                                '2026-06-03','open')""")
+        # The opening balance the real book had — and this is not a prop. Production wrote exactly
+        # this row for VRT.US on 2026-08-03, one of seven `confirm` rows recording the §6.1 book as
+        # it stood so the liquidation had something to net against. Since migration 059 it is also
+        # REQUIRED: `yuna_book_from_ledger` refuses to drive a position negative, so the manifest's
+        # VRT sell has nothing to sell without it. That refusal is the point — a book holding
+        # -0.0031 shares is not a state worth reaching quietly.
+        cur.execute("""insert into transactions (ticker,account,side,qty,price,currency,trade_date,
+                                                 confirmed,confirmed_at,applied_at,grade,source)
+                       values ('VRT.US','TFSA','confirm',0.0031,332.5,'USD','2026-06-03',
+                               true,now(),now(),'stated','opening balance')""")
     db.commit()
     return db
 
@@ -77,7 +87,8 @@ def test_the_fills_land_in_the_book_through_the_ticket_path(the_book_before, mon
     assert after["VRT.US"]["status"] == "closed" and after["VRT.US"]["qty"] == 0
 
     with the_book_before.cursor() as cur:
-        cur.execute("""select count(*) from transactions where confirmed and applied_at is not null""")
+        cur.execute("""select count(*) from transactions
+                        where confirmed and applied_at is not null and side <> 'confirm'""")
         assert cur.fetchone()[0] == 4, "settled tickets derive settled, applied ledger rows"
 
 
@@ -89,7 +100,7 @@ def test_running_it_twice_applies_nothing_twice(the_book_before, monkeypatch):
     assert fills.main() == 0
     assert book(the_book_before) == first
     with the_book_before.cursor() as cur:
-        cur.execute("select count(*) from transactions")
+        cur.execute("select count(*) from transactions where side <> 'confirm'")
         assert cur.fetchone()[0] == 4
 
 
@@ -102,7 +113,7 @@ def test_a_dry_run_writes_nothing(the_book_before, monkeypatch):
     with the_book_before.cursor() as cur:
         cur.execute("select count(*) from tickets")
         assert cur.fetchone()[0] == 0
-        cur.execute("select count(*) from transactions")
+        cur.execute("select count(*) from transactions where side <> 'confirm'")
         assert cur.fetchone()[0] == 0
     assert book(the_book_before)["VRT.US"]["status"] == "open"
 
@@ -112,7 +123,9 @@ def test_a_dry_run_still_says_what_it_would_do(the_book_before, monkeypatch):
     monkeypatch.setenv("FILLS_GLOB", str(MANIFEST))
     assert fills.main() == 0                      # write the tickets and the ledger for real
     with the_book_before.cursor() as cur:
-        cur.execute("update transactions set applied_at = null")   # as if the book were behind
+        # the four manifest fills, not the opening balance — un-applying that one would put it
+        # on the rehearsal's list as a fifth pending fill, and it is not a fill at all
+        cur.execute("update transactions set applied_at = null where side <> 'confirm'")
     the_book_before.commit()
 
     monkeypatch.setenv("DRY_RUN", "true")
@@ -122,7 +135,8 @@ def test_a_dry_run_still_says_what_it_would_do(the_book_before, monkeypatch):
         detail = cur.fetchone()[0]
     assert len(detail["fills_would_apply"]) == 4
     with the_book_before.cursor() as cur:
-        cur.execute("select count(*) from transactions where applied_at is not null")
+        cur.execute("""select count(*) from transactions
+                        where applied_at is not null and side <> 'confirm'""")
         assert cur.fetchone()[0] == 0, "the rehearsal applied nothing"
 
 

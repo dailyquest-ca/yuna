@@ -379,3 +379,43 @@ is `roadmap-2026-07-31.md`.
     sides: too small and they are twins, too large and the low rungs fall through §3.2's $5 floor
     and leave the universe. **It was chosen by measuring both bounds, not by picking a number that
     made the failure go away.**
+50. **A lock outlives the law that set it, and then enforces a rule nobody voted for.** `transactions`
+    was sealed three ways — INSERT revoked, RLS on with zero policies, a jobs-only trigger — all
+    from migration 033, on the authority of the 2026-08-04 plan's §4.3 session write list. **v1.0
+    carries no such list.** The plan that justified the lock was retired on 2026-08-15 and the lock
+    stayed, so "the chat can't write what Zak tells it" read as a mysterious bug for three days. It
+    was a correctly-enforced dead rule. The tell was that it looked *intermittent*: the chat
+    connector logs in as `postgres`, which walks through all three locks, so a session could write
+    the seven opening rows on 08-03 while `yuna_session` could not have written any of them.
+    **When a plan is superseded, grep the migrations for what it made enforceable** — schema is the
+    one place a retired rule keeps working perfectly.
+51. **A verb the arithmetic does not know about is counted as its opposite, silently.** `side` had
+    three values in production and every sum in the new ledger views handled two. `confirm` — an
+    opening balance, arithmetically a buy — fell through `case when side='buy' then qty else -qty
+    end` and valued the entire pre-Phase-0 book at minus itself. `arming.apply_fills` had the same
+    hole from the other end (`if side == "buy": ... else:` folded it as a sell and closed the
+    position), and `db.cash_by_account` was the only reader that had ever heard of it. Three
+    readers, one vocabulary, two of them wrong. The fix is not "handle confirm" — it is that the
+    vocabulary is now a validated CHECK constraint, and the `else` branch of every sum produces
+    `NaN` rather than a plausible number. **An unhandled category must be loud or impossible; a
+    default branch that returns a number chooses "quietly wrong" on your behalf.**
+52. **A trigger that recomputes from a ledger must fire at COMMIT, not per statement.** Supersession
+    takes two statements — insert the broker row, then stamp the stated row it replaces — and an
+    immediate trigger fires in the gap, when the ledger holds both a 32-share sale and the
+    31.5-share sale correcting it. It computed a position 31.5 shares short and refused the write
+    for being negative: the guard working perfectly on a state that exists for microseconds and
+    means nothing. `DEFERRABLE INITIALLY DEFERRED` says the real invariant — **the book is what the
+    ledger says at the end of a transaction, not part-way through one** — and as a bonus a 200-row
+    import recomputes each position once instead of once per row. Found by the test for the exact
+    case Zak described ("maybe the pennies are different"), which is the case an intermediate state
+    is guaranteed to exist in.
+53. **Widening what the engine can see also widens what it can sell.** Swapping `held_book` from
+    `sleeve = 'momentum'` to `account = 'TFSA'` fixed a real blindness — AXTI and MU sat in the
+    account tagged `preseed` while ranking 2nd and 3rd, so the seed would have bought a full slot of
+    each on top of what it already held. It also swept in 810 shares of SPMO, the §6.1(3) Phase-0
+    bridge, which is not a `.US` common stock and therefore can never rank — and `desk.sheet` sells
+    everything it holds and cannot rank. One line of correction proposed liquidating the capital
+    §6.5 is holding for the seed, every night, for failing a stock screen it was never eligible for.
+    **A filter is two claims — what it includes and what it excludes — and replacing one is
+    replacing both.** The park is now split off by INSTRUMENT (SPY.US per §8, SPMO.US per §6.1(3)),
+    which is what the position IS rather than a label someone must remember to set.
