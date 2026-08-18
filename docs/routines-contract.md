@@ -158,6 +158,36 @@ reference for the rules; a session does it in SQL because a session has no shell
 - **`NOPE.US is not in universe`** — check the symbol in EODHD form (`NUE.US`, `CNQ.TO`).
 - **anything about `guard_book`** — you tried to write `book`. Write `transactions` instead.
 
+### Zak says how much cash he has
+
+> *"…or the current dollar availability etc."*
+
+That is not a trade and does not belong in `transactions`. §2.0: **balances are truth, prices are the
+extrapolation.** `balances` is an append ledger read latest-wins per account, and it is
+session-writable — a new row is a new reading, never an edit of the old one:
+
+```sql
+insert into balances (account, as_of, cash_cad, cash_usd, source)
+values ('TFSA', current_date, 47.33, 16.47, 'zak in chat 2026-08-18');
+```
+
+The facility is the same table with different columns — `drawn` and `credit_limit` instead of cash,
+and §2.3 caps the draw at half the limit:
+
+```sql
+insert into balances (account, as_of, drawn, credit_limit, source)
+values ('LOC', current_date, 12000, 75000, 'zak in chat 2026-08-18');
+```
+
+**Write both currencies when you have both.** `cash_cad` and `cash_usd` are separate columns because
+a USD buy takes USD out and leaves the CAD side alone; collapsing them loses the distinction that
+decides whether an account can fund a trade. And do not carry a figure forward: if Zak gives one
+currency, write that one and leave the other null rather than repeating yesterday's number as if it
+were today's reading.
+
+`cash_by_account` carries the newest anchor forward by the ledger, so a fill recorded after the
+reading is already accounted for — do not subtract it by hand.
+
 ### Does it all match?
 
 ```sql
