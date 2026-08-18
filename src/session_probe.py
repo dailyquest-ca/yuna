@@ -107,6 +107,42 @@ def main():
                               union all select set_at from config where set_by = 'zak') x""")
             print(f"\n  newest write on any session-owned surface: {cur.fetchone()[0]}")
 
+            # ---- 5. did it LAND? ----------------------------------------------------------
+            #
+            # A write that reaches `tickets` or `transactions` and never reaches `book` is the
+            # ghost-book failure: the desk reasons from positions the broker no longer holds. The
+            # permission questions above say whether a session CAN write; this says whether what it
+            # wrote actually moved the thing §3.5 reads.
+            print("\n=== 5. did the writes reach the book? ===")
+            cur.execute("""select ticker, account, sleeve, qty, round(avg_cost::numeric,2), status
+                             from book where status = 'open' order by sleeve, ticker""")
+            rows = cur.fetchall()
+            print(f"  book holds {len(rows)} open position(s):")
+            for tk, acct, sleeve, qty, cost, status in rows:
+                print(f"    {tk:<10} {float(qty):>12,.4f} @ {cost:>10}  {acct:<7} {sleeve}")
+
+            cur.execute("""select t.trade_date, t.side, t.ticker, t.qty, t.price,
+                                  t.applied_at is not null, t.confirmed, t.source
+                             from transactions t
+                            order by t.trade_date desc, t.id desc limit 12""")
+            print("\n  newest transactions (applied? confirmed?):")
+            for when, side, tk, qty, px, applied, conf, src in cur.fetchall():
+                flag = "" if applied else "   ** NOT APPLIED TO THE BOOK **"
+                print(f"    {when}  {side:<4} {float(qty):>10,.4f} {tk:<10} @ {float(px):>10,.2f}"
+                      f"  applied={applied} confirmed={conf}  {src or ''}{flag}")
+
+            cur.execute("""select k.id, k.session_date, k.ticker, k.action, k.state,
+                                  k.fill_qty, k.fill_price,
+                                  exists (select 1 from transactions t where t.ticket_id = k.id)
+                             from tickets k
+                            where k.fill_price is not null
+                            order by k.fill_date desc nulls last, k.id desc limit 12""")
+            print("\n  tickets carrying a fill (has a ledger row?):")
+            for i, sd, tk, act, st, fq, fp, has_txn in cur.fetchall():
+                flag = "" if has_txn else "   ** NO LEDGER ROW — the fill never left the ticket **"
+                print(f"    #{i} {sd} {act:<4} {tk:<10} {st:<12} "
+                      f"{float(fq or 0):>10,.4f} @ {float(fp or 0):>10,.2f}{flag}")
+
     print("\nsession_probe: read-only, nothing written")
     return 0
 
