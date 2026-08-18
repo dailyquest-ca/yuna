@@ -185,8 +185,15 @@ def sheet_arithmetic(cur, stored):
     A sizing error is RED. A quantity that does not follow from the plan's arithmetic is the single
     most expensive class of defect this repository can produce, because it does not throw.
     """
+    # Withdrawn tickets are excluded, and that is §4.3's own definition rather than a convenience.
+    # "The nightly sheet is the only source of engine orders", and a re-score that no longer stands
+    # behind a proposal cancels it — so a `cancelled` row is a record of an order that is NOT one.
+    # Counting them inflated this gauge the day the account filter landed (5 unsized buys reported
+    # against 3 real ones), and the sizing check below is worse: a stale quantity on a withdrawn
+    # ticket would go RED for failing to match §3.5's arithmetic for a sheet nobody is executing.
     cur.execute("""select ticker, action, qty, mark, rank, state, clause from tickets
-                    where session_date = %s order by action, ticker""", (stored["session_date"],))
+                    where session_date = %s and state not in ('cancelled', 'void')
+                    order by action, ticker""", (stored["session_date"],))
     rows = cur.fetchall()
     if not rows:
         return _gauge("sheet", "amber", f"no tickets for {stored['session_date']} — a session with "

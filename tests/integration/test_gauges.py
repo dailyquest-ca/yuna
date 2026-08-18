@@ -332,3 +332,45 @@ def test_a_green_reconcile_after_a_red_one_clears_the_gauge(db, migrated):
         db.commit()
         g = gauges.reconciliation_age(cur)
     assert g["status"] == "green"
+
+
+def test_a_withdrawn_ticket_is_not_counted_as_an_order(db, migrated):
+    """§4.3: "the nightly sheet is the only source of engine orders", and a re-score that no longer
+    stands behind a proposal cancels it. A `cancelled` row is therefore a record of an order that is
+    NOT one, and counting it makes this gauge describe a sheet nobody is executing.
+
+    Found in production on 2026-08-18: the account filter withdrew two buy tickets the engine had
+    proposed for names it already held, and the sheet gauge went on reporting "5 buy ticket(s) carry
+    no quantity" against three real ones. The sizing check is the sharper half — a stale quantity on
+    a withdrawn ticket would go RED for failing to match §3.5's arithmetic.
+    """
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        cur.execute("""select count(*) from tickets where session_date = %s""", (days[-1],))
+        before = cur.fetchone()[0]
+        assert before == engine.SLOTS, "five buys on an empty book"
+        # withdraw two, exactly as `write_tickets` does on a re-score
+        cur.execute("""update tickets set state = 'cancelled'
+                        where session_date = %s and ticker in ('N00.US','N01.US')""", (days[-1],))
+    db.commit()
+    verdict, got = gauges.run(db)
+    sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
+
+    assert sheet_gauge["status"] == "green", sheet_gauge["why"]
+    assert sheet_gauge["tickets"] == before - 2, "the withdrawn pair is not an order"
+
+
+def test_a_stale_quantity_on_a_withdrawn_ticket_does_not_go_red(db, migrated):
+    """The expensive half of the same defect: §3.5's arithmetic re-derived against a proposal the
+    engine has already retracted. Red holds the buys (§4.4), so this would hold a correct sheet on
+    the strength of an incorrect one nobody is being asked to execute."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        cur.execute("""update tickets set state = 'cancelled', qty = 999999
+                        where session_date = %s and ticker = 'N00.US'""", (days[-1],))
+    db.commit()
+    verdict, got = gauges.run(db)
+    sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
+    assert sheet_gauge["status"] == "green", sheet_gauge["why"]

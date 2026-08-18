@@ -19,6 +19,8 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import desk                                                                # noqa: E402
+import engine                                                              # noqa: E402
 from db import connect, dry, freeze_state, Heartbeat                       # noqa: E402
 
 # §5.2, verbatim: "Pager at −10% engine DD; informational lines at −20 / −30 / −40 / −50. **No
@@ -94,6 +96,17 @@ def sheet_lines(p):
 
 
 def book_lines(p):
+    """The book, and what the engine intends to do about each line.
+
+    Two notes hang off an unranked holding and they mean opposite things, which is why the brief
+    has to tell them apart. A `.US` common stock that has left §3.2's universe — delisted, or newly
+    excluded — is queued to sell, because §3.5 queues anything below rank 12 and "not ranked at all"
+    is below it. The PARK is unranked for a different reason: it was never eligible, it is where
+    §3.4 puts the money while the gate is off, and it is never sold for failing to rank.
+
+    Printing the first note against the park is not a cosmetic slip. It reads as "this 810-share
+    position is queued to sell", which is the opposite of what §6.5 is holding it for.
+    """
     rows = p["book"] or []
     if not rows:
         return ["  (nothing held)"]
@@ -103,9 +116,50 @@ def book_lines(p):
         out.append(f"  {b['ticker']:<10} {float(b['qty']):>8,.0f} @ {float(b['avg_cost']):>10,.2f}"
                    f"   last {float(b['last_close'] or 0):>10,.2f}"
                    f"   P/L {float(b['pnl_pct'] or 0):>+6.1f}%   rank {rank}   {b['sleeve']}")
-        if b.get("rank") is None:
+        if b.get("rank") is not None:
+            continue
+        if b["ticker"] in desk.PARKED:
+            out.append("      park — engine capital, never a slot and never sold for failing to "
+                       "rank (§3.4, §6.1(3))")
+        else:
             out.append("      ** no rank: this holding is outside §3.2's universe, which §3.5 "
                        "treats as below 12 **")
+    return out
+
+
+def underweight_lines(p):
+    """§3.5's slot is a WEIGHT, and a slot held at a fraction of it is not equal weight.
+
+    `engine.orders` KEEPS a held name in the top 12 rather than re-buying it, so a partial line
+    occupies a whole slot and the capital that slot was meant to carry stays parked. §3.5 has no
+    top-up rule — a name is bought once, at weight, and never bought again — so nothing here is
+    ordered and §0.3 leaves the ruling with Zak.
+
+    It belongs in the BRIEF and not only on the sheet, because the sheet says what to execute and
+    this is the thing there is nothing to execute about: at the seed it decides how much of the
+    account actually gets deployed, and a line nobody sees is a decision nobody makes.
+    """
+    nav = (p.get("nav") or {}).get("engine_nav")
+    if not nav:
+        return []
+    slot, short = float(nav) / engine.SLOTS, []
+    for b in p["book"] or []:
+        if b.get("rank") is None or b["ticker"] in desk.PARKED or not b.get("last_close"):
+            continue
+        value = float(b["qty"]) * float(b["last_close"])
+        if value < slot:
+            short.append((b["ticker"], b["rank"], value, slot - value, value / slot))
+    if not short:
+        return []
+    out = ["", "## Held below §3.5's equal weight — reported, NOT ordered"]
+    for tk, rank, value, gap, pct in short:
+        out.append(f"  {tk:<10} rank {rank:<3} {value:>12,.2f} of a {slot:,.2f} slot "
+                   f"({pct:.0%}) — short {gap:,.2f}")
+    out.append(f"  {len(short)} slot(s) count as filled while holding {sum(s[3] for s in short):,.2f}"
+               f" less than their weight, so that much capital stays parked.")
+    out.append("  §3.5 fills FREE slots and keeps a held name rather than re-buying it; it carries")
+    out.append("  no top-up rule. Topping one up is a rebalance, which on a momentum book means")
+    out.append("  trimming winners. **This one is Zak's (§0.3).**")
     return out
 
 
@@ -272,7 +326,7 @@ def render(p, frozen=False, words=None):
     out.append(freshness_line(p))
     out += ["", gate_line(p), "", "## Order sheet (§4.3)", ""]
     out += sheet_lines(p)
-    out += ["", "## Book (§4.2)", ""] + book_lines(p)
+    out += ["", "## Book (§4.2)", ""] + book_lines(p) + underweight_lines(p)
     out += ["", "## NAV & drawdown (§5.2)", ""] + dd_lines(p)
     out += ["", "## Levered layer (§2.3)", ""] + tranche_lines(p, frozen=frozen)
 

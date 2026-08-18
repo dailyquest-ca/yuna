@@ -361,3 +361,63 @@ def test_one_v1_brief_per_session_is_a_constraint_and_not_a_convention(db, migra
                            values ('nightly', %s, 'second', 'FRESH — NUE.US sold',
                                    '{"composed": true, "engine": "v1"}'::jsonb)""", (session,))
     db.rollback()
+
+
+def test_the_brief_tells_the_park_apart_from_a_holding_queued_to_sell(db, migrated):
+    """Two unranked holdings, opposite meanings, and the brief must not print the same note on both.
+
+    A `.US` common stock that left §3.2's universe IS queued to sell: §3.5 queues anything below
+    rank 12 and "not ranked at all" is below it. The park is unranked because it was never
+    eligible — it is where §3.4 puts the money while the gate is off, and §6.5 converts it at the
+    seed. Printing "§3.5 treats as below 12" against 810 shares of the Phase-0 bridge reads as
+    "this is queued to sell", which is the opposite of what it is being held for. It did.
+    """
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",), excluded=("N15.US",))     # left the universe: sells
+        from test_desk import _park
+        _park(cur, days)                                               # the bridge: does not
+        _score(cur, days)
+        db.commit()
+        lines = "\n".join(brief.book_lines(brief.payload(cur)))
+
+    assert "SPMO.US" in lines and "N15.US" in lines
+    park_note = "park — engine capital, never a slot and never sold for failing to rank"
+    exit_note = "outside §3.2's universe, which §3.5 treats as below 12"
+    spmo = [ln for ln in lines.splitlines() if "SPMO.US" in ln or park_note in ln]
+    assert any(park_note in ln for ln in spmo), "the park is named as the park"
+    assert exit_note in lines, "and the genuinely-departed holding still says it is queued"
+    # the two notes appear once each — the park did not inherit the sell warning
+    assert lines.count(exit_note) == 1
+    assert lines.count(park_note) == 1
+
+
+def test_the_brief_carries_the_underweight_slots_zak_has_to_rule_on(db, migrated):
+    """§3.5's slot is a WEIGHT, and `engine.orders` keeps a held name rather than re-buying it — so
+    a partial line occupies a whole slot and the capital it was meant to carry stays parked.
+
+    This belongs in the BRIEF and not only on the sheet, because it is the one thing there is
+    nothing to execute about: at the seed it decides how much of the account is actually deployed,
+    and a line nobody sees is a decision nobody makes.
+    """
+    with db.cursor() as cur:
+        days = _world(cur)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','preseed',20,40.0,'open')""")
+        _score(cur, days)
+        db.commit()
+        p = brief.payload(cur)
+        lines = "\n".join(brief.underweight_lines(p))
+
+    assert "N00.US" in lines
+    assert "NOT ordered" in lines and "Zak's (§0.3)" in lines
+    assert "so that much capital stays parked" in lines
+    assert "%" in lines, "the shortfall is stated as a fraction of the slot it should fill"
+
+
+def test_no_underweight_section_when_every_slot_is_at_weight(db, migrated):
+    """A section that always prints is a section nobody reads."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        db.commit()
+        assert brief.underweight_lines(brief.payload(cur)) == []
