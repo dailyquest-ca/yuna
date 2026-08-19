@@ -143,6 +143,36 @@ def book_lines(p):
     return out
 
 
+def sleeve_lines(p):
+    """Where purpose and wrapper have stopped agreeing, from the one payload read (§0.4).
+
+    Zak, 2026-08-18: *"The sleeve is the purpose of the money. We just set the boundaries as the
+    account for simplicity but one day some of the RRSP may be used for Momentum and maybe some of
+    the TFSA will be used for something else."*
+
+    The engine reads the ACCOUNT, which is right only while the two coincide. This section is the
+    expiry notice: the day momentum money sits in the RRSP, the engine cannot see it and nothing
+    else about the sheet looks any different — a position it cannot see is one it can never sell.
+    """
+    rows = desk.diverging(p["book"] or [])
+    if not rows:
+        return []
+    out = ["", "## Sleeve vs account — the engine reads the account (§2.1)"]
+    for r in rows:
+        out.append(f"  {r['account']}/{r['ticker']:<10} labelled `{r['sleeve']}` — §2.1 puts "
+                   + " or ".join(f"`{s}`" for s in r["expected"]) + " here")
+        if r["engine_sees_it"] and not r["engine_would_see_it"]:
+            out.append("      the engine trades it today (it is in the TFSA) and would NOT if the "
+                       "filter were the sleeve")
+        elif r["engine_would_see_it"] and not r["engine_sees_it"]:
+            out.append("      ** the engine does NOT see this and its purpose says it should — "
+                       "it can never be sold while the filter is the account **")
+    out.append("  The sleeve is the purpose of the money; the account is where it sits. They agree")
+    out.append("  today, which is the only reason reading the account is safe. Correcting a label")
+    out.append("  is assigning purpose to money — Zak's, never inferred here (§0.3).")
+    return out
+
+
 def underweight_lines(p):
     """§3.5's slot is a WEIGHT, and a slot held at a fraction of it is not equal weight.
 
@@ -356,7 +386,7 @@ def render(p, frozen=False, words=None):
     out.append(freshness_line(p))
     out += ["", gate_line(p), "", "## Order sheet (§4.3)", ""]
     out += sheet_lines(p)
-    out += ["", "## Book (§4.2)", ""] + book_lines(p) + underweight_lines(p)
+    out += ["", "## Book (§4.2)", ""] + book_lines(p) + underweight_lines(p) + sleeve_lines(p)
     out += ["", "## NAV & drawdown (§5.2)", ""] + dd_lines(p)
     out += ["", "## Levered layer (§2.3)", ""] + tranche_lines(p, frozen=frozen)
 

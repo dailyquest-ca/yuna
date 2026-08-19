@@ -76,9 +76,25 @@ def load(cur, as_of):
 
 
 # §2.1's table, verbatim: "TFSA | **The engine** | The engine's five names (+ park when gated
-# off)". The account IS the allocation — "there are no percentage targets" — so everything in the
-# TFSA is the engine's to manage, and nothing outside it ever is.
+# off)". The account IS the allocation — "there are no percentage targets".
+#
+# **But the account is a PROXY, not the thing itself.** Zak, 2026-08-18:
+#
+#   "The sleeve is the purpose of the money. We just set the boundaries as the account for
+#    simplicity but one day some of the RRSP may be used for Momentum and maybe some of the TFSA
+#    will be used for something else."
+#
+# So the engine's true set is the momentum SLEEVE, and reading the account works only for as long
+# as the two coincide. They coincide today, and §2.1 is why. The day they stop, an account filter
+# fails in the direction this repository has already paid for: money whose purpose is momentum,
+# sitting in the RRSP, is invisible to the engine — which is exactly the AXTI/MU defect with the
+# label swapped for the wrapper. `sleeve_divergence` below is what refuses to let that be silent.
 ENGINE_ACCOUNT = "TFSA"
+ENGINE_SLEEVE = "momentum"
+
+# §2.1's table read as purpose-per-wrapper: which sleeves the plan currently places in which
+# account. NONREG carries two because the plan gives it two — "Reserve + levered layer".
+SLEEVES_BY_ACCOUNT = {"TFSA": ("momentum",), "RRSP": ("reserve",), "NONREG": ("reserve", "levered")}
 
 # The two instruments that hold engine capital WITHOUT being an engine slot, each named by the plan
 # and neither inferred:
@@ -96,21 +112,65 @@ ENGINE_ACCOUNT = "TFSA"
 PARKED = (engine.PARK, "SPMO.US")
 
 
+def sleeve_divergence(cur):
+    """Positions whose PURPOSE is not the one §2.1 puts in their account. Returns [dict].
+
+    This is the expiry date on `held_book`'s account filter, made observable. The engine reads the
+    account because account and sleeve coincide today; the moment they stop, the filter is wrong
+    and nothing about the sheet looks different — the RRSP momentum money is simply absent, and a
+    position the engine cannot see is one it can never sell.
+
+    A guard for a condition that has not happened yet is easy to write and easy to write uselessly,
+    so this one is checked against today's book rather than imagined: it fires on all three TFSA
+    positions right now, because `preseed` and `reserve` are not statements of purpose and Zak's
+    own description of that account is "a large Momentum Sleeve". That is a true finding, and the
+    fix is Zak relabelling — assigning purpose to money is not a thing this file may infer (§0.3).
+    """
+    cur.execute("""select account, ticker, sleeve, qty from book
+                    where status = 'open' order by account, ticker""")
+    return diverging(dict(account=a, ticker=t, sleeve=s, qty=q) for a, t, s, q in cur.fetchall())
+
+
+def diverging(rows):
+    """The same rule over already-read rows, so §0.4's one-read law holds in the brief.
+
+    `brief.render` has a payload and no cursor, deliberately — a session reads `v_session_payload`
+    once and then judges, and it never goes back to the tables. The payload's book already carries
+    `account` and `sleeve`, so the divergence is derivable from what has been read.
+    """
+    out = []
+    for r in rows:
+        expected = SLEEVES_BY_ACCOUNT.get(r["account"])
+        if expected is None or r["sleeve"] in expected:
+            continue
+        out.append(dict(account=r["account"], ticker=r["ticker"], sleeve=r["sleeve"],
+                        qty=float(r["qty"]), expected=expected,
+                        engine_sees_it=(r["account"] == ENGINE_ACCOUNT),
+                        engine_would_see_it=(r["sleeve"] == ENGINE_SLEEVE)))
+    return out
+
+
 def held_book(cur, account=ENGINE_ACCOUNT):
     """Everything the engine holds. §2.1 puts it in the TFSA and gives it the whole account.
 
-    Filtered by ACCOUNT, not by sleeve, and that is a correction. The sleeve filter was inherited
-    from the machine v1.0 replaced, which ran three sleeves side by side and had to tell them
-    apart. v1.0 has one engine and §2.1 hands it one account, so a sleeve label decides nothing —
-    and while it did, it decided something badly: 20 shares of AXTI and 2 of MU sat in the TFSA
-    tagged `preseed`, invisible to the engine, while AXTI and MU ranked 2nd and 3rd in its own top
-    twelve. The seed would have sized a full NAV/5 slot in each as though none were held.
+    Filtered by ACCOUNT, and that is deliberate, current, and temporary — see the constants above.
+    Zak, 2026-08-18: *"We just set the boundaries as the account for simplicity."* The sleeve is
+    the purpose of the money and the account is where it happens to sit; today §2.1 makes them the
+    same set, and this filter is that coincidence spent knowingly rather than by accident.
 
-    A position the engine cannot see is one it can never sell, never count against §3.5's five
-    slots, and never net against a buy. There is no label that makes that safe.
+    It replaced a `sleeve = 'momentum'` filter, and the reason is worth keeping: 20 shares of AXTI
+    and 2 of MU sat in the TFSA tagged `preseed`, invisible to an engine that ranked them 2nd and
+    3rd, and the seed would have sized a full NAV/5 slot in each as though none were held. A
+    position the engine cannot see is one it can never sell, never count against §3.5's five slots,
+    and never net against a buy. The label was not describing purpose, so it could not be trusted
+    to select on — and it still is not.
+
+    **Moving this back to the sleeve needs the labels corrected first**, and `sleeve_divergence`
+    reports how far off they are. Until then the account is the safer of two imperfect keys,
+    because a wrapper cannot be mislabelled.
 
     Zak, 2026-08-18: *"the momentum play should view the whole book and make a plan for how to
-    adjust it to meet the goal portfolio."* This is the whole book; `sheet` splits the park off it.
+    adjust it to meet the goal portfolio."* This is the whole account; `sheet` splits the park off.
     """
     cur.execute("""select ticker, sum(qty) from book
                     where status = 'open' and account = %s

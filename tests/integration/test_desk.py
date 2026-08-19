@@ -356,3 +356,65 @@ def test_the_bridge_is_held_until_the_shadow_passes(db, migrated):
     assert not [o for o in s["orders"] if o["clause"] == "fund"], "and the bridge is not sold"
     assert "SPMO.US" not in [o["ticker"] for o in s["orders"]]
     assert "§6.5 converts this at the seed" in desk.render(s), "and the sheet says why"
+
+
+def test_the_engine_cannot_see_momentum_money_outside_its_account(db, migrated):
+    """Zak, 2026-08-18: *"The sleeve is the purpose of the money. We just set the boundaries as the
+    account for simplicity but one day some of the RRSP may be used for Momentum and maybe some of
+    the TFSA will be used for something else."*
+
+    The day that happens, `held_book` — which reads the account — silently misses it. Nothing about
+    the sheet looks different: the position is simply absent, so it can never be sold, never counts
+    against §3.5's five slots, and never nets against a buy. That is the AXTI/MU defect with the
+    wrapper swapped for the label, and the account filter cannot detect it by itself.
+
+    `sleeve_divergence` is what refuses to let it be silent.
+    """
+    with db.cursor() as cur:
+        days = _world(cur)
+        cur.execute("""insert into accounts (code,label,kind,currency)
+                       values ('RRSP','rrsp','registered','CAD') on conflict do nothing""")
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','RRSP','momentum',50,40.0,'open')""")
+        db.commit()
+
+        assert "N00.US" not in desk.held_book(cur), "the account filter misses it — the defect"
+        d = desk.sleeve_divergence(cur)
+        assert len(d) == 1 and d[0]["ticker"] == "N00.US"
+        assert d[0]["engine_sees_it"] is False, "the engine does not trade it today"
+        assert d[0]["engine_would_see_it"] is True, "and its PURPOSE says it should"
+        assert d[0]["expected"] == ("reserve",), "§2.1 puts reserve in the RRSP"
+
+
+def test_a_tfsa_position_whose_purpose_is_not_momentum_is_flagged_too(db, migrated):
+    """The mirror, and the one that is true of production today. §2.1 puts momentum in the TFSA, so
+    a TFSA line labelled anything else is money the engine IS trading whose stated purpose says it
+    should not. Both directions matter — one hides a position, the other trades someone else's."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','preseed',20,40.0,'open')""")
+        db.commit()
+
+        assert "N00.US" in desk.held_book(cur), "the account filter includes it"
+        d = desk.sleeve_divergence(cur)
+        assert len(d) == 1
+        assert d[0]["engine_sees_it"] is True and d[0]["engine_would_see_it"] is False
+
+
+def test_an_account_whose_labels_match_the_plan_is_silent(db, migrated):
+    """A guard that fires on the healthy case is a guard that gets ignored. §2.1's arrangement —
+    momentum in the TFSA, reserve in the RRSP, reserve or levered in the NONREG — says nothing."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        for acct in ("RRSP", "NONREG"):
+            cur.execute("""insert into accounts (code,label,kind,currency)
+                           values (%s,%s,'registered','CAD') on conflict do nothing""",
+                        (acct, acct.lower()))
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','momentum',20,40.0,'open'),
+                              ('N01.US','RRSP','reserve',10,40.0,'open'),
+                              ('N02.US','NONREG','levered',10,40.0,'open'),
+                              ('N03.US','NONREG','reserve',10,40.0,'open')""")
+        db.commit()
+        assert desk.sleeve_divergence(cur) == []

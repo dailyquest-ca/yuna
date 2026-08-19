@@ -481,3 +481,37 @@ def test_the_underweight_ruling_is_named_even_before_the_nav_lands(db, migrated)
 
     assert "pending an engine NAV" in lines and "N00.US" in lines
     assert "config.engine_nav" in lines and "Zak's (§0.3)" in lines
+
+
+def test_the_brief_names_momentum_money_the_engine_cannot_reach(db, migrated):
+    """The expiry notice on the account filter, in the document Zak reads.
+
+    Zak, 2026-08-18: *"one day some of the RRSP may be used for Momentum."* On that day `held_book`
+    misses it and the sheet looks completely normal — the position is simply absent. The brief has
+    to say so, because there is no other symptom.
+    """
+    with db.cursor() as cur:
+        days = _world(cur)
+        cur.execute("""insert into accounts (code,label,kind,currency)
+                       values ('RRSP','rrsp','registered','CAD') on conflict do nothing""")
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','RRSP','momentum',50,40.0,'open')""")
+        _score(cur, days)
+        db.commit()
+        lines = "\n".join(brief.sleeve_lines(brief.payload(cur)))
+
+    assert "N00.US" in lines and "RRSP" in lines
+    assert "does NOT see this and its purpose says it should" in lines
+    assert "can never be sold while the filter is the account" in lines
+    assert "Zak's, never inferred here (§0.3)" in lines
+
+
+def test_the_brief_is_silent_when_purpose_and_wrapper_agree(db, migrated):
+    """§2.1's arrangement says nothing. A section that always prints is a section nobody reads."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','momentum',20,40.0,'open')""")
+        _score(cur, days)
+        db.commit()
+        assert brief.sleeve_lines(brief.payload(cur)) == []
