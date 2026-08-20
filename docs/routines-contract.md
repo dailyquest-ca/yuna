@@ -128,7 +128,12 @@ That is the whole operation. The position moves on commit; tonight's sheet sees 
 ### Zak uploads a bank export
 
 Same insert per trade row, with `grade = 'broker'`, `source = 'csv <filename>'`, and the bank's own
-identifier in `external_ref`. Then supersede whatever he had already said about the same trade —
+identifier in `external_ref`. **When the export carries no per-row id — Wealthsimple's activities
+export does not — synthesize one as `<filename>#<row>`** (e.g. `activitiesexport20260819.csv#2`).
+`external_ref` is UNIQUE, and that is the protection: the same file uploaded twice collides on
+insert instead of silently doubling every position it touches — the one failure mode the ledger and
+the book cannot catch, because they agree on the doubled number. **Never work around the collision
+by inventing a fresh ref for a row you have already imported.** Then supersede whatever he had already said about the same trade —
 matched on **account, ticker, side and the day, never on quantity or price**, because the whole
 reason the export supersedes his word is that those numbers differ slightly:
 

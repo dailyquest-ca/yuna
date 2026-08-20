@@ -455,3 +455,48 @@ def test_the_ledger_opens_a_position_unassigned_not_book(db):
         db.commit()
         cur.execute("select sleeve from book where ticker = 'MU.US'")
         assert cur.fetchone()[0] == "unassigned"
+
+
+def test_the_same_export_uploaded_twice_collides_instead_of_doubling(db):
+    """The gap the first REAL import surfaced (2026-08-20), closed by migration 062.
+
+    Wealthsimple's export carries no per-row id, so the importing session synthesizes
+    `<filename>#<row>`. Without uniqueness a re-upload doubles every position it touches, and
+    NOTHING catches it — the ledger and the book agree on the doubled number, so every
+    reconciliation view reads clean. A hard collision is the only honest outcome.
+    """
+    with db.cursor() as cur:
+        _universe(cur, "SPMO.US")
+        cur.execute("""insert into transactions (ticker, account, side, qty, price, currency,
+                                                 trade_date, confirmed, confirmed_at, grade,
+                                                 external_ref, source)
+                       values ('SPMO.US','TFSA','buy',713,155.40,'USD','2026-08-17',true,now(),
+                               'broker','activitiesexport.csv#1','csv activitiesexport.csv')""")
+        db.commit()
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            cur.execute("""insert into transactions (ticker, account, side, qty, price, currency,
+                                                     trade_date, confirmed, confirmed_at, grade,
+                                                     external_ref, source)
+                           values ('SPMO.US','TFSA','buy',713,155.40,'USD','2026-08-17',true,now(),
+                                   'broker','activitiesexport.csv#1','csv activitiesexport.csv')""")
+    db.rollback()
+    with db.cursor() as cur:
+        cur.execute("select qty from book where ticker = 'SPMO.US' and status = 'open'")
+        assert cur.fetchone()[0] == 713.0, "the position did not double"
+
+
+def test_a_chat_imported_export_counts_as_a_receipt(db):
+    """§4.4's gauge reads "book-vs-broker reconciliation age", and 052 keyed last_receipt on
+    `broker_ref` — which only the manifest path sets. On a desk whose receipts all arrive through
+    chat, the gauge's newest receipt would read null forever. Migration 062: the newest live
+    broker-grade trade date, whatever the route."""
+    with db.cursor() as cur:
+        _universe(cur, "SPMO.US")
+        cur.execute("select last_receipt from v_reconciliation_age")
+        assert cur.fetchone()[0] is None
+        ledger.record(cur, dict(ticker="SPMO.US", account="TFSA", side="buy", qty=810,
+                                price=155.5, trade_date="2026-08-17", external_ref="ws.csv#1"),
+                      "broker", "csv ws.csv")
+        db.commit()
+        cur.execute("select last_receipt from v_reconciliation_age")
+        assert str(cur.fetchone()[0]) == "2026-08-17"
