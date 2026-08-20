@@ -7,7 +7,8 @@
 -- exists for:
 --
 --   **Nothing stops the same file landing twice.** The export carries no per-row id, so the chat
---   put the filename in `external_ref` — on all three rows, the same string. `broker_ref` (052's
+--   put the filename in `external_ref` — the same string on every row it touched (the three SPMO
+--   buys, and the 08-07 RS.US sell it matched and upgraded to broker-grade). `broker_ref` (052's
 --   unique key) is only set by the manifest path, so a re-upload of the same CSV inserts three
 --   more rows, the trigger doubles the positions, and NOTHING catches it: the ledger and the book
 --   AGREE on the doubled number, so `v_ledger_vs_book` is empty, and the openings/staleness views
@@ -28,6 +29,16 @@
 --    words: the last day the bank's own record moved this ledger.
 
 -- ---- 1. per-row refs, then the uniqueness that makes re-imports collide -------------------------
+--
+-- The rewrite below fires `ledger_moves_the_book`, which 059 made DEFERRABLE INITIALLY DEFERRED —
+-- and Postgres refuses CREATE INDEX on a table with pending deferred trigger events in the same
+-- transaction. First attempt at this migration died exactly there, in production only: the local
+-- suite applies migrations to an EMPTY table, so the UPDATE queued no events and the failure mode
+-- did not exist until there was data. Forcing the trigger immediate for this transaction drains
+-- the queue at each statement instead; the events themselves are harmless recomputes of positions
+-- an external_ref change cannot move.
+set constraints ledger_moves_the_book immediate;
+
 with numbered as (
   select id, external_ref,
          row_number() over (partition by external_ref order by id) as n,
