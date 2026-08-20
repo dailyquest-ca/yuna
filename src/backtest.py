@@ -2440,6 +2440,14 @@ def main():
     with connect() as conn:
         with Heartbeat(conn, "backtest") as hb:
             with conn.cursor() as cur:
+                # Supabase kills any statement at its 2-minute default, and `load()` is one
+                # statement over every US bar we hold — 3,200+ names, twenty years. It crossed the
+                # default on 2026-08-16 and every run since died identically at load() ~121s in,
+                # including the runs this workflow fires on ordinary pushes to main (its `paths:`
+                # watch migrations/** and half of src/). Raising the ceiling is session-scoped,
+                # read-only research tooling, and an OPERATIONAL bound rather than a plan value:
+                # nothing financial hangs on it, and the workflow's own timeout still caps the job.
+                cur.execute("set statement_timeout = '20min'")
                 hyp = hypothesis()
                 t_load = time.monotonic()
                 frame = load(cur)

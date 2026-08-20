@@ -125,7 +125,9 @@ def apply_fills(conn, hb):
 def sync_fills_from_tickets(conn, hb):
     """§4.5 fill loop under the 2026-08-04 write list: a fill travels as ticket state — chat or
     flip writes `fill_*` on the ticket and marks it provisional — and THIS job derives the
-    transactions row, because §4.3 no longer lets a session touch the ledger. Sunday's
+    transactions row, because the 2026-08-04 §4.3 did not let a session touch the ledger. (059
+    reversed that — sessions write `transactions` directly now; this path stays only for the
+    retired dispatch jobs.) Sunday's
     confirmation flips the ticket to confirmed with trued numbers; the same pass here trues the
     transaction. Both directions are idempotent: one transaction per ticket, updates by delta.
 

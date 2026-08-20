@@ -27,6 +27,13 @@ connector is read-only (`cannot execute INSERT in a read-only transaction`), so 
 its brief yet. Zak gives `yuna_session` a password + login in the dashboard and repoints the
 connector at it."* Nothing since has recorded that being done. This job says whether it was.
 
+**Updated 2026-08-19 for migrations 059/060.** The probe's original write list was the 2026-08-04
+plan's, which kept `transactions` away from sessions — and that lock, outliving its law, was the
+answer this probe was built to find. Under Zak's 2026-08-18 instruction the ledger is precisely the
+surface a session writes (059 grants INSERT/UPDATE + an RLS policy and drops `guard_transactions`),
+while `book` stays job-written because the ledger moves it by trigger. So `transactions` is back on
+the list below, and a ✗ against it is once again a real failure, not the old design.
+
 READ-ONLY. No INSERT, UPDATE, DELETE or COMMIT.
 
     DATABASE_URL=... python src/session_probe.py
@@ -37,9 +44,11 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from db import connect                                                     # noqa: E402
 
-# §4.3's session write list, 2026-08-04. A session that cannot write one of these cannot do the job
-# the plan gives it, and the failure is silent from the chat's side.
-SESSION_WRITES = ("briefs", "tickets", "observations", "rulings", "learnings", "config")
+# The session write list as of migration 059: §4.3's six from 2026-08-04, plus `transactions` per
+# Zak's 2026-08-18 instruction. A session that cannot write one of these cannot do the job the plan
+# gives it, and the failure is silent from the chat's side.
+SESSION_WRITES = ("briefs", "tickets", "observations", "rulings", "learnings", "config",
+                  "transactions")
 
 
 def main():
