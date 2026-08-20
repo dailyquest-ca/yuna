@@ -176,7 +176,7 @@ def test_the_sheet_gauge_re_derives_every_quantity_from_the_plan(db, migrated):
 
     assert g["status"] == "red"
     assert len(g["failures"]) == 5
-    assert "§3.5 gives int(" in g["failures"][0]
+    assert "§3.5 gives" in g["failures"][0]
 
 
 def test_the_sheet_gauge_refuses_a_sell_with_no_quantity(db, migrated):
@@ -201,7 +201,7 @@ def test_the_sheet_gauge_rejects_a_clause_the_plan_does_not_name(db, migrated):
         db.commit()
         g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
     assert g["status"] == "red"
-    assert any("not a §3.5 clause" in f for f in g["failures"])
+    assert any("not a recognised clause" in f for f in g["failures"])
 
 
 def test_an_unsized_sheet_is_amber_not_red(db, migrated):
@@ -374,3 +374,31 @@ def test_a_stale_quantity_on_a_withdrawn_ticket_does_not_go_red(db, migrated):
     verdict, got = gauges.run(db)
     sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
     assert sheet_gauge["status"] == "green", sheet_gauge["why"]
+
+
+def test_the_gauge_re_derives_a_seed_sheet_fund_and_topups_included(db, migrated):
+    """The first real seed sheet must not be held by its own arithmetic check. A `fund` sell's
+    quantity is the park position, not NAV/5; a `top_up` buy is the slot LESS the line held. The
+    gauge validates each by its own rule — and still goes red when a top-up quantity is wrong,
+    because a wrong size on the one sheet that deploys everything is the most expensive number
+    this system can produce."""
+    from test_desk import _park, _shadow_passed
+    with db.cursor() as cur:
+        days = _world(cur)
+        _park(cur, days)
+        _shadow_passed(cur, days)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','momentum',20,40.0,'open')""")
+        _score(cur, days)
+    db.commit()
+    verdict, got = gauges.run(db)
+    sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
+    assert sheet_gauge["status"] == "green", sheet_gauge
+
+    with db.cursor() as cur:                            # now break the top-up's size
+        cur.execute("""update tickets set qty = qty + 7
+                        where clause = 'top_up' and session_date = %s""", (days[-1],))
+    db.commit()
+    verdict, got = gauges.run(db)
+    sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
+    assert sheet_gauge["status"] == "red", "a mis-sized top-up must hold the buys"

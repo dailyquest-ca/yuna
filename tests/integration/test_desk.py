@@ -418,3 +418,66 @@ def test_an_account_whose_labels_match_the_plan_is_silent(db, migrated):
                               ('N03.US','NONREG','reserve',10,40.0,'open')""")
         db.commit()
         assert desk.sleeve_divergence(cur) == []
+
+
+def test_the_seed_tops_up_the_partial_slots_and_empties_the_park(db, migrated):
+    """Zak, 2026-08-19: *"The strategy should auto suggest the right thing... If it suggests
+    leaving anything in SPMO there is a problem."* That is the ruling §0.3 required, and this is
+    its shape: at seed conditions (gate ON, shadow passed, park held), a kept top-12 name below its
+    weight is bought UP TO NAV/5, funded by the park sell on the same sheet. The dollars must
+    account for the whole park — nothing stays in SPMO.
+    """
+    nav = 200_000.0
+    with db.cursor() as cur:
+        days = _world(cur)
+        _park(cur, days)                                # SPMO 810 @ 155.5 ≈ 125.9k
+        _shadow_passed(cur, days)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','momentum',20,40.0,'open')""")
+        cur.execute("select close from prices where ticker='N00.US' and d=%s", (days[-1],))
+        px = float(cur.fetchone()[0])
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], nav)
+
+    fund = [o for o in s["orders"] if o["clause"] == "fund"]
+    topups = [o for o in s["orders"] if o["clause"] == "top_up"]
+    fills = [o for o in s["orders"] if o["clause"] == "fill"]
+    assert len(fund) == 1 and fund[0]["qty"] == 810, "the whole park sells — nothing stays in SPMO"
+    assert s["orders"][0] is fund[0], "and the cash leg leads the sheet (§3.5: sells first)"
+    assert len(topups) == 1 and topups[0]["ticker"] == "N00.US"
+    assert topups[0]["qty"] == engine.position_size(nav, px) - 20, "the slot, less the line held"
+    assert len(fills) == 4, "the four genuinely free slots fill"
+    assert s["underweight"] == [], "topped up is not underweight — the report empties"
+
+
+def test_topups_never_fire_while_the_shadow_runs(db, migrated):
+    """The same book without §6.4's pass: the shortfall is REPORTED and nothing is ordered. §6.5
+    gates the whole deployment, and a proposal is what Zak acts on."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _park(cur, days)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','momentum',20,40.0,'open')""")
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    assert not [o for o in s["orders"] if o["clause"] in ("top_up", "fund")]
+    assert [u["ticker"] for u in s["underweight"]] == ["N00.US"], "reported instead"
+
+
+def test_topups_cannot_pyramid_winners_once_the_park_is_empty(db, migrated):
+    """The scoping that keeps Zak's ruling §3.5-clean, and it needs no invented constant: a top-up
+    exists only while the park can pay for it. Post-seed the park is empty, so NAV growth lifting
+    NAV/5 above every entry weight can never start feeding winners — a name bought at weight is
+    never bought again."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _shadow_passed(cur, days)                       # seed conditions, but NO park held
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','momentum',20,40.0,'open')""")
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    assert not [o for o in s["orders"] if o["clause"] in ("top_up", "fund")]
+    assert [u["ticker"] for u in s["underweight"]] == ["N00.US"], "still visible, never bought"

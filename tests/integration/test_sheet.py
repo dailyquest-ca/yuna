@@ -11,6 +11,7 @@
     lose the one fact the loop turns on.
 """
 import pathlib
+import pytest
 import subprocess
 import sys
 
@@ -170,20 +171,82 @@ def test_without_a_nav_the_sells_still_carry_quantities(db, migrated):
 def test_the_engine_nav_is_never_inferred_from_household_nav(db, migrated):
     """`nav_snapshots.nav_cad` is every account, converted to CAD. §3.5 sizes a USD sleeve. Using
     one for the other is wrong by the FX rate AND by the other two accounts, and it would not
-    throw — it would produce a plausible position size."""
+    throw — it would produce a plausible position size.
+
+    Still true after the 2026-08-19 derivation: the derived NAV is built from the engine's OWN
+    book and cash, and household NAV remains no source. With an empty book and no cash anchor the
+    derivation fails closed and SAYS WHY, rather than reaching for the wrong number that exists.
+    """
     with db.cursor() as cur:
         cur.execute("""insert into nav_snapshots (d, nav_cad, provisional)
                        values (current_date, 500000, false)""")
         db.commit()
-        assert sheet.engine_nav(cur) is None
+        nav, source = sheet.engine_nav(cur)
+        assert nav is None
+        assert "no balances anchor" in source["why"], "fails closed on the missing anchor"
 
 
 def test_the_config_row_supplies_the_nav_when_the_environment_does_not(db, migrated):
+    """And a config row is a RULING: it outranks the derivation for as long as it stands."""
     with db.cursor() as cur:
         cur.execute("""insert into config (key, value, set_by)
                        values ('engine_nav', %s, 'test')""", ("187500",))
         db.commit()
-        assert sheet.engine_nav(cur) == 187_500.0
+        nav, source = sheet.engine_nav(cur)
+        assert nav == 187_500.0 and source["source"] == "config"
+
+
+def _engine_world(cur, days):
+    """The engine's own numbers, for the derivation: two priced TFSA positions, a cash anchor,
+    and an FX row."""
+    cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                   values ('N00.US','TFSA','momentum',20,40.0,'open'),
+                          ('N01.US','TFSA','momentum',10,40.0,'open')""")
+    cur.execute("""insert into balances (account, as_of, cash_cad, cash_usd, source)
+                   values ('TFSA', %s, 140.0, 16.0, 'test')""", (days[-1],))
+    cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                   values ('USDCAD.FOREX','USDCAD','fx','CAD','active')
+                   on conflict (ticker) do nothing""")
+    cur.execute("""insert into prices (ticker,d,close,adj_close,volume) values (%s,%s,1.40,1.40,0)
+                   on conflict (ticker,d) do update set close=1.40""",
+                ('USDCAD.FOREX', days[-1]))
+
+
+def test_the_nav_is_derived_from_the_engines_own_book_and_cash(db, migrated):
+    """Zak, 2026-08-19: "You have the balances of all the accounts... You know the NAV."
+
+    engine NAV = TFSA marked equity (every position at its last close, park included) + TFSA cash,
+    CAD converted at the session's USDCAD. Every input has provenance in the store — §2.0's
+    "balances are truth, prices are the extrapolation" as one number.
+    """
+    with db.cursor() as cur:
+        days = _world(cur)
+        _engine_world(cur, days)
+        cur.execute("""select ticker, close from prices
+                        where ticker in ('N00.US','N01.US') and d = %s""", (days[-1],))
+        px = dict(cur.fetchall())
+        db.commit()
+
+        nav, source = sheet.engine_nav(cur, days[-1])
+        want = 20 * float(px['N00.US']) + 10 * float(px['N01.US']) + 16.0 + 140.0 / 1.40
+        assert nav == pytest.approx(want)
+        assert source["source"] == "derived"
+        assert source["cash_cad"] == pytest.approx(140.0) and source["usdcad"] == 1.40
+
+
+def test_the_derivation_fails_closed_on_an_unpriced_position(db, migrated):
+    """A TFSA holding with no bar would silently understate the equity — so the answer is "no NAV,
+    and here is which name", never a smaller number that looks fine."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _engine_world(cur, days)
+        cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                       values ('DARK.US','DARK','etf','USD','active')""")
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('DARK.US','TFSA','momentum',5,10.0,'open')""")
+        db.commit()
+        nav, source = sheet.engine_nav(cur, days[-1])
+        assert nav is None and "DARK.US" in source["why"]
 
 
 def test_shadow_and_live_are_separate_records_of_the_same_close(db, migrated):

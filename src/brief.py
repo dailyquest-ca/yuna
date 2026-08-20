@@ -34,7 +34,21 @@ DD_MILESTONES = (-0.20, -0.30, -0.40, -0.50)
 def payload(cur):
     cur.execute("select * from v_session_payload")
     cols = [d[0] for d in cur.description]
-    return dict(zip(cols, cur.fetchone()))
+    p = dict(zip(cols, cur.fetchone()))
+    # The payload view predates the derived NAV (2026-08-19): its nav block only knows
+    # `config.engine_nav`, so when the engine DERIVED tonight's number the block reads unknown
+    # while the sheet upstairs is fully sized — a brief contradicting its own order sheet. The
+    # number the engine actually used is stored on the session row, so it is read from there.
+    # This is the pipeline reading its own stored output, not chat-side arithmetic (§0.4); folding
+    # it into v_session_payload proper is a later migration.
+    nav = p.get("nav") or {}
+    if not nav.get("engine_nav"):
+        cur.execute("""select nav from engine_sessions where mode = 'live' and nav is not null
+                        order by session_date desc limit 1""")
+        row = cur.fetchone()
+        if row and row[0]:
+            p["nav"] = dict(nav, engine_nav=float(row[0]), engine_nav_source="session (derived)")
+    return p
 
 
 def _pct(x, places=1):
@@ -87,8 +101,9 @@ def sheet_lines(p):
         else:
             qty = f"{float(r['qty']):>10,.0f}" if r["qty"] is not None else "         —"
             mark = f"{float(r['mark']):,.2f}" if r["mark"] is not None else "—"
+            tag = "   (top-up to weight)" if r.get("clause") == "top_up" else ""
             out.append(f"  BUY  {r['ticker']:<10} qty {qty}   "
-                       f"rank {r['rank']}   mark {mark}   [{r['state']}]")
+                       f"rank {r['rank']}   mark {mark}   [{r['state']}]{tag}")
     out.append("")
     out.append("  Zak executes at the open: sells first, then buys (§3.5). Market orders; no GTC "
                "orders exist anywhere in this system (§4.3).")

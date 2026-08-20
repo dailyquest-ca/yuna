@@ -17,12 +17,13 @@ Three tables, one per question the record has to answer later:
 **Nothing here places, modifies or cancels an order** (§0.2). It writes rows in state `proposed`.
 Zak approves and executes; `reconcile.py` closes the loop against the broker's receipt.
 
-On NAV. §3.5 sizes at engine NAV / 5 and the store does not hold engine NAV — `nav_snapshots`
-carries household NAV in CAD, which is a different number in a different currency. So it is
-supplied (env, then a logged `config` row) and never inferred. When it is missing the job still
-writes the session, the ranks and every SELL, leaves the buy quantities null, and goes amber:
-§5.4 makes exits unblockable and §4.3 already forbids new buy tickets under amber, so an unsized
-buy sheet under an amber run is what the plan says this state looks like.
+On NAV. §3.5 sizes at engine NAV / 5. Since 2026-08-19 the store DOES hold everything the number
+is made of — the ledger-driven book and the cash anchors — so `engine_nav` derives it (TFSA marked
+equity + TFSA cash at the session's USDCAD), with env and `config.engine_nav` as overrides in that
+order. Zak: "You know the NAV." When the derivation fails closed (unpriced position, no cash
+anchor, no FX) the job still writes the session, the ranks and every SELL, leaves the buy
+quantities null, and goes amber naming the exact gap: §5.4 makes exits unblockable and §4.3
+already forbids new buy tickets under amber.
 """
 import datetime as dt
 import json
@@ -41,25 +42,41 @@ ACCOUNT = "TFSA"
 SLEEVE = "momentum"
 
 
-def engine_nav(cur):
-    """§3.5's "engine NAV", from the two places allowed to state it. None means unknown.
+def engine_nav(cur, as_of=None):
+    """§3.5's "engine NAV". Returns (nav, source) — source says where the number came from.
 
-    `ENGINE_NAV` is the dispatch override. `config.engine_nav` is the durable one, and it is a
-    logged row with a timestamp — which is what makes a change to it auditable rather than a number
-    that moved. Household NAV is deliberately NOT a fallback: `nav_snapshots.nav_cad` is every
-    account converted to CAD, and sizing a USD sleeve off it would be wrong by both the FX rate and
-    the other two accounts. That is precisely the kind of plausible wrong number that does not
-    throw.
+    Three sources, in order of authority:
+
+      env      `ENGINE_NAV` — the dispatch override, for a single run.
+      config   `config.engine_nav` — Zak's word, a logged row with a timestamp. Overrides the
+               derivation for as long as it stands, which is what makes it a RULING and not a cache.
+      derived  `desk.derived_engine_nav` — the store's own arithmetic: TFSA marked equity (park
+               included) + TFSA cash, CAD converted at the session's USDCAD. Zak, 2026-08-19:
+               *"You know the NAV."* He is right — post-059 the book is right by construction and
+               §2.0's doctrine (balances are truth, prices are the extrapolation) IS this formula.
+
+    Household NAV is still deliberately not a source: `nav_snapshots.nav_cad` is every account in
+    CAD, wrong for a USD sleeve by both the FX rate and the other two accounts.
+
+    (None, why) means unknown — the derivation fails closed on an unpriced position, a missing cash
+    anchor, or missing FX, and the sheet then ships unsized buys under amber exactly as before.
     """
     raw = (os.environ.get("ENGINE_NAV") or "").strip()
-    if not raw:
-        raw = str(config(cur, "engine_nav") or "").strip()
-    if not raw:
-        return None
-    nav = float(raw)
-    if nav <= 0:
-        raise ValueError(f"engine NAV must be positive; got {nav}")
-    return nav
+    if raw:
+        nav = float(raw)
+        if nav <= 0:
+            raise ValueError(f"engine NAV must be positive; got {nav}")
+        return nav, dict(source="env")
+    raw = str(config(cur, "engine_nav") or "").strip()
+    if raw:
+        nav = float(raw)
+        if nav <= 0:
+            raise ValueError(f"engine NAV must be positive; got {nav}")
+        return nav, dict(source="config")
+    nav, detail = desk.derived_engine_nav(cur, as_of or dt.date.today())
+    if nav is None:
+        return None, dict(source="none", why=detail)
+    return nav, detail
 
 
 def write_session(cur, s, mode, digest):
@@ -79,7 +96,7 @@ def write_session(cur, s, mode, digest):
         (s["session"], s["gate_on"], s["gate_green"], s["index_close"], s["index_sma"],
          s["universe"], s["ranked"], s["screened"], s["marked_equity"], s["nav"], digest, mode,
          json.dumps({"top": s["top"], "held": s["held"], "unranked": s["unranked"],
-                     "unpriced": s["unpriced"]})))
+                     "unpriced": s["unpriced"], "nav_source": s.get("nav_source")})))
     return cur.fetchone()[0]
 
 
@@ -188,16 +205,18 @@ def main():
 
     with connect() as conn, Heartbeat(conn, "score", dry_run=dry()) as hb:
         with conn.cursor() as cur:
-            nav = engine_nav(cur)
+            nav, nav_source = engine_nav(cur, as_of)
             frozen, words, froze_at, _ = freeze_state(cur)
-            s = apply_freeze(desk.sheet(cur, as_of, nav), frozen, words)
+            s = apply_freeze(dict(desk.sheet(cur, as_of, nav), nav_source=nav_source),
+                             frozen, words)
             digest = engine.digest()
             report = desk.render(s)
             print(report)
 
             hb.detail.update(session=str(s["session"]), mode=mode, gate=s["gate"],
                              gate_green=s["gate_green"], universe=s["universe"],
-                             ranked=s["ranked"], nav=nav, param_digest=digest, top=s["top"],
+                             ranked=s["ranked"], nav=nav, nav_source=nav_source,
+                             param_digest=digest, top=s["top"],
                              sells=[o["ticker"] for o in s["orders"] if o["action"] == "sell"],
                              buys=[o["ticker"] for o in s["orders"] if o["action"] == "buy"])
             if dry():
@@ -218,9 +237,12 @@ def main():
                                  frozen_buys=s.get("frozen_buys", []))
             if nav is None and not frozen:
                 # §4.3's amber: no new buy tickets. The rows exist and are unsized, the sells
-                # stand (§5.4), and the reason is stated rather than inferred from a null.
-                hb.amber("engine NAV unknown — buys written unsized and must not be executed; "
-                         "set config.engine_nav or ENGINE_NAV")
+                # stand (§5.4), and the reason is the derivation's own, stated rather than
+                # inferred from a null — an unpriced position, a missing cash anchor, or missing
+                # FX are three different repairs and the amber names which.
+                hb.amber("engine NAV unknown — buys written unsized and must not be executed. "
+                         f"Derivation failed: {nav_source.get('why', 'unknown')}. "
+                         "config.engine_nav overrides if set.")
 
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:

@@ -203,8 +203,16 @@ def sheet_arithmetic(cur, stored):
     bad, unsized = [], 0
     nav = stored["nav"]
     for tk, action, qty, mark, rank, state, clause in rows:
-        if clause not in ("fill", "rank_exit", "displaced", "gate_off", "phase0"):
-            bad.append(f"{tk}: clause {clause!r} is not a §3.5 clause")
+        if clause not in ("fill", "rank_exit", "displaced", "gate_off", "phase0",
+                          "fund", "top_up"):
+            bad.append(f"{tk}: clause {clause!r} is not a recognised clause")
+        if clause == "fund":
+            # The park's cash leg (§6.5). Not §3.5 arithmetic — its quantity is the park position,
+            # not NAV/5 — so the sizing check below must not measure it against a slot. The sell
+            # branch's own completeness check (a sell must carry a positive quantity) still runs.
+            if action != "buy" and (qty is None or float(qty) <= 0):
+                bad.append(f"{tk}: a fund sell with no quantity cannot be executed")
+            continue
         if action != "buy":
             if qty is None or float(qty) <= 0:
                 bad.append(f"{tk}: a sell with no quantity — §5.4 makes exits unblockable and this "
@@ -223,9 +231,18 @@ def sheet_arithmetic(cur, stored):
             bad.append(f"{tk}: sized at {qty:g} with no decision close to size against")
             continue
         want = engine.position_size(nav, float(mark))
+        if clause == "top_up":
+            # §6.5's top-up: the slot less the line already held. The held quantity is read from
+            # the book NOW rather than stored on the ticket — safe because this gauge runs minutes
+            # after `score` in the same chain and nothing trades in between; a re-run after Zak
+            # executes would find the position at weight and the cancelled ticket excluded above.
+            cur.execute("""select coalesce(sum(qty), 0) from book
+                            where ticker = %s and account = %s and status = 'open'""",
+                        (tk, stored.get("account") or "TFSA"))
+            held_now = float(cur.fetchone()[0])
+            want = max(0, want - int(held_now))
         if int(qty) != want:
-            bad.append(f"{tk}: qty {qty:g} but §3.5 gives int({nav:g}/{engine.SLOTS} // "
-                       f"{float(mark):g}) = {want}")
+            bad.append(f"{tk}: qty {qty:g} but §3.5 gives {want} for clause {clause}")
 
     if bad:
         return _gauge("sheet", "red", f"{len(bad)} arithmetic or completeness failure(s)",

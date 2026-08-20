@@ -158,6 +158,14 @@ reference for the rules; a session does it in SQL because a session has no shell
 - **`NOPE.US is not in universe`** — check the symbol in EODHD form (`NUE.US`, `CNQ.TO`).
 - **anything about `guard_book`** — you tried to write `book`. Write `transactions` instead.
 
+### The NAV is derived — the chat no longer relays it
+
+Since 2026-08-19 the pipeline derives engine NAV itself: TFSA marked equity (park included) + TFSA
+cash, CAD at the session's USDCAD. A session never computes it (§0.4) and never needs to pass it.
+`config.engine_nav` still works and OUTRANKS the derivation — writing it is a ruling, so only do it
+when Zak states a number in so many words, and prefer telling him the derived figure already on the
+sheet. Keeping the cash anchors current (below) is what keeps the derived number honest.
+
 ### Zak says how much cash he has
 
 > *"…or the current dollar availability etc."*
