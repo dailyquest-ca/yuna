@@ -15,7 +15,7 @@ name: pipeline
 # repository has already paid for exactly that: four unrecorded fills on 2026-08-04 put RS.US
 # through four consecutive briefs as a new entry at the price Zak had already paid.
 #
-# Every ingest triggers the chain (§4.2). The retry ingest at 03:00 exits immediately when the
+# Every ingest triggers the chain (§4.2). The retry ingest at 03:23 exits immediately when the
 # night is already green and still fires it — every job here is idempotent, `sheet` upserts on
 # (session, mode) and (session, ticker, action), and `compose` refuses to publish a kind twice for
 # one session date, so a second pass costs a few minutes and buys a second chance.
@@ -54,7 +54,7 @@ jobs:
     steps:
       - id: pick
         # §4.1's weekly letter belongs to the weekly sweep, not to the calendar: `ingest-daily`
-        # fires Tue–Sat, so Saturday 02:00 UTC is Friday evening PT and composes an ordinary
+        # fires Tue–Sat, so Saturday 02:23 UTC is Friday evening PT and composes an ordinary
         # nightly. The Saturday letter belongs to the chain behind `ingest-universe`.
         run: |
           want='${{ inputs.slot }}'

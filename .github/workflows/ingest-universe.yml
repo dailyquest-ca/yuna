@@ -9,7 +9,9 @@ name: ingest-universe
 # silence whenever its one firing was missed. It had never produced a single runs row.
 on:
   schedule:
-    - cron: '0 10 * * 6'   # Sat 10:00 UTC — rebuilds if the month's universe is unbuilt, else exits
+    - cron: '23 10 * * 6'  # Sat 10:23 UTC — rebuilds if the month's universe is unbuilt, else exits
+                           # :23 not :00 — GitHub names the top of the hour a high-load window for
+                           # `schedule` and drops queued jobs under load (see ingest-daily.yml)
   workflow_dispatch:
     inputs:
       force:

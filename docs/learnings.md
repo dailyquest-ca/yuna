@@ -41,6 +41,35 @@ is `roadmap-2026-07-31.md`.
 13. **Run and job log downloads are unreachable** (302 → blob store → 403 even unauthenticated).
     The heartbeat is the only reliable diagnostic: fatal handlers embed tracebacks, and the
     `if: failure()` autopsy step catches deaths that happen before the heartbeat opens.
+58. **A cron at the top of the hour is a queue, not a time.** GitHub names `:00` a high-load window
+    for the `schedule` event and says queued jobs may be *dropped* when load is high enough.
+    `ingest-daily` sat at `0 2` / `0 3` and was never once on time across fourteen consecutive
+    scheduled runs — 50–130 minutes late, median 62. That number printed on the freshness line every
+    night as `late: ingest-daily +NNNm` and was read as weather, because §4.7 had correctly ruled
+    that lateness must not turn a job amber. **The ruling was right and the reading was wrong:**
+    drift must not HOLD TICKETS, which is not the same as drift meaning nothing — a median that
+    never once dips below 50 minutes is describing the queue you are standing in. On 2026-08-27 that
+    queue held the job 621 minutes; on 2026-08-28 the firing was dropped outright — no run, no
+    chain, no brief. Moving to `:23` shortens the queue and cannot remove the drop, because nothing
+    inside Actions can. Note the coupling: the retry identifies itself by matching
+    `github.event.schedule` against its own cron string, so the retry's cron appears three times
+    (the schedule, `SKIP_IF_GREEN`, `SCHEDULED_UTC`) and the clock values twice more. Change one,
+    change all of them, or the retry stops recognising itself and re-ingests the night. This was
+    already written down: `dev-fixes-2026-08-01` §8 said "fix the schedule (GitHub cron
+    drift/queueing)" and asked for the heartbeat to record scheduled-vs-actual. The recording half
+    was built; the schedule half was not, and the recorded number then argued for itself for
+    twenty-seven days. **A diagnostic shipped without its fix becomes evidence that the problem is
+    normal.**
+59. **A missed session is only repairable while it is still the newest one.** `ingest.bulk_day()` is
+    called with `date=None`, so the nightly job always asks for the vendor's *last* day and never a
+    named one. The 2026-08-28 drop left 2026-08-27 with zero stock bars, and it was recoverable only
+    because a hand dispatch that same Friday still found Thursday at the top of the tape. Waited
+    until Monday and the bulk endpoint would have moved on. The automatic path could not have caught
+    it either: gap repair needs `(today - have).days > GAP_DAYS` **and** the ticker absent from
+    today's tape, and a US name present in the next tape fails the second test while the next run's
+    fresh `have` fails the first. So the hole closes silently and stays. It matters because the
+    §3.3 lookbacks slice *rows*, not dates — `c[-252:]`, `c[-221:-21]` — so one missing bar shifts
+    every window a session deeper into history with nothing raised anywhere.
 
 ## The formulas, as implemented
 

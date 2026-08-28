@@ -15,10 +15,26 @@ name: ingest-daily
 # Scheduled TWICE on purpose. §4.2: "the second run reads the runs table and exits if the night
 # is already green". That is the retry, and it is the same job with the same name rather than a
 # separate one, so `runs` reads as one job with two appointments.
+#
+# **Both firings sit at :23, not on the hour** (2026-08-28). GitHub documents the top of every hour
+# as a high-load window for the `schedule` event, and says queued jobs may be *dropped* outright
+# when the load is high enough. At `0 2` this job was never once on time: fourteen consecutive
+# scheduled runs drifted 50-130 minutes, median 62. On 2026-08-27 the queue held it 621 minutes,
+# and on 2026-08-28 the firing was dropped — no run, no chain, no brief, and a whole session
+# missing from `prices`. Moving off :00 buys nothing but a shorter queue, which is the only lever
+# this repo has: GitHub's guidance is to "schedule your workflow to run at a different time of the
+# hour", and it reduces the chance of a drop rather than removing it. The quarter-hours are the
+# next most contended slots, so :23 avoids those too.
+#
+# The retry stays 60 minutes behind the first firing, and it identifies itself by matching
+# `github.event.schedule` against its own cron string — so the retry's cron is written three
+# times below (the schedule, `SKIP_IF_GREEN`, `SCHEDULED_UTC`) and the clock twice more.
+# **Change one and you must change them all**, or the second firing stops recognising itself
+# as the retry and re-ingests the night instead of exiting.
 on:
   schedule:
-    - cron: '0 2 * * 2-6'   # 02:00 UTC Tue-Sat = Mon-Fri evenings PT
-    - cron: '0 3 * * 2-6'   # one hour later; exits immediately if 02:00 went green
+    - cron: '23 2 * * 2-6'  # 02:23 UTC Tue-Sat = Mon-Fri evenings PT
+    - cron: '23 3 * * 2-6'  # one hour later; exits immediately if 02:23 went green
   workflow_dispatch:
     inputs:
       dry_run:
@@ -49,9 +65,9 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
-          # the 03:00 firing is the retry: same job, same row shape, exits if the night is green
-          SKIP_IF_GREEN: ${{ github.event.schedule == '0 3 * * 2-6' && 'true' || 'false' }}
-          SCHEDULED_UTC: ${{ github.event.schedule == '0 3 * * 2-6' && '03:00' || '02:00' }}
+          # the 03:23 firing is the retry: same job, same row shape, exits if the night is green
+          SKIP_IF_GREEN: ${{ github.event.schedule == '23 3 * * 2-6' && 'true' || 'false' }}
+          SCHEDULED_UTC: ${{ github.event.schedule == '23 3 * * 2-6' && '03:23' || '02:23' }}
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py ingest-daily /tmp/job.out

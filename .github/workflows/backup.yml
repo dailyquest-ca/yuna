@@ -1,7 +1,9 @@
 name: backup
 on:
   schedule:
-    - cron: '0 14 * * 6'   # every Sat 14:00 UTC; the job backs up if the month has none, else exits
+    - cron: '23 14 * * 6'  # every Sat 14:23 UTC; the job backs up if the month has none, else exits
+                           # :23 not :00 — GitHub names the top of the hour a high-load window for
+                           # `schedule` and drops queued jobs under load (see ingest-daily.yml)
   workflow_dispatch:
     inputs:
       force:

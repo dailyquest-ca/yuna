@@ -14,7 +14,7 @@ the re-pull a 4:1 split reads as a −75% crash and fires false alarms through t
 
 §4.2, 2026-08-02: this job touches source-of-truth tables ONLY and derives nothing. Everything
 computed from these rows — stops, NAV, scores, arming — belongs to `score`, which runs after.
-The 03:00 appointment is this same job scheduled twice; it reads `runs` and exits if the night
+The 03:23 appointment is this same job scheduled twice; it reads `runs` and exits if the night
 is already green.
 """
 import datetime as dt
@@ -30,7 +30,7 @@ JOB = "ingest-daily"
 # §4.2: each scheduled job has an appointment. The heartbeat compares arrival to it; the second
 # run of the night keeps the same job name and the same row shape, so `runs` reads as one job
 # with two appointments rather than two jobs with one duty.
-SCHEDULE_UTC = os.environ.get("SCHEDULED_UTC", "02:00")
+SCHEDULE_UTC = os.environ.get("SCHEDULED_UTC", "02:23")
 SECOND_RUN = os.environ.get("SKIP_IF_GREEN", "false").lower() in ("1", "true", "yes")
 REPAIR_CAP = int(os.environ.get("REPAIR_CAP", "250"))     # per-ticker pulls allowed per night
 GAP_DAYS = 5
@@ -319,7 +319,7 @@ def main():
                                    and id <> %s limit 1""", (JOB, hb.id))
                     if cur.fetchone():
                         hb.detail["skipped"] = "the night is already green"
-                        print("ingest-daily (03:00): already green — nothing to redo")
+                        print(f"ingest-daily ({SCHEDULE_UTC}): already green — nothing to redo")
                         return 0
 
             # before the name list is read: a currency the funnel must convert out of is a name on
