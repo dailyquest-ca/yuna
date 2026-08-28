@@ -49,9 +49,13 @@ is `roadmap-2026-07-31.md`.
     that lateness must not turn a job amber. **The ruling was right and the reading was wrong:**
     drift must not HOLD TICKETS, which is not the same as drift meaning nothing — a median that
     never once dips below 50 minutes is describing the queue you are standing in. On 2026-08-27 that
-    queue held the job 621 minutes; on 2026-08-28 the firing was dropped outright — no run, no
-    chain, no brief. Moving to `:23` shortens the queue and cannot remove the drop, because nothing
-    inside Actions can. Note the coupling: the retry identifies itself by matching
+    queue held the job 621 minutes, and on 2026-08-28 it held it 707 — that firing finally landed at
+    13:46 UTC, most of a day after the morning it was for, and hours after the miss had been
+    diagnosed and repaired by hand. It was recorded here as *dropped* until it turned up and
+    corrected the record. **Late enough is indistinguishable from dropped at the moment you need
+    it**, and that is the reading that matters — but do not write "dropped" for a run you have
+    only failed to observe yet. Moving to `:23` shortens the queue and removes neither failure,
+    because nothing inside Actions can. Note the coupling: the retry identifies itself by matching
     `github.event.schedule` against its own cron string, so the retry's cron appears three times
     (the schedule, `SKIP_IF_GREEN`, `SCHEDULED_UTC`) and the clock values twice more. Change one,
     change all of them, or the retry stops recognising itself and re-ingests the night. This was
@@ -70,6 +74,16 @@ is `roadmap-2026-07-31.md`.
     fresh `have` fails the first. So the hole closes silently and stays. It matters because the
     §3.3 lookbacks slice *rows*, not dates — `c[-252:]`, `c[-221:-21]` — so one missing bar shifts
     every window a session deeper into history with nothing raised anywhere.
+
+60. **"Placed only where the failure is evidenced" ages badly when the evidence is a growing tape.**
+    `2f40b72` fixed the backtest's `QueryCanceled` by setting a session-scoped
+    `statement_timeout = '20min'` before `desk.load()` — one statement over every US bar held,
+    against Supabase's 2-minute default — and deliberately scoped the fix to the one call site that
+    had failed. Eight days later `shadow.py` called the *same* `desk.load()` and died the same way
+    (`src/desk.py:61`), because the tape had grown past the line for that caller too. §6.4's
+    attestation was at 9 of the 10 sessions §6.5 gates the seed on, so the counter stopped one short.
+    Scoping a fix to the evidenced call site is right; leaving the *other* callers of the same
+    expensive function unexamined is what turns one incident into two.
 
 ## The formulas, as implemented
 

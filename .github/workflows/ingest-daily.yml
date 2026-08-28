@@ -19,9 +19,12 @@ name: ingest-daily
 # **Both firings sit at :23, not on the hour** (2026-08-28). GitHub documents the top of every hour
 # as a high-load window for the `schedule` event, and says queued jobs may be *dropped* outright
 # when the load is high enough. At `0 2` this job was never once on time: fourteen consecutive
-# scheduled runs drifted 50-130 minutes, median 62. On 2026-08-27 the queue held it 621 minutes,
-# and on 2026-08-28 the firing was dropped — no run, no chain, no brief, and a whole session
-# missing from `prices`. Moving off :00 buys nothing but a shorter queue, which is the only lever
+# scheduled runs drifted 50-130 minutes, median 62. Then two nights running the queue swallowed
+# it whole — 621 minutes on 2026-08-27, and 707 on 2026-08-28, that one arriving at 13:46 UTC,
+# most of a day after the morning it was written for and hours after the miss had been repaired
+# by hand. 2026-08-27's close sat missing from `prices` for a day in the meantime. Neither
+# firing was dropped in the end; a run that late is simply not a run you have when you need it.
+# Moving off :00 buys nothing but a shorter queue, which is the only lever
 # this repo has: GitHub's guidance is to "schedule your workflow to run at a different time of the
 # hour", and it reduces the chance of a drop rather than removing it. The quarter-hours are the
 # next most contended slots, so :23 avoids those too.
