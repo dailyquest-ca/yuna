@@ -80,10 +80,14 @@ is `roadmap-2026-07-31.md`.
     `statement_timeout = '20min'` before `desk.load()` — one statement over every US bar held,
     against Supabase's 2-minute default — and deliberately scoped the fix to the one call site that
     had failed. Eight days later `shadow.py` called the *same* `desk.load()` and died the same way
-    (`src/desk.py:61`), because the tape had grown past the line for that caller too. §6.4's
-    attestation was at 9 of the 10 sessions §6.5 gates the seed on, so the counter stopped one short.
-    Scoping a fix to the evidenced call site is right; leaving the *other* callers of the same
-    expensive function unexamined is what turns one incident into two.
+    (`src/desk.py:61`), because the tape had grown past the line for that caller too. Scoping a fix
+    to the evidenced call site is right; leaving the *other* callers of the same expensive function
+    unexamined is what turns one incident into two.
+    It cost nothing on the day, and only by the luck of ordering: 2026-08-28's delayed schedule meant
+    the chain ran TWICE, and the earlier shadow had already banked 2026-08-27 — taking §6.4 to 10 of
+    the 10 sessions §6.5 gates the seed on, zero divergences, `v_shadow_progress.passes` true. The
+    twin that ran forty minutes later is the one that died. **A green result banked by a duplicate
+    run is not evidence the job works**; the next scheduled shadow has no twin to hide behind.
 
 ## The formulas, as implemented
 
