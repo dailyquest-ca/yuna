@@ -328,6 +328,9 @@ PARENT = {
     "lg12_semi_trail": "lg12_semi", "lg8_semi_trail": "lg12_semi_trail",
     "lg12_semi_trail_third": "lg12_semi_trail", "t250_12_trail": "t250_12_semi",
     "lg12_semi_vt": "lg12_semi", "lg12_semi_trail_vt": "lg12_semi_trail",
+    # WO-A25: the governor cell gated, then latched to the cell of record's (1, 3)
+    "lg12_semi_trail_vt_gated": "lg12_semi_trail_vt",
+    "lg12_semi_trail_vt_L1_3": "lg12_semi_trail_vt_gated",
     # WO-A5's ladder: every probe moves one axis off the champion it is probing
     "lad_n6": "lg8_semi_trail", "lad_n10": "lg8_semi_trail",
     "lad_p250": "lg8_semi_trail", "lad_p750": "lg8_semi_trail",

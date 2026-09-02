@@ -220,6 +220,18 @@ CELLS = {
                                   top_by_addv=500, vol_target=0.12),
     "lg12_semi_trail_vt":    dict(n=12, months=6, risk_adjusted=True, sleeve=1.00,
                                   top_by_addv=500, trail=True, vol_target=0.12),
+    # ---- WO-A25 (2026-09-02): the holdable cell through 2008. `lg12_semi_trail_vt` was the
+    # lowest-drawdown cell of the 2016-26 grid (-29.6%) and, like every cell of that grid, has
+    # never been shown 2008. `_L1_3` is that cell plus the cell of record's own gate — the 200-day
+    # index latch at (1, 3): out after one close below, back after three above — so the WO's arms
+    # cross the gate with the park (SHV against SPY) one axis at a time. `_gated` is the rung
+    # between them that the grid's one-axis rule requires (gate on, default latch); it is declared
+    # so the lineage is honest and is not one of the WO's arms. Nothing else changes.
+    "lg12_semi_trail_vt_gated": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00,
+                                     top_by_addv=500, trail=True, vol_target=0.12, gated=True),
+    "lg12_semi_trail_vt_L1_3": dict(n=12, months=6, risk_adjusted=True, sleeve=1.00,
+                                    top_by_addv=500, trail=True, vol_target=0.12,
+                                    gated=True, latch=(1, 3)),
     # ---- WO-A5's robustness ladder. `lg8_semi_trail` came out of a 22-cell search and reached
     # §2.5 `proven`; these move ONE axis one step either side of it to find out whether it sits on
     # a plateau or a spike. Declared in the work order BEFORE any of them ran, with the reading
