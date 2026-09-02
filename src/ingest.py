@@ -14,8 +14,8 @@ the re-pull a 4:1 split reads as a −75% crash and fires false alarms through t
 
 §4.2, 2026-08-02: this job touches source-of-truth tables ONLY and derives nothing. Everything
 computed from these rows — stops, NAV, scores, arming — belongs to `score`, which runs after.
-The 03:23 appointment is this same job scheduled twice; it reads `runs` and exits if the night
-is already green.
+The 23:23 appointment is this same job scheduled twice; it reads `runs` and exits if the night
+is already green on a tape newer than the store's.
 
 A hand dispatch may name ONE tape date (`INGEST_DATE`, workflow input `date`). Learning 59: the
 nightly asks the vendor for its LAST day and never a named one, so a missed session was
@@ -28,18 +28,20 @@ import os
 import sys
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-from db import (connect, config, dry, fx_pair, get, jsonb, load_bars, observe,
-                stops_breached, Heartbeat)
+from db import (connect, config, data_date, dry, fx_pair, get, jsonb, load_bars, observe,
+                scheduled_run, stops_breached, Heartbeat)
 import signals as sg
 
 JOB = "ingest-daily"
 # §4.2: each scheduled job has an appointment. The heartbeat compares arrival to it; the second
 # run of the night keeps the same job name and the same row shape, so `runs` reads as one job
 # with two appointments rather than two jobs with one duty.
-SCHEDULE_UTC = os.environ.get("SCHEDULED_UTC", "02:23")
+SCHEDULE_UTC = os.environ.get("SCHEDULED_UTC", "22:23")
 SECOND_RUN = os.environ.get("SKIP_IF_GREEN", "false").lower() in ("1", "true", "yes")
 REPAIR_CAP = int(os.environ.get("REPAIR_CAP", "250"))     # per-ticker pulls allowed per night
 GAP_DAYS = 5
+CAL_DAYS = 45
+CAL_BACK = 400          # a full reporting year behind, so "already reported" is a fact, not a guess
 
 
 def requested_tape_date():
@@ -54,8 +56,36 @@ def requested_tape_date():
 
 
 TAPE_DATE = requested_tape_date()
-CAL_DAYS = 45
-CAL_BACK = 400          # a full reporting year behind, so "already reported" is a fact, not a guess
+
+
+def tape_advanced(as_of, store_date):
+    """Is the vendor's newest tape newer than what the store already holds?
+
+    The nightly fires ~2h after the close (2026-09-02). A firing that beats the vendor's bulk file
+    would fetch YESTERDAY's tape, upsert it harmlessly, and go green — and the retry would then
+    exit on "already green" with today's session never landed. A scheduled run answers this
+    question first (`awaiting_vendor`) and, when the answer is no, writes nothing: the first
+    firing says so and stays green, the retry fails red, because two firings without a tape is a
+    night with no tape and that has to have a reader (learning 58). An empty store is a cold
+    start and proceeds; a tape with no date is not a tape.
+    """
+    if not as_of:
+        return False
+    if store_date is None:
+        return True
+    return dt.date.fromisoformat(str(as_of)) > store_date
+
+
+def awaiting_vendor(as_of, store_date):
+    """The scheduled run's first question, answered as text: None to proceed, else why to wait.
+
+    Only a scheduled run is guarded (`scheduled_run`), and only one asking for the vendor's newest
+    day — a hand dispatch means fetch, and a named date is checked against the tape it lands.
+    """
+    if not scheduled_run() or TAPE_DATE or tape_advanced(as_of, store_date):
+        return None
+    return (f"the vendor's newest tape is {as_of!r} and the store already holds {store_date}; "
+            f"today's session is not published yet — nothing written")
 
 
 # --------------------------------------------------------------------------- FX (§4.1, §3.0)
@@ -334,8 +364,13 @@ def main():
         with Heartbeat(conn, JOB, scheduled_utc=SCHEDULE_UTC) as hb:
             if SECOND_RUN:                        # §4.2: exit if the night is already green
                 with conn.cursor() as cur:
+                    # A rolling window rather than `::date = current_date`: the two firings sit
+                    # either side of 23:00 UTC and drift, so a calendar-day test would let a retry
+                    # that crossed midnight forget the run an hour before it. And a run that found
+                    # the vendor not yet published is not a green night — see `tape_advanced`.
                     cur.execute("""select 1 from runs where job=%s and status='green'
-                                   and dry_run=false and started_at::date = current_date
+                                   and dry_run=false and started_at > now() - interval '4 hours'
+                                   and not (detail ? 'awaiting_vendor')
                                    and id <> %s limit 1""", (JOB, hb.id))
                     if cur.fetchone():
                         hb.detail["skipped"] = "the night is already green"
@@ -356,6 +391,7 @@ def main():
                 names = {r[0]: r[1] for r in cur.fetchall()}
                 cur.execute("select ticker, max(d) from prices group by ticker")
                 last_bar = dict(cur.fetchall())
+                store_date = data_date(cur)
             backfill_from = dt.date.today() - dt.timedelta(days=365 * years)
 
             # ---- 1. the whole US tape, in one call
@@ -368,6 +404,18 @@ def main():
             if TAPE_DATE and as_of != TAPE_DATE.isoformat():
                 raise RuntimeError(f"asked the vendor for {TAPE_DATE} and it answered {as_of!r} — "
                                    f"refusing to write a tape under a date it does not carry")
+            if why := awaiting_vendor(as_of, store_date):
+                hb.detail.update(awaiting_vendor=why,
+                                 tape=dict(rows=len(tape), as_of=as_of, requested=None))
+                if SECOND_RUN:
+                    # the first firing may beat the vendor; the retry may not. Red here is a
+                    # result, not a crash: the night has no tape, and the named-date dispatch
+                    # (learning 59) is the repair once the vendor posts it.
+                    raise RuntimeError(f"the retry found the vendor still unpublished — {why}. The "
+                                       f"night has no tape; repair it by hand with the `date` input "
+                                       f"once the vendor posts the session")
+                print(f"ingest-daily: awaiting vendor — {why}; the retry re-fetches")
+                return 0
 
             written = 0
             if not dry():

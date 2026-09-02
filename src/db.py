@@ -676,8 +676,8 @@ def next_session(after):
 def session_date_for(cur):
     """The market session an output composed now actually serves (§4.2 clock convention, WO-6).
 
-    `now()::date` in UTC is not that session. The chain runs at 02:23–03:23 UTC, which is the
-    previous evening in New York and in Vancouver: on 2026-08-06 at 05:22 UTC the last close was
+    `now()::date` in UTC is not that session. The chain runs at 22:23–23:23 UTC, the same evening
+    in New York and the previous one for any firing that drifts past midnight: on 2026-08-06 at 05:22 UTC the last close was
     2026-08-05 and the brief served the 2026-08-06 open — and it was stamped 2026-08-07, one
     session ahead of the market it was written for. The data date knows what the brief serves; the
     wall clock does not.
@@ -702,7 +702,7 @@ def scheduled_run():
 def chain_already_current(conn, hb, job, *, must_match=()):
     """§4.2 / WO-6 — a chained job verifies and exits when its own last word still stands.
 
-    The 03:23 ingest correctly reads the runs table and exits when the night is already green
+    The 23:23 ingest correctly reads the runs table and exits when the night is already green
     (§4.2), and then the chain behind it recomputed the whole world anyway: a second full `score`
     and a second `preopen` row, 17 minutes apart, describing an identical universe. Idempotent is
     not the same as free.
@@ -788,9 +788,10 @@ class Heartbeat:
             return
         now = dt.datetime.now(dt.timezone.utc)
         due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        if now - due > dt.timedelta(hours=12):        # fired just before midnight for a morning slot
-            due += dt.timedelta(days=1)
-        elif due - now > dt.timedelta(hours=12):
+        # A schedule never fires early, so a slot still ahead on today's clock was yesterday's.
+        # The old ±12h guess would have read a 22:23 slot that drifted past 10:23 as nine hours
+        # EARLY (2026-09-02); learning 58 measured 707 minutes of drift, so that day is reachable.
+        if due > now:
             due -= dt.timedelta(days=1)
         drift = round((now - due).total_seconds() / 60, 1)
         self.detail["schedule"] = dict(due_utc=due.isoformat(), started_utc=now.isoformat(),

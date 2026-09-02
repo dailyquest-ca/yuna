@@ -29,6 +29,19 @@ name: ingest-daily
 # hour", and it reduces the chance of a drop rather than removing it. The quarter-hours are the
 # next most contended slots, so :23 avoids those too.
 #
+# **And the firings sit in the evening, not the small hours** (2026-09-02). Moving off :00 did not
+# shorten the queue: the next four scheduled runs drifted 325–413 minutes. What a 02:23 slot never
+# had was ROOM — twelve hours of drift put the brief after the 13:30 UTC open, twice. The vendor
+# documents NYSE and NASDAQ as updated within fifteen minutes of the close, so the tape is on the
+# shelf by about 20:15 UTC; firing at 22:23 leaves fifteen hours for the queue to do its worst.
+# The cost is a new failure mode, and it is guarded: a firing that beats the vendor's bulk file
+# would land YESTERDAY's tape and go green, and the retry would then exit on "already green" —
+# a silent stale day. So a scheduled run whose newest tape is not newer than the store's
+# `data_date` writes nothing and records `awaiting_vendor`; the retry ignores that row and fetches
+# again, and if it finds the same it fails red, because a night with no tape has to have a reader
+# (`ingest.py`). The repair is the `date` input below. A hand dispatch is never guarded: pressing
+# the button means fetch.
+#
 # The retry stays 60 minutes behind the first firing, and it identifies itself by matching
 # `github.event.schedule` against its own cron string — so the retry's cron is written three
 # times below (the schedule, `SKIP_IF_GREEN`, `SCHEDULED_UTC`) and the clock twice more.
@@ -36,8 +49,8 @@ name: ingest-daily
 # as the retry and re-ingests the night instead of exiting.
 on:
   schedule:
-    - cron: '23 2 * * 2-6'  # 02:23 UTC Tue-Sat = Mon-Fri evenings PT
-    - cron: '23 3 * * 2-6'  # one hour later; exits immediately if 02:23 went green
+    - cron: '23 22 * * 1-5'  # 22:23 UTC Mon-Fri = the same evening ET, ~2h after the close
+    - cron: '23 23 * * 1-5'  # one hour later; exits if 22:23 went green on a fresh tape
   workflow_dispatch:
     inputs:
       dry_run:
@@ -73,9 +86,9 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
           # dispatch-only (learning 59): the schedule never sets it, so blank on every cron firing
           INGEST_DATE: ${{ inputs.date }}
-          # the 03:23 firing is the retry: same job, same row shape, exits if the night is green
-          SKIP_IF_GREEN: ${{ github.event.schedule == '23 3 * * 2-6' && 'true' || 'false' }}
-          SCHEDULED_UTC: ${{ github.event.schedule == '23 3 * * 2-6' && '03:23' || '02:23' }}
+          # the 23:23 firing is the retry: same job, same row shape, exits if the night is green
+          SKIP_IF_GREEN: ${{ github.event.schedule == '23 23 * * 1-5' && 'true' || 'false' }}
+          SCHEDULED_UTC: ${{ github.event.schedule == '23 23 * * 1-5' && '23:23' || '22:23' }}
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py ingest-daily /tmp/job.out

@@ -68,7 +68,11 @@ is `roadmap-2026-07-31.md`.
     drift/queueing)" and asked for the heartbeat to record scheduled-vs-actual. The recording half
     was built; the schedule half was not, and the recorded number then argued for itself for
     twenty-seven days. **A diagnostic shipped without its fix becomes evidence that the problem is
-    normal.**
+    normal.** *Addendum 2026-09-02:* `:23` alone shortened nothing — the next four scheduled runs
+    drifted 325–413 minutes — so the slot moved from 02:23 to 22:23 UTC, where even fifteen hours
+    of drift still lands before the open. The vendor posts the US tape within fifteen minutes of
+    the close, so a firing that beats it is now a guarded case (`awaiting_vendor`): the first
+    firing waits green, the retry fails red, and the `date` input repairs the day.
 59. **A missed session is only repairable while it is still the newest one.** `ingest.bulk_day()` is
     called with `date=None`, so the nightly job always asks for the vendor's *last* day and never a
     named one. The 2026-08-28 drop left 2026-08-27 with zero stock bars, and it was recoverable only

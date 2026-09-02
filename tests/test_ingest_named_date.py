@@ -59,3 +59,27 @@ def test_a_named_date_parses_and_a_malformed_one_raises_before_any_fetch(monkeyp
     monkeypatch.setenv("INGEST_DATE", "31/08/2026")
     with pytest.raises(ValueError):
         ingest.requested_tape_date()
+
+
+def test_tape_advanced_is_the_scheduled_runs_first_question():
+    """A firing that beats the vendor's bulk file must not go green on yesterday's tape."""
+    assert ingest.tape_advanced("2026-09-02", dt.date(2026, 9, 1))
+    assert not ingest.tape_advanced("2026-09-01", dt.date(2026, 9, 1))
+    assert not ingest.tape_advanced("2026-08-31", dt.date(2026, 9, 1))
+    assert not ingest.tape_advanced(None, dt.date(2026, 9, 1))
+    assert ingest.tape_advanced("2026-09-02", None)      # an empty store is a cold start
+
+
+def test_awaiting_vendor_guards_only_a_scheduled_fetch_of_the_newest_day(monkeypatch):
+    """The 22:23 firing may beat the vendor's file. Only that case waits; a hand dispatch means
+    fetch, and a named date is checked against the tape it lands, not against the store."""
+    monkeypatch.setattr(ingest, "TAPE_DATE", None)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
+    why = ingest.awaiting_vendor("2026-09-01", dt.date(2026, 9, 1))
+    assert why and "'2026-09-01'" in why and "nothing written" in why
+    assert ingest.awaiting_vendor("2026-09-02", dt.date(2026, 9, 1)) is None
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    assert ingest.awaiting_vendor("2026-09-01", dt.date(2026, 9, 1)) is None
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
+    monkeypatch.setattr(ingest, "TAPE_DATE", dt.date(2026, 8, 27))
+    assert ingest.awaiting_vendor("2026-08-27", dt.date(2026, 9, 1)) is None

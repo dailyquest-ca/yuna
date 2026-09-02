@@ -424,7 +424,7 @@ def main():
     """
     with connect() as conn:
         with Heartbeat(conn, "score", scheduled_utc=SCHEDULED_UTC) as hb:
-            # §4.2 / WO-6: the 03:23 retry exits when the night is already green, and the chain
+            # §4.2 / WO-6: the 23:23 retry exits when the night is already green, and the chain
             # behind it should verify and exit for the same reason rather than recompute a world
             # that has not moved. `check` and `notify` still run — they are the verification, and
             # they write nothing but their own rows.
