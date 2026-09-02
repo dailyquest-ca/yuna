@@ -16,6 +16,12 @@ the re-pull a 4:1 split reads as a −75% crash and fires false alarms through t
 computed from these rows — stops, NAV, scores, arming — belongs to `score`, which runs after.
 The 03:23 appointment is this same job scheduled twice; it reads `runs` and exits if the night
 is already green.
+
+A hand dispatch may name ONE tape date (`INGEST_DATE`, workflow input `date`). Learning 59: the
+nightly asks the vendor for its LAST day and never a named one, so a missed session was
+repairable only while it was still the newest — after that, gap repair could not see it and only
+a per-ticker sweep could reach it. This is the named-date path: one bulk call for the day that was
+missed. The schedule never sets it, so the nightly is unchanged.
 """
 import datetime as dt
 import os
@@ -34,6 +40,20 @@ SCHEDULE_UTC = os.environ.get("SCHEDULED_UTC", "02:23")
 SECOND_RUN = os.environ.get("SKIP_IF_GREEN", "false").lower() in ("1", "true", "yes")
 REPAIR_CAP = int(os.environ.get("REPAIR_CAP", "250"))     # per-ticker pulls allowed per night
 GAP_DAYS = 5
+
+
+def requested_tape_date():
+    """The one tape date a hand dispatch may name, or None for the vendor's newest (learning 59).
+
+    Learning 36: a blank workflow_dispatch input arrives SET, as "", so this strips and tests
+    truthiness rather than trusting a default argument. A malformed value raises here, before
+    anything is fetched or written.
+    """
+    raw = os.environ.get("INGEST_DATE", "").strip()
+    return dt.date.fromisoformat(raw) if raw else None
+
+
+TAPE_DATE = requested_tape_date()
 CAL_DAYS = 45
 CAL_BACK = 400          # a full reporting year behind, so "already reported" is a fact, not a guess
 
@@ -339,8 +359,15 @@ def main():
             backfill_from = dt.date.today() - dt.timedelta(days=365 * years)
 
             # ---- 1. the whole US tape, in one call
-            tape = {b["code"]: b for b in bulk_day(hb.calls) if b.get("code")}
+            tape = {b["code"]: b for b in bulk_day(hb.calls, date=TAPE_DATE) if b.get("code")}
             as_of = next((b.get("date") for b in tape.values()), None)
+            # A named date is a claim the vendor must confirm. Its bulk endpoint answers a bad or
+            # non-trading date with a different day or nothing at all, and either written under the
+            # requested date would be a silent lie in `prices` (learning 38: vendor metadata is a
+            # claim, not a fact). Raise BEFORE the first write; the heartbeat turns red.
+            if TAPE_DATE and as_of != TAPE_DATE.isoformat():
+                raise RuntimeError(f"asked the vendor for {TAPE_DATE} and it answered {as_of!r} — "
+                                   f"refusing to write a tape under a date it does not carry")
 
             written = 0
             if not dry():
@@ -353,7 +380,7 @@ def main():
             # ---- 2. corporate actions
             actions = {}
             for kind in ("splits", "dividends"):
-                for row in bulk_day(hb.calls, kind=kind):
+                for row in bulk_day(hb.calls, kind=kind, date=TAPE_DATE):
                     code = row.get("code")
                     tk = code if str(code).endswith(".US") else f"{code}.US"
                     if tk in names:
@@ -448,7 +475,8 @@ def main():
             held = quarantine_pass(conn, hb, bars, threshold, tolerance, watched_exits)
 
             hb.rows = 0 if dry() else written
-            hb.detail.update(tape=dict(rows=len(tape), as_of=as_of),
+            hb.detail.update(tape=dict(rows=len(tape), as_of=as_of,
+                                       requested=TAPE_DATE.isoformat() if TAPE_DATE else None),
                              quarantine_blocking=sorted(held),
                              corporate_actions={k: [describe_action(kd, r) for kd, r in v]
                                                 for k, v in actions.items()},

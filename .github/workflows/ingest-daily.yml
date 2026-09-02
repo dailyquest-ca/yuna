@@ -43,6 +43,9 @@ on:
       dry_run:
         description: 'fetch but write nothing'
         default: 'false'
+      date:
+        description: 'ingest ONE named tape date, YYYY-MM-DD, instead of the newest — closes a missed session (learning 59). Blank = newest.'
+        default: ''
 
 # §4.2, added 2026-08-03: every job that writes shares ONE concurrency group, so Actions serialises
 # them. `ingest-daily` and `backfill` overlapped once and deadlocked on the prices index — Postgres
@@ -68,6 +71,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          # dispatch-only (learning 59): the schedule never sets it, so blank on every cron firing
+          INGEST_DATE: ${{ inputs.date }}
           # the 03:23 firing is the retry: same job, same row shape, exits if the night is green
           SKIP_IF_GREEN: ${{ github.event.schedule == '23 3 * * 2-6' && 'true' || 'false' }}
           SCHEDULED_UTC: ${{ github.event.schedule == '23 3 * * 2-6' && '03:23' || '02:23' }}
