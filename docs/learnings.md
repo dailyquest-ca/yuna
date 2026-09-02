@@ -41,6 +41,11 @@ is `roadmap-2026-07-31.md`.
 13. **Run and job log downloads are unreachable** (302 → blob store → 403 even unauthenticated).
     The heartbeat is the only reliable diagnostic: fatal handlers embed tracebacks, and the
     `if: failure()` autopsy step catches deaths that happen before the heartbeat opens.
+    *Addendum 2026-09-02:* the authenticated Actions API route (the GitHub connector's
+    `get_job_logs`) does return a **completed** job's log; it answers 404 while the job is still
+    in progress, which reads like the old 403 if you are not watching the job state. The
+    heartbeat is still the only record that outlives the run — `verify_run.py` writes no row, so
+    its sixteen checks exist only in that log.
 58. **A cron at the top of the hour is a queue, not a time.** GitHub names `:00` a high-load window
     for the `schedule` event and says queued jobs may be *dropped* when load is high enough.
     `ingest-daily` sat at `0 2` / `0 3` and was never once on time across fourteen consecutive

@@ -100,6 +100,77 @@ but its `backtest-protocol` skill was not loadable in the session that wrote thi
 rules could not be certified against. What runs here is the repo's own standard. A result from
 this WO is a repo-standard finding until the upstream protocol has been applied to it.
 
+## Result — 2026-09-02, runs 624 (SPY park) and 623 (SHV park)
+
+Both on code stamp `473a07e6a060dcf1`, window `2006-01-10..open` (first decision 2007-01-12,
+last 2026-09-01, 4,940 sessions), start NAV $100,000 to match run 589. **The sleeve was untouched:
+748 trades in each arm with an identical exit mix — gate_off 175, displaced 211, rank_band 357,
+open at end 5.** Only the park moved, which is the whole design.
+
+| | SPY park (control) | SHV park | delta |
+|---|---|---|---|
+| CAGR | 26.08% | 24.22% | −1.86 pts |
+| Full-window maxDD | −60.3% (2009-03-09) | −45.8% (2025-11-21) | +14.5 pts |
+| End NAV | $9,463,000 | $7,068,350 | −25.3% |
+| Conformance | OK | OK | |
+| `finding.py` §2.5 (DSR · z · trials) | 0.210 · −0.81 · 470 | 0.205 · −0.82 · 470 | |
+| OOS Sharpe, 2025-08 → open | 1.58 | 1.52 | |
+
+Peak-to-trough by episode, the cut learning 40 asks for before a full-window number is called a
+finding — five episodes, one sign:
+
+| episode | SPY park | SHV park | delta |
+|---|---|---|---|
+| **2007–09** | **−60.3%** | **−21.8%** | **+38.5 pts** |
+| worst of the 2010s | −50.0% | −37.5% | +12.5 |
+| 2020 | −37.2% | −28.4% | +8.8 |
+| 2022 | −46.4% | −40.3% | +6.1 |
+| 2025–26 (2025-11-21) | −45.9% | −45.8% | 0.1 |
+
+**Against the pre-registered claim: met, decisively.** The gated drawdown falls in every gated
+episode; 2008 falls by 38.5 points. CAGR fell, as it was expected to — no red flag. The one
+episode the park does not touch is 2025–26, and that is the proof of mechanism rather than a
+failure of it: the gate was ON through that drawdown, so the book held stocks and the park was
+empty. **A bill park protects gated-off capital and nothing else.** §3.8's other limitation —
+"a −61% drawdown has never been tested against a human" — is now a −46% drawdown that the park
+cannot shorten, because it belongs to the sleeve.
+
+Where the CAGR went: the SPY park rides back up as well as down. From the 2009 trough to the 2009
+year-end high the control multiplied 2.52×; the bill arm 1.37×. The bill park forgoes the
+gated-off stretch's recovery along with its loss, and over nineteen years that is 1.86 points a
+year and a quarter of terminal wealth. That is the price, stated as a price.
+
+Two reading notes. §3.8's "−37.3% while gated" (run 589, window opening 2007-01-05) is a
+gated-only slice; the −60.3% above is the whole 2007–09 episode including the sleeve's own losses
+before the gate went off, and is the number a human lives through. They do not contradict.
+And `backtest_equity.gate` is NULL for `concentrated` runs, so the gated-only slice cannot be
+recut from the stored curve; the exit counts carry the gate's footprint instead.
+
+**Standing of this result:** repo-standard. Conformance and `finding.py` are green on both arms;
+the sixteen-check `verify_run` audit ran on both as part of the dispatch (its verdict is recorded
+below). The upstream `backtest-protocol` skill was not loadable in the session that ran this, so
+the result is not certified against it. Promotion is Zak's ruling (§7), and would be two rulings,
+not one: the mechanism (§3.7's park leaves SPY) and the production vehicle (a Canadian-listed USD
+cash fund, not SHV — see "What this is not").
+
+**Gates, as run.** `finding.py` returns **UNPROVEN on both arms** — deflated Sharpe 0.210 (SPY)
+and 0.205 (SHV) against a 0.95 bar, 470 trials logged. That is the verdict the cell of record has
+always carried (WO-A18 calls `b5_12_2_L1_3` unproven on exactly this bar), and it is unchanged by
+the park: the comparison between the arms is valid, the absolute claim for either arm is not. Note
+that `finding.py`'s "vs benchmark" line follows each run's park, so "+9368% vs +660%" (SPY) and
+"+6972% vs +36%" (SHV) are not comparable across arms; the ex-top-3 lines (+5824% / +4273%, both
+beating their benchmark) and the bootstrap CAGR bands (p5 +9.65% / +9.31%) are.
+
+`verify_run` sixteen checks: **14 passed, 2 failed, identically on both arms.** B4 (three traded
+names — RXDX, NBIS, AOI — miss more than 3% of sessions while listed, probable foreign listings)
+and B7 (four pairs held concurrently as one security under two symbols — BBWI/LB_old1, BBBY/OSTK,
+B/GOLD_old, CLVS/CLVSQ — so the book doubled a position while every cap counted it twice). Both
+are properties of the cell of record's trades on this tape, not of the park: run 589 carried the
+same B7 finding seven times (`engine.py` cites it), and §3.7(3)'s twin rule exists in the live
+engine for that reason while this sim cell still admits the pairs. The 748 trades are the same in
+both arms, so the bias is identical on each side and cancels in the delta; it stands as a caveat
+on the absolute figures of both. The dispatch step exits non-zero on any failed check by design.
+
 ## Standing
 
 `SHV.US` is registered by migration 063 as `kind='index'`, exactly as 043 registered SPY and SPMO:
