@@ -200,7 +200,9 @@ def apply_unapplied(cur):
     Sleeve no longer appears here either. Zak, 2026-08-18: *"As for tagging as pre-seed or momentum
     etc... I'm not so certain why we would do either. That's just the book."* §2.1 makes the account
     the allocation, `desk.held_book` reads the account, and nothing in the live path branches on the
-    label — so there is no longer a wrong value to guess at.
+    label — so there is no longer a wrong value to guess at. Since migration 064 the label is not
+    guessed at all: `yuna_book_from_ledger` transcribes the sleeve the newest ticketed transaction
+    names, and a ticket-less history stays `unassigned` (learning 61).
 
     `applied_at` stays the idempotence stamp for the ticket advance, so a re-run finds nothing and
     advances nothing twice.

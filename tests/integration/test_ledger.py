@@ -446,7 +446,10 @@ def test_an_opening_balance_the_export_now_covers_is_a_double_count(db):
 def test_the_ledger_opens_a_position_unassigned_not_book(db):
     """Sleeves are subsets of the book, so `book` is a category error as a sleeve name — it labels a
     part with the name of the whole. `unassigned` is honest: the ledger knows a trade happened and
-    in which account, and genuinely does not know which sleeve the position belongs to. §0.3."""
+    in which account, and genuinely does not know which sleeve the position belongs to. §0.3.
+
+    Since 064 this is the TICKET-LESS half of the rule, and still the point: a row with no ticket
+    behind it has no engine sleeve to transcribe, so the ledger says so rather than guessing."""
     with db.cursor() as cur:
         _universe(cur, "MU.US")
         ledger.record(cur, dict(ticker="MU.US", account="TFSA", side="buy", qty=2,

@@ -53,18 +53,22 @@ def test_a_receipt_opens_the_position_and_settles_its_ticket(db, migrated):
         assert not orphans and len(settled) == 1
         cur.execute("""select qty, avg_cost, entry_fill, status, sleeve from book
                         where ticker = 'SNDK.US'""")
-        # `unassigned` since migration 060, and the correction matters. 059 wrote 'book' on the
-        # reading that the label had stopped deciding anything; Zak, 2026-08-18: "Sleeves... are
-        # just subsets of the book... The sum of everything is the book." A part cannot be labelled
-        # with the name of the whole. The ledger knows a trade happened and in which account, and
-        # genuinely does not know which sleeve it belongs to — that judgement is Zak's (§0.3).
+        # `momentum` since migration 064, and the history of this one assertion is the history of
+        # the label. 059 wrote 'book' on the reading that the label had stopped deciding anything;
+        # 060 corrected it to `unassigned` — "the ledger knows a trade happened and in which
+        # account, and genuinely does not know which sleeve it belongs to" (§0.3). Both missed
+        # that THIS row has a ticket behind it, and the ticket names the sleeve: `sheet.SLEEVE`,
+        # §2.1's placement ruling, approved and executed by Zak. Zak, 2026-09-02, on three real
+        # positions reading `unassigned` in the brief: "Why are they unassigned?? ... They were
+        # recommended to me." A ticket-less row still lands `unassigned` — see
+        # `test_a_position_the_engine_proposed_carries_the_tickets_sleeve` and `test_ledger`.
         #
         # `approx` on the cost for the same reason the sleeve changed: avg_cost is now DERIVED —
         # sum(qty x price) / sum(qty) over the ledger — where it used to be the receipt's price
         # copied across. One lot at 1650.10 comes back as 1650.0999999999997, and a book that
         # recomputes is worth a float ulp.
         qty, cost, entry, status, sleeve = cur.fetchone()
-        assert (qty, status, sleeve) == (24.0, "open", "unassigned")
+        assert (qty, status, sleeve) == (24.0, "open", "momentum")
         assert cost == pytest.approx(1650.10) and entry == pytest.approx(1650.10)
         cur.execute("select state, executed_at is not null from tickets where id = %s", (tid,))
         assert cur.fetchone() == ("executed", True)
@@ -319,14 +323,56 @@ def test_dry_run_writes_nothing_but_still_compares(db, migrated, tmp_path):
 # `arming.sync_fills_from_tickets` + `apply_fills`, called by the legacy `score` and `fills` — and
 # §6.3 retired both from the schedule while `reconcile` replaced only the MANIFEST half.
 
-def _filled_ticket(cur, ticker, action, qty, price, *, state="executed", sleeve="momentum"):
+def _filled_ticket(cur, ticker, action, qty, price, *, state="executed", sleeve="momentum",
+                   session="2026-08-14", fill_date="2026-08-17"):
     cur.execute("""insert into tickets (session_date, ticker, account, sleeve, action, clause,
                                         order_type, qty, state, fill_qty, fill_price, fill_date)
-                   values ('2026-08-14',%s,'TFSA',%s,%s,%s,'market',%s,%s,%s,%s,'2026-08-17')
+                   values (%s,%s,'TFSA',%s,%s,%s,'market',%s,%s,%s,%s,%s)
                    returning id""",
-                (ticker, sleeve, action, "fill" if action == "buy" else "rank_exit",
-                 qty, state, qty, price))
+                (session, ticker, sleeve, action, "fill" if action == "buy" else "rank_exit",
+                 qty, state, qty, price, fill_date))
     return cur.fetchone()[0]
+
+
+def test_a_position_the_engine_proposed_carries_the_tickets_sleeve(db, migrated):
+    """Migration 064. Zak, 2026-09-02, on SNDK, WDC and RVMD reading `unassigned` in the brief:
+    *"Why are they unassigned?? ... They were recommended to me... What's broken there?"*
+
+    What broke: 059 moved the book's movement into `yuna_book_from_ledger`, and the ticket's sleeve
+    — which the retired fill loop used to copy across — stopped crossing. 060 named the gap
+    honestly (`unassigned`: the ledger does not know) and `sleeve_divergence` then reported the
+    same three rows every night. With a ticket behind the row the ledger DOES know: the sheet
+    wrote the sleeve on the ticket as §2.1's placement ruling, and Zak executed it.
+
+    Three facts in one history: a ticketed fill opens the position under the ticket's sleeve; a
+    ticket-less top-up (AXTI's +25 on 2026-08-28) keeps it; and a label set by hand outranks any
+    later ticket. The ticket-less OPENING still lands `unassigned` — `test_ledger` pins that half.
+    """
+    with db.cursor() as cur:
+        _universe(cur, "SNDK.US")
+        _filled_ticket(cur, "SNDK.US", "buy", 16, 1486.02)
+        assert len(reconcile.derive_ticket_fills(cur)) == 1
+        db.commit()                       # the deferred trigger moves the book here
+        cur.execute("select sleeve, qty from book where ticker = 'SNDK.US'")
+        assert cur.fetchone() == ("momentum", 16.0), "the engine's own ticket names the sleeve"
+
+        # a broker row with no ticket behind it — Zak topping up outside the sheet
+        cur.execute("""insert into transactions (ticker, account, side, qty, price, currency,
+                                                 trade_date, confirmed, confirmed_at, grade, source)
+                       values ('SNDK.US','TFSA','buy',5,1500.0,'USD','2026-08-28',true,now(),
+                               'broker','export')""")
+        db.commit()
+        cur.execute("select sleeve, qty from book where ticker = 'SNDK.US'")
+        assert cur.fetchone() == ("momentum", 21.0), "a ticket-less add does not unlabel it"
+
+        # a label Zak set by hand is his ruling (§0.3), and no ticket rewrites it
+        cur.execute("update book set sleeve = 'reserve' where ticker = 'SNDK.US'")
+        _filled_ticket(cur, "SNDK.US", "buy", 4, 1510.0, session="2026-08-27",
+                       fill_date="2026-08-28")
+        assert len(reconcile.derive_ticket_fills(cur)) == 1
+        db.commit()
+        cur.execute("select sleeve, qty from book where ticker = 'SNDK.US'")
+        assert cur.fetchone() == ("reserve", 25.0), "a hand-set sleeve outranks a ticket"
 
 
 def test_a_fill_reported_in_chat_reaches_the_book_with_no_manifest_at_all(db, migrated):

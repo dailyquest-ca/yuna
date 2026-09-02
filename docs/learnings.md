@@ -99,7 +99,18 @@ is `roadmap-2026-07-31.md`.
     run is not evidence the job works**; the next scheduled shadow has no twin to hide behind.
 
 ## The formulas, as implemented
-
+61. **A gauge that fires on the same rows every night is a defect report, not weather.** Migration
+    059 moved the book's movement into `yuna_book_from_ledger`, and the ticket's sleeve — which the
+    retired fill loop had copied onto every position it opened — stopped crossing over. 060 named
+    the gap honestly as `unassigned`, and `desk.sleeve_divergence` then reported SNDK, WDC and RVMD
+    every night from 2026-08-28 until Zak asked *"Why are they unassigned??"* on 2026-09-02. The
+    engine was right the whole time (it reads the account), so nothing failed; the record was
+    wrong, and the line that said so read as the guard being fussy. Same shape as 58: a diagnostic
+    without its fix becomes evidence that the problem is normal. Migration 064 transcribes the
+    ticket's sleeve onto the position; a ticket-less row still lands `unassigned`, because that
+    half of 060's reading was right (§0.3). The tell to look for is a gauge or divergence line
+    whose CONTENT has not changed for three sessions — whatever it says, it is describing a state,
+    and a state is either a ruling or a defect.
 14. **§3.3's data-confidence rule renormalizes around *one* missing component.** Size is available
     to almost everything, so without a floor a company whose engine and cash conversion are both
     unmeasurable scores on smallness alone — a $4 ethanol microcap topped the first bench. The
