@@ -153,9 +153,21 @@ Weekly: the Saturday letter (clinical: gate, rank stability, DD status, divergen
 
 ## §5 — Operations
 
-**5.1 Sessions.** The morning brief renders: freshness · gate & latch · the order sheet · book with ranks & P/L · DD status vs milestones · tranche schedule status. Judgment happens in chat; arithmetic happens in the pipeline. Zak asks in plain words; no command vocabulary exists.
+**5.1 Sessions.** The morning brief renders: freshness · gate & latch · the order sheet · book with ranks & P/L · DD status vs milestones, with the drawdown record beside it (§5.2) · tranche schedule status. Judgment happens in chat; arithmetic happens in the pipeline. Zak asks in plain words; no command vocabulary exists.
 
 **5.2 Drawdown milestones — information, never action.** Pager at **−10%** engine DD; informational lines at −20 / −30 / −40 / −50. **No mechanical intervention exists at any level.** Any intervention is Zak's explicit ruling in chat. This is the design, chosen with the three numbers in view.
+
+**The drawdown record rides with the milestones** (2026-09-02, Zak: *"the most important piece is having something to tell me and remind me... that's likely what you're gonna experience sixty percent of the time"*). Quoted from run 624 — the cell of record on 2007-01-12 → 2026-09-01, SPY park, 4,940 sessions, WO-A24's control — and re-measured only when the cell of record changes:
+
+| at or below the running high by | share of sessions |
+|---|---|
+| 10% | 68.4% |
+| 20% | 47.6% |
+| 30% | 26.2% |
+| 40% | 11.1% |
+| 50% | 1.5% |
+
+Its worst trough, −60.3% on 2009-03-09, made a new high on 2013-09-10, four and a half years later. The worst since, −45.9% on 2025-11-21, made one on 2026-04-30, five months later. The brief prints the share for the deepest milestone the book has passed and both recoveries, every session. **The bet is the rotation, not the name:** the record says the book recovered every time, and says nothing about the names it held at the trough.
 
 **5.3 The learning loop.** Observations → learnings with required falsifiers → proposals → Zak's ruling → promotion or expiry. No rule changes ship without this path.
 
@@ -190,6 +202,8 @@ Target: ~mid-September 2026.
 ## §7 — Changelog
 
 **v1.0 — 2026-08-15 — Founding law. Promoted by Zak.** Establishes: a single momentum engine (cell of record `b5_12_2_L1_3`) housed entirely in the TFSA; accounts-as-allocation with no percentage targets; reserve layer SPMO (RRSP) and VXC.TO (NONREG); a levered layer hard-capped at 50% of the LOC limit with a three-tranche gate-conditional ramp; deployment via Phase 0 — liquidation → build → 10-session shadow → seed, target mid-September 2026. Park is SPY per the cell of record; a T-bill park variant is a research work order, promoted only on evidence. Drawdown milestones are informational only. Exclusions are data-hygiene only. No stops, no GTC orders, no command vocabulary.
+
+**2026-09-02 — §5.2 amended: the drawdown record rides with the milestones. Promoted by Zak in chat.** §5.1 lists it. The shares and the two recoveries are run 624's, re-measured only when the cell of record changes. Information, never action — unchanged.
 
 ---
 

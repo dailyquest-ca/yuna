@@ -30,6 +30,19 @@ from db import connect, dry, freeze_state, Heartbeat                       # noq
 DD_PAGER = -0.10
 DD_MILESTONES = (-0.20, -0.30, -0.40, -0.50)
 
+# §5.2's drawdown record (2026-09-02), quoted from the plan and never derived here — §0.4 gives
+# the brief a payload and no cursor. Run 624 is the cell of record on 2007-01-12 → 2026-09-01
+# with the SPY park, 4,940 sessions: the share of them that sat at or below each milestone, and
+# how its two worst troughs ended. Zak: "the most important piece is having something to tell me
+# and remind me... that's likely what you're gonna experience sixty percent of the time."
+DD_RECORD_RUN = 624
+DD_RECORD_SESSIONS = 4940
+DD_RECORD_SHARE = {-0.10: 0.684, -0.20: 0.476, -0.30: 0.262, -0.40: 0.111, -0.50: 0.015}
+DD_RECORD_TROUGHS = (
+    dict(depth=-0.603, trough="2009-03-09", new_high="2013-09-10", took="four and a half years"),
+    dict(depth=-0.459, trough="2025-11-21", new_high="2026-04-30", took="five months"),
+)
+
 
 def payload(cur):
     cur.execute("select * from v_session_payload")
@@ -249,7 +262,7 @@ def dd_lines(p):
     out = [f"  engine NAV {nav}{marked}"]
     if dd is None:
         out.append("  drawdown — not yet measurable (no marked equity recorded)")
-        return out
+        return out + record_lines(None)
     hit = [m for m in DD_MILESTONES if dd <= m]
     out.append(f"  drawdown {_pct(dd)} from a peak of {float(n['peak']):,.2f}")
     if dd <= DD_PAGER:
@@ -258,7 +271,36 @@ def dd_lines(p):
         out.append("  milestones passed: " + ", ".join(f"{int(100 * m)}%" for m in hit))
     out.append("  §5.2: milestones are information. No mechanical intervention exists at any "
                "level; any intervention is Zak's explicit ruling in chat.")
-    return out
+    return out + record_lines(dd)
+
+
+def record_lines(dd):
+    """§5.2's drawdown record, printed beside the number every session (2026-09-02).
+
+    Zak asked for the thing that has comforted him before — not that the names held today come
+    back, which the record does not say, but how often the cell of record sat this deep and how
+    its worst troughs ended. The shares and dates are the plan's (§5.2, run 624); nothing here is
+    computed from the store.
+    """
+    ten = DD_RECORD_SHARE[-0.10]
+    passed = [m for m in sorted(DD_RECORD_SHARE) if dd is not None and dd <= m]
+    if passed:
+        deepest = passed[0]
+        first = (f"  the record (§5.2, run {DD_RECORD_RUN}): a book at least "
+                 f"{abs(int(round(deepest * 100)))}% below its high is {DD_RECORD_SHARE[deepest]:.1%} "
+                 f"of the cell of record's {DD_RECORD_SESSIONS:,} sessions; at least 10% below "
+                 f"is {ten:.1%}")
+    else:
+        first = (f"  the record (§5.2, run {DD_RECORD_RUN}): the cell of record sat at least 10% "
+                 f"below its high in {ten:.1%} of its {DD_RECORD_SESSIONS:,} sessions; today is "
+                 f"one of the other {1 - ten:.1%}")
+    worst, since = DD_RECORD_TROUGHS
+    return [first,
+            f"  its worst trough, {worst['depth']:.1%} on {worst['trough']}, made a new high on "
+            f"{worst['new_high']}, {worst['took']} later; the worst since, {since['depth']:.1%} on "
+            f"{since['trough']}, made one on {since['new_high']}, {since['took']} later",
+            "  the bet is the rotation, not the name: the record says the book recovered every "
+            "time, and says nothing about the names it held at the trough"]
 
 
 def tranche_lines(p, frozen=False):

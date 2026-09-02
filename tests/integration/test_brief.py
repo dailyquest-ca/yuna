@@ -128,6 +128,40 @@ def test_the_drawdown_section_always_says_that_nothing_happens_at_a_milestone(db
     assert "No mechanical intervention exists at any level" in text
 
 
+def test_the_drawdown_section_carries_the_record_beside_the_number(db, migrated):
+    """§5.2 (2026-09-02): the drawdown record rides with the milestones. Zak: "the most important
+    piece is having something to tell me and remind me." At −35% the brief quotes the share of the
+    cell of record's sessions that sat at least 30% below their high, both recoveries, and the
+    sentence that says what the record does and does not promise. At −2% it quotes the −10% share
+    and says today is one of the other sessions. Every number is the plan's, none is the store's —
+    `test_brief_record.py` holds the plan and the code to the same figures."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",))
+        _score(cur, days)
+        db.commit()
+        cur.execute("""update engine_sessions set marked_equity = 100000
+                        where session_date = %s""", (days[-1],))
+        cur.execute("""insert into engine_sessions
+                         (session_date, gate_on, gate_green, universe_count, ranked_count,
+                          marked_equity, param_digest, mode)
+                       values (%s, true, true, 20, 20, 65000, 'x', 'live')""",
+                    (days[-1] + dt.timedelta(days=1),))
+        db.commit()
+        deep = brief.render(brief.payload(cur))
+        cur.execute("""update engine_sessions set marked_equity = 98000
+                        where session_date = %s""", (days[-1] + dt.timedelta(days=1),))
+        db.commit()
+        shallow = brief.render(brief.payload(cur))
+
+    assert "a book at least 30% below its high is 26.2% of the cell of record's 4,940 sessions" in deep
+    assert "at least 10% below is 68.4%" in deep
+    for both in (deep, shallow):
+        assert "-60.3% on 2009-03-09, made a new high on 2013-09-10, four and a half years later" in both
+        assert "-45.9% on 2025-11-21, made one on 2026-04-30, five months later" in both
+        assert "the bet is the rotation, not the name" in both
+    assert "sat at least 10% below its high in 68.4% of its 4,940 sessions; today is one of the other 31.6%" in shallow
+
+
 def test_a_holding_with_no_rank_is_flagged_rather_than_shown_blank(db, migrated):
     """§3.5 queues anything below rank 12, and "not ranked at all" is below it. A blank cell in the
     rank column reads as missing data; it is in fact a queued exit."""
