@@ -54,6 +54,19 @@ vendor bar is 2007-01-11. The value is recorded in each run's `params.window`.
 
 Cost against run 589's window: the first week of January 2007. Nothing of 2008 is lost.
 
+**One asymmetry survives that choice, and it is proved inert rather than patched.** The gate's
+carried state is advanced by `regime_latch()`, and that call sits behind the same
+`np.isfinite(park_px[i])` guard as the action. So through warmup the SPY arm evaluates the latch
+every session while the SHV arm's `regime_state` never moves; the two enter the first decision
+with different streak histories. On this window it cannot matter: `regime_latch` sets
+`on = ok_now` on its first evaluated session, and on 2007-01-12 `ok_now` is True for both arms
+(SPY above its 200-day since well before, `confirm_in = 3` met by i = 202 in the SPY arm), so
+both hold `on = True`. Under `confirm_out = 1` the differing `up` streaks (≈54 against 1) cannot
+change any later verdict, because one down session zeroes `up` and flips the latch in both arms
+alike. A future park experiment whose first decision falls inside a bear market does NOT get this
+proof for free: move the state update outside the park guard first, and leave the action inside
+it. That patch is behaviour-identical for every stored cell, whose parks are finite throughout.
+
 ## What this is not
 
 **It is not a production recommendation, and SHV is not the production vehicle.** Two facts, both
