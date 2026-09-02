@@ -278,6 +278,11 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
   concentrated:
+    # **Two arms at a time, and none inside the hour before the 22:23 UTC ingest** (learning 62).
+    # Each arm loads the whole tape with a server-side sort that spills to the production
+    # database's disk; five at once filled it, Postgres refused every write, and Supabase held
+    # the project read-only until the dead queries let go. The concurrency group below keys on
+    # the inputs so that two DIFFERENT arms may run side by side — it does not stop five.
     if: github.event_name == 'workflow_dispatch' && inputs.research == 'concentrated'
     runs-on: ubuntu-latest
     timeout-minutes: 120

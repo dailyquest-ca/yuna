@@ -111,6 +111,20 @@ is `roadmap-2026-07-31.md`.
     half of 060's reading was right (§0.3). The tell to look for is a gauge or divergence line
     whose CONTENT has not changed for three sessions — whatever it says, it is describing a state,
     and a state is either a ruling or a defect.
+62. **A research dispatch is a disk event before it is a compute event.** Five `concentrated`
+    arms dispatched within a minute of each other (WO-A25, 2026-09-02) each ran `load_tape` over
+    the whole store, and five server-side sorts of a twenty-year tape spilled temp files together
+    until Postgres answered `could not write to file "base/pgsql_tmp/...": No space left on
+    device`. Supabase then put the project into read-only mode for long enough that the autopsy's
+    own UPDATE was refused — four arms died at ninety seconds, the first, already past its load,
+    finished cleanly, and migration 064 applied six minutes later, so the state cleared on its own
+    once the dead queries released their spill. The store is 3.1 GB; `work_mem` is 3.5 MB, so
+    every large sort spills; `temp_file_limit` is unset, so one query may take the whole disk; and
+    the two A24 arms had run side by side without incident, which is exactly why five looked
+    safe. **Two research arms at a time, and none inside the hour before the 22:23 UTC ingest** —
+    the production database is the one that fills, and the nightly is what it would have failed.
+    The fix worth building is upstream of the rule: `load_tape` sorts on the server, and a
+    per-session `temp_file_limit` would fail one query instead of the project.
 14. **§3.3's data-confidence rule renormalizes around *one* missing component.** Size is available
     to almost everything, so without a floor a company whose engine and cash conversion are both
     unmeasurable scores on smallness alone — a $4 ethanol microcap topped the first bench. The
