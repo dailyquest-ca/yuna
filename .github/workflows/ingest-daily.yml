@@ -38,7 +38,8 @@ name: ingest-daily
 # would land YESTERDAY's tape and go green, and the retry would then exit on "already green" —
 # a silent stale day. So a scheduled run whose newest tape is not newer than the store's
 # `data_date` writes nothing and records `awaiting_vendor`; the retry ignores that row and fetches
-# again, and if it finds the same it fails red, because a night with no tape has to have a reader
+# again, and if it finds the same — and no run landed that tape this night, since the two firings
+# drift independently — it fails red, because a night with no tape has to have a reader
 # (`ingest.py`). The repair is the `date` input below. A hand dispatch is never guarded: pressing
 # the button means fetch.
 #

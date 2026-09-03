@@ -65,9 +65,10 @@ def tape_advanced(as_of, store_date):
     would fetch YESTERDAY's tape, upsert it harmlessly, and go green — and the retry would then
     exit on "already green" with today's session never landed. A scheduled run answers this
     question first (`awaiting_vendor`) and, when the answer is no, writes nothing: the first
-    firing says so and stays green, the retry fails red, because two firings without a tape is a
-    night with no tape and that has to have a reader (learning 58). An empty store is a cold
-    start and proceeds; a tape with no date is not a tape.
+    firing says so and stays green, the retry fails red unless a run already landed that tape
+    this night (`tape_already_landed`), because two firings without a tape is a night with no
+    tape and that has to have a reader (learning 58). An empty store is a cold start and
+    proceeds; a tape with no date is not a tape.
     """
     if not as_of:
         return False
@@ -86,6 +87,27 @@ def awaiting_vendor(as_of, store_date):
         return None
     return (f"the vendor's newest tape is {as_of!r} and the store already holds {store_date}; "
             f"today's session is not published yet — nothing written")
+
+
+def tape_already_landed(cur, as_of, hours=12):
+    """The run that put the vendor's newest tape in the store this night, or None.
+
+    The retry's red is for a night with NO tape. The two firings drift independently (learning
+    58), so the retry can arrive hours after the first firing — or a hand dispatch — has already
+    landed today's session; then the vendor's newest tape equals the store's date because we HAVE
+    it, not because the vendor is late. The tell is a run that landed rows for exactly this tape
+    date inside the night. Twelve hours is wider than any gap two firings of one night have shown
+    and narrower than the gap to the previous night's landing, which is the case that must stay
+    red. A US market holiday reads as a late vendor to this rule and the retry goes red for it;
+    the honest fix is the vendor's own exchange calendar, not one invented here.
+    """
+    cur.execute("""select id from runs
+                    where job = %s and not dry_run and coalesce(rows_written, 0) > 0
+                      and detail->'tape'->>'as_of' = %s
+                      and started_at > now() - (%s * interval '1 hour')
+                    order by id desc limit 1""", (JOB, str(as_of), hours))
+    row = cur.fetchone()
+    return row[0] if row else None
 
 
 # --------------------------------------------------------------------------- FX (§4.1, §3.0)
@@ -405,15 +427,25 @@ def main():
                 raise RuntimeError(f"asked the vendor for {TAPE_DATE} and it answered {as_of!r} — "
                                    f"refusing to write a tape under a date it does not carry")
             if why := awaiting_vendor(as_of, store_date):
-                hb.detail.update(awaiting_vendor=why,
-                                 tape=dict(rows=len(tape), as_of=as_of, requested=None))
+                hb.detail["tape"] = dict(rows=len(tape), as_of=as_of, requested=None)
                 if SECOND_RUN:
+                    with conn.cursor() as cur:
+                        landed = tape_already_landed(cur, as_of)
+                    if landed:
+                        # not a late vendor: this night already has its tape, landed by a firing
+                        # more than the green-window's four hours ago or by a hand dispatch
+                        hb.detail["skipped"] = (f"the vendor's newest tape {as_of} is already in the "
+                                                f"store — run {landed} landed it this night")
+                        print(f"ingest-daily: {hb.detail['skipped']}")
+                        return 0
                     # the first firing may beat the vendor; the retry may not. Red here is a
                     # result, not a crash: the night has no tape, and the named-date dispatch
                     # (learning 59) is the repair once the vendor posts it.
+                    hb.detail["awaiting_vendor"] = why
                     raise RuntimeError(f"the retry found the vendor still unpublished — {why}. The "
                                        f"night has no tape; repair it by hand with the `date` input "
                                        f"once the vendor posts the session")
+                hb.detail["awaiting_vendor"] = why
                 print(f"ingest-daily: awaiting vendor — {why}; the retry re-fetches")
                 return 0
 
