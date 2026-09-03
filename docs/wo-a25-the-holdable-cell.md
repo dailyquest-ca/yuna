@@ -114,13 +114,18 @@ Peak-to-trough by episode (learning 40's cut), with the cell of record beside th
 
 | episode | A | B | C | D | E | record SPY / SHV |
 |---|---|---|---|---|---|---|
-| 2007–09 | −28.9% | −55.8% | **−8.2%** | −55.2% | −27.9% | −60.3% / −21.8% |
+| 2007–09 | −28.9% | −55.8% | **−8.2%** | −55.2% | −27.9% | −60.3% / −27.3% |
 | worst of the 2010s | −28.8% | −41.3% | −14.7% | −30.6% | −35.3% | −50.0% / −37.5% |
 | 2020 | −14.3% | −30.8% | −13.5% | −33.9% | −9.9% | −37.2% / −28.4% |
 | 2022 | −14.1% | −21.5% | −13.5% | −29.1% | −21.3% | −46.4% / −40.3% |
 | 2025–26 | −19.5% | −22.2% | −19.5% | −22.2% | −12.3% | −45.9% / −45.8% |
 | sessions ≥10% below peak | 38% | 35% | 24% | 31% | 39% | 68% / 68% |
 | sessions ≥20% below peak | 14% | 14% | **0%** | 12% | 24% | 48% / 34% |
+
+*Correction 2026-09-03: the bill-park record's 2007–09 figure first read −21.8%, copied from A24,
+whose "2007–09" row is the 2008-01-01 to 2009-03-31 cut. On the 2007-01-01 to 2009-12-31 cut used
+for every arm in this table it is −27.3%, trough 2009-10-28 — the re-entry whipsaw after the
+rebound, not the crash. Nothing else in the table changes.*
 
 ### What we learn
 
