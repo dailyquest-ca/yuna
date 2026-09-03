@@ -432,6 +432,9 @@ PARENT = {
     # the question it answers is "what does §3.7(3) cost the number in the plan", and that is only
     # answerable against the number in the plan.
     "b5_12_2_L1_3_dd": "b5_12_2_L1_3",
+    # WO-A30..A33: four mechanisms, one key each off the cell of record
+    "b5_12_2_L1_3_res": "b5_12_2_L1_3", "b5_12_2_L1_3_crash": "b5_12_2_L1_3",
+    "b5_12_2_L1_3_jan": "b5_12_2_L1_3", "b5_12_2_L1_3_breadth": "b5_12_2_L1_3",
 }
 
 # An arm whose clock, exit rule, entry rule AND fill convention all differ from everything before

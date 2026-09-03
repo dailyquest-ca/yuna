@@ -126,6 +126,19 @@ EUPHORIA_SD = 2.0
 # them for A3 (vol_target=0.12, vol_window=126). PARK_BAND is §2.1's park deadband, reused for
 # its own purpose: how far the parked weight may drift before it is worth a trade.
 VOL_TARGET_WINDOW = 126
+# ---- WO-A30..A33 (2026-09-03), docs/wo-a30-a33-four-mechanisms.md: four mechanisms, each ONE key
+# off the cell of record. Every number below is a research parameter DECLARED in that work order
+# before any run — the beta window of residual momentum, the two crash-state thresholds, and the
+# breadth gate's window, quorum and majority — never a default picked here.
+RESIDUAL_BETA_WINDOW = 504   # A30: sessions of daily returns the market beta is fitted on (or all
+                             #      that exist above one year, so the cell ranks from day one)
+RESIDUAL_MIN_RETURNS = 202   # A30: 80% of one year — fewer returns than this scores NaN
+CRASH_LOOKBACK = 504         # A31: Daniel-Moskowitz's bear indicator, the trailing two-year return
+CRASH_VOL_WINDOW = 126       # A31: their realized-volatility window
+CRASH_VOL_ANNUAL = 0.25      # A31: annualized realized vol above which the veto may hold
+BREADTH_WINDOW = 200         # A33: each name's own long average, the gate's 200-day
+BREADTH_MIN_BARS = 150       # A33: a name votes only with three quarters of the window printed
+BREADTH_ON = 0.50            # A33: the majority
 # WO-A6's entry door: a close above every close in the prior 252 sessions. §3.2 enters on a break
 # above a pivot; this is that with the base detection removed, and the same window A2 used.
 ENTRY_HIGH = 252
@@ -948,6 +961,16 @@ CELLS = {
                        exit_rank=12, entry_rank=2, gated=True, latch=(1, 10), gate_rising=True),
 }
 
+# ---- WO-A30..A33 (2026-09-03): four mechanisms, each ONE key off the cell of record, so the
+# grid's one-axis rule holds and each is priced against run 624 directly. Pre-registered, with
+# the predictions, in docs/wo-a30-a33-four-mechanisms.md before any of them ran.
+CELLS.update({
+    "b5_12_2_L1_3_res":     dict(CELLS["b5_12_2_L1_3"], residual=True),
+    "b5_12_2_L1_3_crash":   dict(CELLS["b5_12_2_L1_3"], crash_veto=True),
+    "b5_12_2_L1_3_jan":     dict(CELLS["b5_12_2_L1_3"], jan_veto=True),
+    "b5_12_2_L1_3_breadth": dict(CELLS["b5_12_2_L1_3"], breadth_gate=True),
+})
+
 
 COST_MULT = 1.0          # WO-A5 §3.1 sets this per cell; §2.2's curve is the 1.0 case
 
@@ -1086,7 +1109,104 @@ def rebalance_dates(dates, months, warmup, offset=0):
     return out
 
 
-def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None, min_participation=None):
+def residual_scores(i, adj, idx, market, *, risk_adjusted=True, beta_window=RESIDUAL_BETA_WINDOW):
+    """WO-A30: residual 12-1 momentum — the part of each name's return the market did not explain.
+
+    Blitz, Huij & Martens (2011). Each name's daily returns are regressed, with an intercept, on
+    the market's over the `beta_window` sessions ending at i - SKIP (or every session above one
+    year that exists, so the cell ranks from the first decision like the raw rank). The residuals
+    over the formation window are the signal: their mean over their standard deviation when
+    `risk_adjusted`, their sum otherwise. Because the fit carries an intercept, a name whose
+    stock-specific drift has been constant scores about zero — the signal is idiosyncratic return
+    ABOVE the name's own two-year average, which is what the literature means by it. Reads bars
+    <= i - SKIP only. Too little history scores NaN and drops out of the rank rather than being
+    ranked on a guess.
+    """
+    end = i - SKIP + 1
+    start = max(0, end - beta_window - 1)
+    K = len(idx)
+    if K == 0 or end - start < RESIDUAL_MIN_RETURNS + 1:
+        return np.full(K, np.nan)
+    px = adj[start:end][:, idx]
+    mk = market[start:end]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r = px[1:] / px[:-1] - 1.0
+        m = mk[1:] / mk[:-1] - 1.0
+        valid = np.isfinite(r) & np.isfinite(m)[:, None]
+        n = valid.sum(axis=0)
+        rv = np.where(valid, r, 0.0)
+        mv = np.where(valid, m[:, None], 0.0)
+        rbar = rv.sum(axis=0) / n
+        mbar = mv.sum(axis=0) / n
+        cov = np.where(valid, (rv - rbar) * (mv - mbar), 0.0).sum(axis=0)
+        var = np.where(valid, (mv - mbar) ** 2, 0.0).sum(axis=0)
+        beta = cov / var
+        alpha = rbar - beta * mbar
+        resid = np.where(valid, r - alpha - beta * m[:, None], np.nan)
+        form = resid[-(FORMATION - SKIP):]
+        fv = np.isfinite(form)
+        fn = fv.sum(axis=0)
+        fz = np.where(fv, form, 0.0)
+        mean = fz.sum(axis=0) / fn
+        sd = np.sqrt(np.where(fv, (fz - mean) ** 2, 0.0).sum(axis=0) / np.maximum(fn - 1, 1))
+        score = mean / sd if risk_adjusted else fz.sum(axis=0)
+        ok = (n >= RESIDUAL_MIN_RETURNS) & (fn >= 0.8 * (FORMATION - SKIP)) & np.isfinite(score)
+        if risk_adjusted:
+            ok &= sd > 0
+        score = np.where(ok, score, np.nan)
+    return score
+
+
+def market_vol(i, market, *, window=CRASH_VOL_WINDOW):
+    """Annualized realized volatility of the market over the `window` sessions ending at i."""
+    if i < window:
+        return np.nan
+    w = market[i - window:i + 1]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r = w[1:] / w[:-1] - 1.0
+    r = r[np.isfinite(r)]
+    if len(r) < 0.8 * window:
+        return np.nan
+    return float(np.std(r, ddof=1)) * float(np.sqrt(252.0))
+
+
+def crash_state(i, market, *, lookback=CRASH_LOOKBACK, vol_annual=CRASH_VOL_ANNUAL):
+    """WO-A31: Daniel & Moskowitz's crash state — the market has fallen over two years AND is
+    volatile. Momentum's worst months live here, in the rebound. Bars <= i; unknown is False."""
+    if i < lookback:
+        return False
+    a, b = market[i - lookback], market[i]
+    if not (np.isfinite(a) and np.isfinite(b)) or a <= 0:
+        return False
+    vol = market_vol(i, market)
+    return bool(b / a - 1.0 < 0.0 and np.isfinite(vol) and vol > vol_annual)
+
+
+def breadth_series(adj, *, window=BREADTH_WINDOW, min_bars=BREADTH_MIN_BARS):
+    """WO-A33: per session, the share of names above their own `window`-session average.
+
+    One pass over the grid with cumulative sums, so a 4,940 x 6,000 tape costs seconds. A name
+    votes only when it has printed `min_bars` of the window and prints today; a session with no
+    voters is NaN, which the gate reads as OFF. Bars <= i only, by construction.
+    """
+    T, K = adj.shape
+    fin = np.isfinite(adj)
+    cs = np.vstack([np.zeros((1, K)), np.cumsum(np.where(fin, adj, 0.0), axis=0)])
+    cn = np.vstack([np.zeros((1, K), dtype=np.int64), np.cumsum(fin, axis=0)])
+    out = np.full(T, np.nan)
+    for i in range(window - 1, T):
+        s = cs[i + 1] - cs[i + 1 - window]
+        n = cn[i + 1] - cn[i + 1 - window]
+        votes = (n >= min_bars) & fin[i]
+        if votes.any():
+            with np.errstate(invalid="ignore", divide="ignore"):
+                sma = s[votes] / n[votes]
+            out[i] = float(np.mean(adj[i][votes] > sma))
+    return out
+
+
+def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None, min_participation=None,
+            residual_vs=None):
     """12-1 momentum over the liquid universe at session i. Uses bars <= i only.
 
     `top_by_addv` narrows the pool to the K most-traded names BEFORE ranking. This is the
@@ -1138,13 +1258,17 @@ def rank_at(i, adj, raw, dv, *, risk_adjusted, top_by_addv=None, min_participati
         # so a tie at the 500th place silently swaps one company for another and the whole book can
         # differ downstream. Fixing the score sort and leaving this one unstable was half a fix.
         idx = idx[np.argsort(-addv[idx], kind="stable")[:top_by_addv]]
-    score = recent[idx] / past[idx] - 1.0
-    if risk_adjusted:
-        window = adj[max(0, i - VOL_WINDOW):i + 1, idx]
-        rets = np.diff(window, axis=0) / window[:-1]
-        vol = np.nanstd(rets, axis=0)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            score = np.where(vol > 0, score / vol, np.nan)
+    if residual_vs is not None:
+        # WO-A30: the same pool, the same eligibility, a different score
+        score = residual_scores(i, adj, idx, residual_vs, risk_adjusted=risk_adjusted)
+    else:
+        score = recent[idx] / past[idx] - 1.0
+        if risk_adjusted:
+            window = adj[max(0, i - VOL_WINDOW):i + 1, idx]
+            rets = np.diff(window, axis=0) / window[:-1]
+            vol = np.nanstd(rets, axis=0)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                score = np.where(vol > 0, score / vol, np.nan)
     ok = np.isfinite(score)
     idx, score = idx[ok], score[ok]
     # `kind="stable"` is not about ties being common — it is about the book being reproducible.
@@ -1376,7 +1500,7 @@ def regime_rising(i, index_px, window=200, slope=21):
 
 
 def regime_latch(i, index_px, state, *, confirm_out=1, confirm_in=1, require_rising=False,
-                 window=200):
+                 window=200, ok_override=None):
     """WO-A10's asymmetric regime latch: quick to leave, slow to return.
 
     `state` is a dict carried across sessions holding the current verdict and the two streaks.
@@ -1393,7 +1517,8 @@ def regime_latch(i, index_px, state, *, confirm_out=1, confirm_in=1, require_ris
     had several. `require_rising` adds the recovery proof: the average itself must be climbing, not
     merely touched from below.
     """
-    ok_now = regime_ok(i, index_px, window=window)
+    # WO-A33: the breadth gate keeps the latch and swaps the series it smooths
+    ok_now = regime_ok(i, index_px, window=window) if ok_override is None else bool(ok_override)
     if require_rising and ok_now:
         ok_now = regime_rising(i, index_px, window=window)
     if ok_now:
@@ -1556,8 +1681,16 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
              latch=None, gate_rising=False,
              entry_rank=None, displace=False, base_door=True, fill_at_open=False,
              swap_gap=False, min_participation=None, gate_n=None,
-             themes=None, theme_cap=None, gate_window=200, dedupe_pairs=False):
+             themes=None, theme_cap=None, gate_window=200, dedupe_pairs=False,
+             market_px=None, residual=False, crash_veto=False, jan_veto=False,
+             breadth_gate=False):
     """Hold the top `n` names, changed every `months`, with the rest of the account in the park.
+
+    WO-A30..A33 (2026-09-03): `market_px` is the calendar ETF's series, always supplied and used
+    only by the mechanisms that name it. `residual` ranks on residual momentum; `crash_veto` and
+    `jan_veto` forbid holding stocks in Daniel-Moskowitz's crash state and in January; and
+    `breadth_gate` swaps the latch's series for the share of names above their own 200-day. Each
+    is one key off the cell of record and inert by default, so every stored cell reproduces.
 
     With `index_px` supplied the book is ALSO checked every `gate_every` sessions against the
     market's own trend: below its 200-day the whole sleeve moves to the park, and it only comes
@@ -1575,6 +1708,12 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     """
     warmup = FORMATION + 1
     warmup = warmup + int(start_offset * 21)      # WO-A6: shift when trading begins, in months
+    if (residual or crash_veto) and market_px is None:
+        raise ValueError("residual momentum and the crash veto need the market series (market_px)")
+    residual_vs = market_px if residual else None
+    breadth = breadth_series(adj) if breadth_gate else None
+    mechanisms = dict(crash_off_sessions=0, jan_off_sessions=0, vol_hot_sessions=0,
+                      breadth_on_sessions=0, sessions_judged=0)
     if entry_rule:
         rebal_list = []         # no calendar exists in either event mode
     elif every_sessions:
@@ -1738,12 +1877,28 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         latched = latch is not None or gate_rising
         if index_px is not None and latched and np.isfinite(park_px[i]):
             c_out, c_in = latch if latch else (1, 1)
+            ok_ovr = None
+            if breadth is not None:                       # WO-A33: unknown breadth is OFF
+                ok_ovr = bool(np.isfinite(breadth[i]) and breadth[i] >= BREADTH_ON)
+                mechanisms["breadth_on_sessions"] += int(ok_ovr)
             on = regime_latch(i, index_px, regime_state,
                               confirm_out=c_out, confirm_in=c_in,
-                              require_rising=gate_rising, window=int(gate_window))
+                              require_rising=gate_rising, window=int(gate_window),
+                              ok_override=ok_ovr)
+            why = "gate_off"
+            if crash_veto:                                # WO-A31, counted whether or not it bites
+                hot = market_vol(i, market_px)
+                mechanisms["vol_hot_sessions"] += int(np.isfinite(hot) and hot > CRASH_VOL_ANNUAL)
+                if on and crash_state(i, market_px):
+                    on, why = False, "crash_off"
+                    mechanisms["crash_off_sessions"] += 1
+            if on and jan_veto and dates[i].month == 1:   # WO-A32
+                on, why = False, "jan_off"
+                mechanisms["jan_off_sessions"] += 1
+            mechanisms["sessions_judged"] += 1
             if not on and held and gate_n is None:
                 for j in list(held):
-                    sell(i, j, held[j], "gate_off")
+                    sell(i, j, held[j], why)
                 queued.clear()
                 park_all(i)
             regime_off = not on
@@ -1811,7 +1966,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
             # Only the OBSERVATION moves; sizing and fills stay at i.
             obs_i = max(warmup, i - int(rank_lag))
             ranked = rank_at(obs_i, adj, raw, dv, risk_adjusted=risk_adjusted,
-                             top_by_addv=top_by_addv, min_participation=min_participation)
+                             top_by_addv=top_by_addv, min_participation=min_participation,
+                             residual_vs=residual_vs)
             # ---- WO-A6 §5's B-arm. With `tranches` > 1 the book is split into equal sub-books
             # that rebalance on ALTERNATING dates, so at any moment half the book was chosen two
             # months ago and half four. That is the same phase-averaging the six-cell phase test
@@ -1950,7 +2106,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         if entry_rule == "banded" and i >= warmup and np.isfinite(park_px[i]):
             obs = max(warmup, i - int(rank_lag))
             order = rank_at(obs, adj, raw, dv, risk_adjusted=risk_adjusted,
-                            top_by_addv=top_by_addv, min_participation=min_participation)
+                            top_by_addv=top_by_addv, min_participation=min_participation,
+                             residual_vs=residual_vs)
             rank_of = {j: r for r, j in enumerate(order, start=1)}
             # exit gate 2: the rank band. The trail below is gate 1 and runs unchanged.
             band = A6_EXIT_RANK if exit_rank is None else int(exit_rank)
@@ -2169,7 +2326,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
         if entry_rule == "new_high" and len(held) < n and np.isfinite(park_px[i]) and i >= warmup:
             ranked = [j for j in rank_at(i, adj, raw, dv, risk_adjusted=risk_adjusted,
                                          top_by_addv=top_by_addv,
-                                         min_participation=min_participation) if j not in held]
+                                         min_participation=min_participation,
+                             residual_vs=residual_vs) if j not in held]
             door = [j for j in ranked if at_new_high(i, j, adj)]
             if door:
                 held_sec = {}
@@ -2277,7 +2435,8 @@ def simulate(dates, tickers, adj, raw, dv, park_px, *, n, months, risk_adjusted,
     return equity, trades, costs, dict(stale_skips=stale_skips,
                                        empty_rebalances=[d.isoformat() for d in empty_rebals],
                                        rider_blocks=rider_blocks,
-                                       held_book=book_diversification(bets_series, cluster_series))
+                                       held_book=book_diversification(bets_series, cluster_series),
+                                       mechanisms=mechanisms)
 
 
 def book_diversification(bets, clusters):
@@ -2411,6 +2570,7 @@ def main():
                     eq, trades, costs, health = simulate(
                         dates, tickers, adj, raw, dv, park_px, start_nav=start_nav,
                         index_px=bench_px if gated else None, intraday=bars_in,
+                        market_px=bench_px,
                         next_open=opens, sectors=sectors, themes=themes,
                         bars=(hi, lo), **spec)
                 finally:
