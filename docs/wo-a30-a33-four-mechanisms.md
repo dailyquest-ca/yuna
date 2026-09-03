@@ -98,6 +98,21 @@ one stamp, two at a time (learning 62). Each cell is the cell of record plus one
 lineage. Four trials. Any mechanism that meets the secondary claim on the SPY park is then run
 on the bill park before anything is called a candidate for a ruling.
 
+## Amendment, 2026-09-03 03:25 UTC — declared after the first pair and before any other run
+
+The first pair (A30 run 635, A31 run 634, both SPY park) exposed a flaw in the design above. On
+a SPY park the full-window drawdown is the PARK's: gated-off capital rides SPY to the 2009-03-09
+trough whatever the sleeve does, so a mechanism that changes WHEN the sleeve holds — the crash
+veto, the January veto, the breadth gate — cannot move the number the secondary claim is scored
+on. Run 634 held the book out for 75 sessions and reproduced run 624 to the first decimal. The
+comparison is not wrong; it is uninformative, and the pre-registration should have said so.
+
+So every mechanism is also run on the bill park, control run 623 (24.22%, −45.8%), where the
+full-window drawdown is the sleeve's own 2025–26 episode and the mechanisms can be seen. The
+secondary claim is scored on the bill-park pair for the three gate-like mechanisms and on both
+pairs for residual momentum. Four more trials. The SPY-park arms of A32 and A33 still run as
+pre-registered, so the record shows the same fact twice rather than a quietly dropped arm.
+
 ## Gates
 
 As A25: `finding.py`, `capture_audit.py`, `verify_run.py`, learning 40's episode cut. These cells
