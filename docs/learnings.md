@@ -20,6 +20,18 @@ is `roadmap-2026-07-31.md`.
    Ask the usage endpoint before spending, and truncate the sweep rather than dying two-thirds in.
 6. Ten concurrent workers draws occasional 429s; eight does not.
 
+63. **A product downgrade is a code change, and the census was the code.** §4.5 names the product
+    (EOD Historical Data — All World) and the roadmap asked Zak to downgrade to it; he did, and the
+    first thing to notice was `ingest-universe`, red on two consecutive Saturdays (2026-09-05,
+    09-12) with `HTTP 403 Forbidden` from the screener — an endpoint the All World plan does not
+    carry (the vendor lists it under All-In-One and EOD+Intraday All World Extended only). The
+    listing and bulk-tape calls beside it still answered. Nothing on the schedule read what the
+    screener fetched — sector, industry and market cap were the retired engine's — so the census
+    was carrying a dependency the plan had already cancelled, and the cost was two unbuilt weeks
+    of September and two Saturday letters that held buys on an ingest red. **When the plan retires
+    a data product, grep the jobs for its endpoints the same day:** a call that decides nothing
+    still decides whether the job goes green.
+
 ## Postgres / Supabase
 
 7. **A view defined `select *` freezes its column list at creation.** Any migration that adds a
@@ -97,6 +109,22 @@ is `roadmap-2026-07-31.md`.
     the 10 sessions §6.5 gates the seed on, zero divergences, `v_shadow_progress.passes` true. The
     twin that ran forty minutes later is the one that died. **A green result banked by a duplicate
     run is not evidence the job works**; the next scheduled shadow has no twin to hide behind.
+
+64. **A work key that closes before the work is a ledger that lies for a month.** `backup.py`
+    closed its heartbeat green with 3,753,011 rows written, and the workflow's separate commit step
+    was refused by GitHub's pre-receive hook a minute later: the dump was 385 MB against the 100 MB
+    file limit, grown from 2.7 MB in August by the September research grid (1.89M `backtest_equity`
+    rows) and by `fundamentals` (6,096 rows, 2.9 GB as JSON). The 09-12 firing read the green row,
+    wrote "backed up 2026-09-05", and exited — September had no backup anywhere, and the guard
+    would have said otherwise until October. The rule of 2026-08-05 (guard by whether the work has
+    run) was followed to the letter and still failed, because the row described the dump and the
+    work was the commit. **A guard's key must be the last step of the work, not the last step
+    inside the Python.** The commit now happens inside the heartbeat, so a refused push is the
+    job's own red with the server's words in the row; the guard reads the month's file in the
+    checkout beside the ledger, so a row from before the fix cannot skip a month either; and the
+    job measures the file against GitHub's limit before it commits, instead of learning it from
+    the hook. The research grid and `fundamentals` are out of the dump by name, and the file says
+    so in its own `_meta`.
 
 ## The formulas, as implemented
 61. **A gauge that fires on the same rows every night is a defect report, not weather.** Migration
