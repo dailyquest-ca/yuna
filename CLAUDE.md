@@ -62,7 +62,7 @@ pytest tests/test_arming.py # single file
 bash tests/integration/local_pg.sh   # integration deps
 ```
 
-`src/` jobs are invoked by the workflows in `.github/workflows/`. `migrate`, `phase0`, `backfill`, `fills`, and both backtests are **dispatch-only tooling** — they are not on the schedule and must not be added to it without a plan edit.
+`src/` jobs are invoked by the workflows in `.github/workflows/`. `migrate`, `backfill`, `dedupe` and both backtests are **dispatch-only tooling** — they are not on the schedule and must not be added to it without a plan edit. The retired engine's workflows (`check`, `fills`, `phase0`, `ingest-filings`) were deleted 2026-09-13 (learning 66): their source stays in `src/` for history and no workflow runs it.
 
 ## Division of authority
 

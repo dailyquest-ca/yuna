@@ -175,7 +175,12 @@ Its worst trough, −60.3% on 2009-03-09, made a new high on 2013-09-10, four an
 
 **5.5 Freeze.** Zak may halt buying at any time, in any words; that state is a freeze. A freeze halts all buys (entries, refills, displacement buys, levered tranches). Exits fire normally; proceeds park. Lifted only by Zak's word.
 
-**5.6 Erratum register.** Where engine documentation disagrees with the code of record, the code wins and the erratum is logged (standing entry: 2026-08-15, free-slot fill band is top-12; earlier engine research documentation said otherwise).
+**5.6 Erratum register.** Where engine documentation disagrees with the code of record, the code wins and the erratum is logged.
+- 2026-08-15 — free-slot fill band is top-12; earlier engine research documentation said otherwise.
+- 2026-08-05 (recorded 2026-09-13) — three operating rulings the code cites: **stale means the bars, not the clock**; **schedule drift is not a half-failure and never turns a job amber**; **monthly work is guarded by whether it has run, never by the date**.
+- 2026-09-13 — §4.4's "any red holds buys" binds the check suite's own gauges and the price-critical jobs (`ingest-daily`, `score`). The census (`ingest-universe`) refreshes membership and writes no price; its red is a warning on the freshness line and never holds buys.
+- 2026-09-13 — operating constants of record: bars older than **4 days** hold buys (one long weekend, measured in UTC); a job's newest run within **36 hours** is its current state; lateness under **30 minutes** is not printed; the retry looks back **4 hours** for a green first firing and past that re-ingests the same tape.
+- 2026-09-13 — census admission floors: a listed US common stock gets a `universe` row when its census-day close is **≥ $4** and it traded **≥ $5M** that day. Looser than §3.2 on purpose: one day's volume is a noisier test than §3.2's 50-session median, which the nightly screen applies from our own bars. On the data, two of the eighteen names the live engine had ranked top-12 (AXTI, MXL) printed days under $10M in the prior year.
 
 ---
 

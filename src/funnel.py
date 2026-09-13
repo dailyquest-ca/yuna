@@ -13,7 +13,7 @@ All-In-One and EOD+Intraday All World Extended only. Zak completed the downgrade
 for, and the sweep answered `HTTP 403 Forbidden` on its first call, twice (2026-09-05, 09-12). Both
 Saturdays the census died before writing a row, the Saturday `check` read the red as an ingest
 failure and held the buys, and September's universe stayed unbuilt. Nothing on the schedule reads
-the three columns — the engine loads every stock (`db.load_tape`), ingest fetches every active
+the three columns — the engine loads every stock (`desk.TAPE`), ingest fetches every active
 one, and sector, industry and market cap were the retired engine's — so the census carried a
 dependency the plan had already cancelled (learning 63). The columns stay on `universe`, and the
 upsert coalesces, so what the retired machine learned is never erased; it is simply never fetched.
@@ -70,7 +70,7 @@ def month_built_at(cur):
 def main():
     calls=[0]
     with psycopg.connect(db_url()) as conn:
-        with Heartbeat(conn, "ingest-universe", dry_run=DRY) as hb:
+        with Heartbeat(conn, "ingest-universe", dry_run=DRY, scheduled_utc="10:23") as hb:
             hb.calls = calls
             with conn.cursor() as cur:
                 # a hand dispatch is never guarded (the guard is against a duplicate SCHEDULED
@@ -99,6 +99,13 @@ def census(conn, hb, calls):
         #    call the census makes. Two calls a census, three retries each, and that is the whole
         #    vendor budget of the job.
         bulk = get(f"https://eodhd.com/api/eod-bulk-last-day/US?api_token={key()}&fmt=json", calls)
+        # Admission floors of record (§5.6, ratified 2026-09-13): close ≥ $4 and ≥ $5M traded on
+        # the census day. Looser than §3.2's $5 / $10M on purpose — these decide only whether a
+        # newly listed name gets a `universe` row at all, and one day's volume is a noisier test
+        # than §3.2's 50-session median, which the nightly screen applies from our own bars. On
+        # the data (2026-09-13): 2 of the 18 names the live engine had ever ranked top-12 (AXTI,
+        # MXL) printed days under $10M in the prior year; §3.2's numbers on a census day would have
+        # kept them out, so the looser floors stand.
         liquid = {}
         for b in bulk:
             code=b.get("code"); px=float(b.get("close") or 0); vol=float(b.get("volume") or 0)
@@ -113,7 +120,7 @@ def census(conn, hb, calls):
                 # last census and is absent from this exchange listing has stopped trading; its
                 # bars stay, its status changes, and it keeps counting in every backtest. This
                 # is the survivorship bias that flatters every number we have — the two classic
-                # sins §4.8 names are using data before its filing date and forgetting the dead.
+                # sins are using data before its filing date and forgetting the dead.
                 cur.execute("""update universe set status='delisted',
                                  delisted_at = coalesce(delisted_at, current_date),
                                  note = coalesce(note,'') ||
@@ -129,7 +136,7 @@ def census(conn, hb, calls):
                 # bare assignment would wipe all three off every L0 name each census. It did
                 # exactly that once, when only the handful the screener re-swept that month got
                 # them back: MCN's industry-group component scored a flat neutral 50 for ~76% of
-                # the field, and §2.2's two-per-group cap filed every wiped name under 'unknown'.
+                # the field, and the retired engine's two-per-group cap filed every wiped name under 'unknown'.
                 # A census that learns nothing new must not forget what it knew.
                 cur.executemany("""insert into universe(ticker,name,kind,exchange,currency,in_l0,sector,industry,market_cap_usd)
                     values (%s,%s,'stock','US','USD',true,%s,%s,%s)

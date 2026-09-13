@@ -1,5 +1,6 @@
 """ingest-daily — write the world down: the day's bars in bulk, the corporate actions that
-rewrite history, the earnings calendar, and the quarantine that holds prints nobody can confirm.
+rewrite history, and the quarantine that holds prints nobody can confirm. (The earnings calendar
+is retired — §4.5 reads no calendar feed — and sits behind INGEST_EARNINGS, off.)
 
 §4.1 is explicit: "Prices in bulk — a few hundred calls nightly regardless of universe size, never
 1,500 per-ticker pulls as the routine. Per-ticker calls remain the tool for exactly four things:
@@ -323,7 +324,7 @@ def quarantine_pass(conn, hb, bars, threshold, tolerance, watched_exits):
     #     garbage is the risk §4.1 was written for;
     #   * a print that merely happens to fire a stop does NOT block when the second source is
     #     unreachable. Taken literally the rule would let a vendor outage disarm every stop in the
-    #     book, and §4.6 is explicit that protection is the thing that survives everything.
+    #     book, and §5.4 is explicit that protection is the thing that survives everything.
     #   * either kind blocks when the second source actively DISAGREES.
     with conn.cursor() as cur:
         cur.execute("""select ticker from quarantine
@@ -390,6 +391,8 @@ def main():
                     # either side of 23:00 UTC and drift, so a calendar-day test would let a retry
                     # that crossed midnight forget the run an hour before it. And a run that found
                     # the vendor not yet published is not a green night — see `tape_advanced`.
+                    # four hours is an operating constant of record (§5.6, 2026-09-13): past it
+                    # the retry simply re-ingests the same tape, which is idempotent
                     cur.execute("""select 1 from runs where job=%s and status='green'
                                    and dry_run=false and started_at > now() - interval '4 hours'
                                    and not (detail ? 'awaiting_vendor')

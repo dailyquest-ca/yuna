@@ -226,7 +226,7 @@ def nav_cad(cur):
     per_ticker, per_account = {}, {}
     for acct, tk, ccy, qty, close in cur.fetchall():
         cad = float(qty) * float(close) * (fx if ccy == "USD" else 1.0)
-        # accumulate, never assign. §2.6's one-position-one-account rule should make a ticker in two
+        # accumulate, never assign. §2.2's one-holding-per-account rule should make a ticker in two
         # accounts impossible, but NAV must report what the book actually holds rather than what the
         # rules say it should — an assignment silently dropped every lot but the last.
         per_ticker[tk] = per_ticker.get(tk, 0.0) + cad
@@ -539,14 +539,19 @@ VERBS = {
     "score":  ("score", "weekly-rank", "duties"),
     "check":  ("check", "verify"),
 }
-# a red or amber in these domains means the prices themselves are suspect, so §4.4's
-# "stale data ⇒ no new tickets, protective moves only" applies
-PRICE_CRITICAL = VERBS["ingest"] + VERBS["score"]
+# A red or amber in these domains means the prices themselves are suspect, so §4.4's
+# "stale data ⇒ no new tickets, protective moves only" applies. The census is NOT among them
+# (ruled 2026-09-13, §5.6): `ingest-universe` refreshes membership and writes no price, yet its red
+# read as an ingest failure and held the buys in two Saturday letters (2026-09-05, 09-12) while
+# every bar was current. It still prints as `ingest ✗` — a warning, never a hold. The retired
+# jobs stay in VERBS so old ledger rows keep their verb, and stay out of this tuple so a hand
+# dispatch of one cannot hold the live desk on a 403.
+PRICE_CRITICAL = ("ingest-daily", "nightly-ingest", "nightly-retry") + VERBS["score"]
 
-# §4.7 (ruled 2026-08-05): schedule drift is not a half-failure and never turns a job amber. It
+# Ruled 2026-08-05 (§5.6): schedule drift is not a half-failure and never turns a job amber. It
 # prints as `late: <job> +NNNm` and decides nothing. Below this many minutes it isn't worth the
 # ink — the floor is the old amber threshold, so exactly the drift that used to gag the desk is
-# now the drift that gets named and ignored.
+# now the drift that gets named and ignored. Operating constant of record (§5.6, 2026-09-13).
 LATE_MINUTES_FLOOR = 30
 
 
@@ -568,11 +573,16 @@ def late_minutes(detail):
 def freshness(conn, *, stale_days=4):
     """The one-line answer to "is it safe to speak" (§4.2): `ingest ✓ score ✓ check ✓`.
 
+    `stale_days=4` and the 36-hour window below are operating constants of record (§5.6,
+    2026-09-13): four days is one long weekend measured in UTC, so an ordinary holiday Monday
+    passes and a two-day exchange closure trips it; 36 hours spans a nightly plus its drift and
+    lets Saturday's rows fall out by Monday night.
+
     Returns (line, tickets_allowed). §5.6, ruled 2026-08-05 — **stale means the bars, not the
     clock**. Tickets are held on exactly three conditions:
 
       * the bars are old,
-      * a price-critical job failed (red, or the half-failure §4.7 calls amber),
+      * a price-critical job failed (red, or the half-failure the 2026-08-05 ruling calls amber),
       * the chain ran **out of order** — an ingest landed rows after the `score` beside it, so the
         derived numbers ranked yesterday's world.
 
@@ -587,8 +597,11 @@ def freshness(conn, *, stale_days=4):
         cur.execute("""select max(p.d) from prices p join universe u on u.ticker = p.ticker
                        where u.kind = 'stock'""")
         last_bar = cur.fetchone()[0]
+        # `not dry_run`, as the timeline query below always had: a DRY_RUN dispatch of the chain
+        # that ended red was the newest row for its job and held the live desk (2026-09-13)
         cur.execute("""select distinct on (job) job, status, detail from runs
-                       where started_at > now() - interval '36 hours' order by job, id desc""")
+                       where started_at > now() - interval '36 hours' and not dry_run
+                       order by job, id desc""")
         recent = [(j, s, d) for j, s, d in cur.fetchall()]
         # every non-dry run in the window — the ordering question is about runs, not jobs
         cur.execute("""select job, started_at, finished_at, coalesce(rows_written, 0) from runs
@@ -770,7 +783,7 @@ class Heartbeat:
     def _drift(self):
         """§4.2 gives each job a time; Actions gives it a queue. Record the gap and nothing else.
 
-        §4.7, ruled 2026-08-05: **schedule drift is not a half-failure and never turns a job
+        Ruled 2026-08-05 (§5.6): **schedule drift is not a half-failure and never turns a job
         amber.** This used to amber past half an hour, and that one line gagged the desk: an
         `ingest-daily` that started 194 minutes late with the bars perfectly current wrote amber,
         `score` inherited it through `freshness()`, and every brief that day carried "tickets
@@ -800,9 +813,16 @@ class Heartbeat:
             self.detail["late_minutes"] = drift
 
     def __enter__(self):
+        # The Actions run id rides in `detail.actions` from the moment the row opens, so the
+        # workflow's autopsy step (report_fail.py) can tell this run's row from any other and
+        # stop writing a second "died pre-heartbeat" red beside the one this class already wrote.
+        rid = os.environ.get("GITHUB_RUN_ID")
+        if rid:
+            self.detail["actions"] = {"run_id": rid, "attempt": os.environ.get("GITHUB_RUN_ATTEMPT")}
         with self.conn.cursor() as cur:
-            cur.execute("insert into runs(job,status,dry_run) values (%s,'running',%s) returning id",
-                        (self.job, self.dry_run))
+            cur.execute("""insert into runs(job,status,dry_run,detail) values (%s,'running',%s,%s)
+                           returning id""",
+                        (self.job, self.dry_run, json.dumps(self.detail) if self.detail else None))
             self.id = cur.fetchone()[0]
         self.conn.commit()
         self._drift()

@@ -32,11 +32,36 @@ def _url():
 pytestmark = pytest.mark.skipif(not _url(), reason="no DATABASE_URL — integration tests skipped")
 
 
+def _stage_supabase_public_roles():
+    """Give the throwaway database the two roles Supabase gives every project, with the grants
+    Supabase gives them.
+
+    `anon` and `authenticated` are what the REST API's publishable key becomes, and on Supabase
+    they hold every privilege on every table the owner creates, by default privilege. A plain
+    Postgres has neither role, so without this step migration 066's lockout would run against
+    nothing and `test_public_key_locked_out.py` would prove nothing. Staged BEFORE the migrations
+    so every table 001–065 creates is handed to them exactly as it was in production, and 066 has
+    the same door to close.
+    """
+    with psycopg.connect(_url()) as conn, conn.cursor() as cur:
+        for role in ("anon", "authenticated"):
+            cur.execute("select 1 from pg_roles where rolname = %s", (role,))
+            if not cur.fetchone():
+                cur.execute(f"create role {role} nologin")
+            cur.execute(f"grant usage on schema public to {role}")
+            cur.execute(f"grant all privileges on all tables in schema public to {role}")
+            cur.execute(f"alter default privileges in schema public grant all on tables to {role}")
+            cur.execute(f"alter default privileges in schema public grant all on sequences to {role}")
+            cur.execute(f"alter default privileges in schema public grant all on functions to {role}")
+        conn.commit()
+
+
 @pytest.fixture(scope="session")
 def migrated():
     """Apply every migration once, exactly as the `migrate` workflow does."""
     if not _url():
         pytest.skip("no DATABASE_URL")
+    _stage_supabase_public_roles()
     out = subprocess.run([sys.executable, str(ROOT / "src" / "migrate.py")],
                          capture_output=True, text=True, env={**os.environ})
     assert out.returncode == 0, f"migrations failed:\n{out.stdout}\n{out.stderr}"

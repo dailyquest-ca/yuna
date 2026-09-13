@@ -86,7 +86,7 @@ def commit(path, stamp):
 def main():
     stamp = utc_today().isoformat()
     with connect() as conn:
-        with Heartbeat(conn, "backup", scheduled_utc="14:00") as hb:
+        with Heartbeat(conn, "backup", scheduled_utc="14:23") as hb:   # the cron is 23 14 * * 6
             # Ruled 2026-08-05: **monthly work is guarded by whether it has run, never by the
             # date.** This job's guard was a shell step that ran BEFORE the heartbeat opened, so a
             # firing outside the first seven days left no trace at all — the identical shape that

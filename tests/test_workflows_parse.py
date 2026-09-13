@@ -99,14 +99,13 @@ def test_the_chain_runs_the_engine_and_not_the_retired_machine():
         assert retired not in runs, f"{retired} was retired from the schedule by §6.3"
 
 
-def test_no_retired_job_still_carries_a_cron():
-    """§4.5 reads no fundamentals feed, and §6.3 downgrades the data plan once the legacy jobs are
-    retired — a weekly sweep against an endpoint the plan no longer carries fails every Saturday."""
-    for path in WORKFLOWS:
-        doc = yaml.safe_load(path.read_text())
-        on = doc.get("on") or doc.get(True) or {}
-        if path.name in ("ingest-filings.yml",):
-            assert "schedule" not in on, f"{path.name} is retired and must not be scheduled"
+def test_the_retired_engines_buttons_are_gone():
+    """Deleted 2026-09-13 (learning 66). `check.yml` ran the retired checker under the live job's
+    own name, so one press put a row without a `blocks_buys` verdict at the top of the ledger and
+    the brief dropped "buys held"; the other three called fundamentals endpoints the plan no longer
+    buys, and their 403 landed a red under the ingest verb. Retired means no workflow runs it."""
+    for name in ("check.yml", "ingest-filings.yml", "phase0.yml", "fills.yml"):
+        assert not (ROOT / ".github" / "workflows" / name).exists(), f"{name} is retired"
 
 
 def test_the_composed_kind_is_the_kind_notify_expects():

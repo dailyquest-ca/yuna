@@ -44,6 +44,18 @@ is `roadmap-2026-07-31.md`.
 10. Guard triggers keyed on `current_user` carry no session state, so a pooler cannot silently drop
     them. That is why the "jobs compute, sessions judge" boundary is role-based.
 
+65. **A table without row level security is a public table, and only the linter will say so.**
+    Supabase gives every project two roles anyone holding the publishable key can be — `anon` and
+    `authenticated` — and hands them every privilege on every table the owner creates, by default
+    privilege. RLS-with-no-policy is the locked door every migration since 001 relied on; 051, 054,
+    055 and the research tables forgot the line, so the engine's own sessions and ranks were
+    readable and writable from the open internet with a key Supabase itself calls public. Views run
+    as their owner, so the whole payload was readable regardless, and the ledger function was
+    executable by PUBLIC. Found 2026-09-13 by `get_advisors`, six weeks after 051; the grants test
+    existed and skipped in the harness because the role did not. **Run the advisors after every
+    migration, and stage the public roles in the test database so the lockout is a test, not a
+    hope** (migration 066, `test_public_key_locked_out.py`).
+
 ## GitHub Actions
 
 11. **Cron `dom` and `dow` are OR'd** — `0 10 1-7 * 6` fires every day 1–7 *and* every Saturday.
@@ -125,6 +137,23 @@ is `roadmap-2026-07-31.md`.
     job measures the file against GitHub's limit before it commits, instead of learning it from
     the hook. The research grid and `fundamentals` are out of the dump by name, and the file says
     so in its own `_meta`.
+
+66. **A retired job's button is a live hazard.** `check.yml` still ran the retired checker under the
+    live job's own ledger name: one press would have put a row without a `blocks_buys` verdict at
+    the top of `runs`, and the brief — which reads the newest `check` — would have dropped "buys
+    held" for a night. `ingest-filings`, `phase0` and `fills` called fundamentals endpoints the plan
+    no longer buys: a 403, a red row under the ingest verb, and (until the same day's ruling) held
+    buys for 36 hours. None could succeed on the All World plan. **Retired means deleted from
+    `.github/workflows/`**; the source stays in `src/` for history and a test asserts the buttons
+    are gone.
+67. **A row that is not a fact must not decide.** Two shapes on 2026-09-13. `freshness()` read the
+    newest run per job without `not dry_run`, so a DRY_RUN dispatch of the chain that ended red
+    would have held the live desk for 36 hours — every live workflow carries that input. And a
+    census red read as "the prices themselves are suspect" though the census writes no price, which
+    is what held the buys in two Saturday letters. The census is now a warning (§5.6, 2026-09-13),
+    dry runs are excluded, and both are tests. Same class: `backup` declared a 14:00 slot against a
+    14:23 cron, so every on-time run recorded 23 phantom minutes of drift, and the census declared
+    no slot at all.
 
 ## The formulas, as implemented
 61. **A gauge that fires on the same rows every night is a defect report, not weather.** Migration
