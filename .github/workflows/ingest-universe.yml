@@ -1,7 +1,8 @@
 name: ingest-universe
-# §4.2, verb one, monthly slice: rebuild L0 from listings and the liquidity filters. Membership
-# only — the C1/CCN half of the old funnel is just `score` running afterwards, which `pipeline.yml`
-# now chains off this job by `needs:`.
+# Verb one, monthly slice: rebuild membership from the exchange listing and the bulk tape (§3.2's
+# universe, §4.5's data). Membership only — `pipeline.yml` chains the Saturday letter off this
+# job by `workflow_run`, so the chain fires on a red census too; §5.6 (2026-09-13) rules that a
+# census red warns and never holds buys.
 #
 # Fires WEEKLY and rebuilds only when the month's universe is unbuilt (§4.2, ruled 2026-08-05:
 # monthly work is guarded by whether it has run, never by the date). Cron cannot express "first

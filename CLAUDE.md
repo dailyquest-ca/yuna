@@ -44,7 +44,7 @@ Destructive database and git operations are blocked by a hook; `git push`, migra
 | --- | --- |
 | Language | Python 3, `numpy` · `pandas` · `psycopg` |
 | Store | Supabase Postgres — universe, book, briefs, fundamentals, rulings and learnings ledgers |
-| Data | EODHD All-In-One — bulk prices, FX, fundamentals, earnings calendar |
+| Data | EODHD **EOD Historical Data — All World** (§4.5) — bulk and per-ticker EOD bars, FX, exchange symbol lists. The screener, fundamentals and calendar feeds left with the 2026-09 downgrade; a job that calls them gets `403` (learning 63) |
 | Compute | GitHub Actions: four scheduled jobs, four chained by `needs:` in `pipeline.yml` |
 | Tests | pytest — `tests/` unit, `tests/integration/` against local Postgres |
 
@@ -62,7 +62,7 @@ pytest tests/test_arming.py # single file
 bash tests/integration/local_pg.sh   # integration deps
 ```
 
-`src/` jobs are invoked by the workflows in `.github/workflows/`. `migrate`, `phase0`, `backfill`, `fills`, and both backtests are **dispatch-only tooling** — they are not on the schedule and must not be added to it without a plan edit.
+`src/` jobs are invoked by the workflows in `.github/workflows/`. `migrate`, `backfill`, `dedupe` and both backtests are **dispatch-only tooling** — they are not on the schedule and must not be added to it without a plan edit. The retired engine's workflows (`check`, `fills`, `phase0`, `ingest-filings`) were deleted 2026-09-13 (learning 66): their source stays in `src/` for history and no workflow runs it.
 
 ## Division of authority
 

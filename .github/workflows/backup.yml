@@ -21,22 +21,22 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      # The guard moved INTO the job (§4.2, ruled 2026-08-05): monthly work is guarded by whether
+      # The guard moved INTO the job (ruled 2026-08-05): monthly work is guarded by whether
       # it has run, never by the date. As a shell step it ran before the heartbeat opened, so a
       # firing outside the first seven days left no trace at all — the same shape that hid
       # `ingest-universe`'s absence for a month.
-      - name: dump
+      #
+      # The commit moved INTO the job too (2026-09-13). As a separate step it ran after the
+      # heartbeat had closed green, so the push GitHub refused on 09-05 (a 385 MB dump against the
+      # 100 MB file limit) left a ledger that said "backed up" about a file that existed nowhere,
+      # and the 09-12 firing read it and exited clean. `backup.py` now adds, commits and pushes
+      # inside its own heartbeat: a refused push is its red, with the server's words in the runs
+      # row, and the guard reads the file in the checkout beside the ledger (learning 64).
+      - name: dump and commit
         run: set -o pipefail; python src/backup.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FORCE: ${{ inputs.force || 'false' }}
-      - name: commit
-        run: |
-          git config user.name  "yuna-backup[bot]"
-          git config user.email "yuna-backup@users.noreply.github.com"
-          git add backups/
-          git diff --cached --quiet || git commit -m "backup: $(date -u +%Y-%m-%d) (bars excluded)"
-          git push
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py backup /tmp/job.out

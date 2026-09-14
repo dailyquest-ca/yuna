@@ -25,7 +25,7 @@ def stub_vendor(monkeypatch, listed, priced):
             return [{"Code": c, "Type": "Common Stock", "Exchange": "NASDAQ"} for c in listed]
         if "eod-bulk-last-day" in url:
             return [{"code": c, "close": 50.0, "volume": 2_000_000} for c in priced]
-        return {"data": []}                     # the screener decorates; it is not the census
+        raise AssertionError(f"the census called an endpoint it has no business with: {url}")
     monkeypatch.setattr(funnel, "get", fake_get)
     monkeypatch.setattr(funnel, "FORCE", True)  # rebuild whatever the month guard thinks
     monkeypatch.setattr(funnel, "K", "test-key", raising=False)
@@ -182,3 +182,49 @@ def test_a_non_us_listing_survives_a_us_census(db, monkeypatch):
     stub_vendor(monkeypatch, listed=["ALIVE"], priced=["ALIVE"])
     assert funnel.main() == 0
     assert universe_row(db, "VXC.TO")["status"] == "active"
+
+
+def test_the_census_reads_the_listing_and_the_tape_and_nothing_else(db, monkeypatch):
+    """§4.5's product carries no screener, and the census learned that as `HTTP 403 Forbidden` on
+    two consecutive Saturdays (2026-09-05, 09-12): two red weeks and two Saturday letters that held
+    buys, for three columns nothing on the schedule reads (learning 63). Two calls, and the name
+    comes from the listing.
+    """
+    urls = []
+    def fake_get(url, calls, tries=3):
+        calls[0] += 1
+        urls.append(url)
+        if "exchange-symbol-list" in url:
+            return [{"Code": "ALIVE", "Name": "Alive Corp", "Type": "Common Stock", "Exchange": "NYSE"}]
+        if "eod-bulk-last-day" in url:
+            return [{"code": "ALIVE", "close": 50.0, "volume": 2_000_000}]
+        raise AssertionError(f"unexpected endpoint: {url}")
+    monkeypatch.setattr(funnel, "get", fake_get)
+    monkeypatch.setattr(funnel, "FORCE", True)
+    assert funnel.main() == 0
+
+    assert len(urls) == 2 and not any("screener" in u for u in urls)
+    with db.cursor() as cur:
+        cur.execute("select name, in_l0, sector from universe where ticker='ALIVE.US'")
+        name, in_l0, sector = cur.fetchone()
+        cur.execute("""select rows_written, calls_used, detail from runs where job='ingest-universe'
+                       order by id desc limit 1""")
+        rows, calls, detail = cur.fetchone()
+    assert name == "Alive Corp" and in_l0 is True and sector is None
+    assert rows == 1 and calls == 2
+    assert detail["listing"] == 1 and detail["liquid"] == 1 and detail["rebuilt"] is True
+
+
+def test_a_census_never_forgets_what_the_retired_machine_knew(db, monkeypatch):
+    """The screener's three columns are never fetched again; they must never be erased either —
+    the upsert coalesces, so a name keeps its sector, industry and cap across every census."""
+    with db.cursor() as cur:
+        world.add_name(cur, "ALIVE.US", industry="Semiconductors", cap=5e9)
+        cur.execute("update universe set sector='Technology' where ticker='ALIVE.US'")
+    db.commit()
+    stub_vendor(monkeypatch, listed=["ALIVE"], priced=["ALIVE"])
+    assert funnel.main() == 0
+    with db.cursor() as cur:
+        cur.execute("select sector, industry, market_cap_usd from universe where ticker='ALIVE.US'")
+        sector, industry, cap = cur.fetchone()
+    assert (sector, industry, float(cap)) == ("Technology", "Semiconductors", 5e9)

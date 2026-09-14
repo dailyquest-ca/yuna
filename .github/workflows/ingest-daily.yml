@@ -1,16 +1,15 @@
 name: ingest-daily
-# §4.2, verb one: write the world down. Bars, FX, corporate actions, the earnings calendar and
-# the quarantine — source-of-truth tables only. Everything derived from these rows belongs to
+# Verb one: write the world down. Bars, FX, corporate actions and the quarantine — source-of-truth
+# tables only. Everything derived from these rows belongs to
 # `score`, which runs next.
 #
 # FX is the whole of §4.1's row, not just USDCAD: every statement currency a foreign filer reports
 # in gets a pair registered here and backfilled by the per-ticker pass, because §3.0 converts
 # financials at fiscal-period-end rates and cannot do it with rates we never pulled.
 #
-# The earnings calendar runs twice — the broad file, and then a per-name refresh of everything the
-# arming stage is about to reach for. The broad file is not complete: Arcosa's 2026-08-05 report
-# was missing from it, so the blackout wall showed nothing and the nightly armed straight through
-# the print, twice (obs 114).
+# The earnings calendar is RETIRED (§4.5 reads no calendar feed, and the All World product does
+# not carry the endpoint). `ingest.py` keeps the two calls behind `INGEST_EARNINGS`, default off;
+# nothing on the schedule sets it.
 #
 # Scheduled TWICE on purpose. §4.2: "the second run reads the runs table and exits if the night
 # is already green". That is the retry, and it is the same job with the same name rather than a
@@ -45,7 +44,8 @@ name: ingest-daily
 #
 # The retry stays 60 minutes behind the first firing, and it identifies itself by matching
 # `github.event.schedule` against its own cron string — so the retry's cron is written three
-# times below (the schedule, `SKIP_IF_GREEN`, `SCHEDULED_UTC`) and the clock twice more.
+# times below (the schedule, `SKIP_IF_GREEN`, `SCHEDULED_UTC`), the clock twice more, and the
+# first firing's clock once more as the default of `SCHEDULE_UTC` in `src/ingest.py`.
 # **Change one and you must change them all**, or the second firing stops recognising itself
 # as the retry and re-ingests the night instead of exiting.
 on:

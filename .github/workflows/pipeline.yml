@@ -1,7 +1,10 @@
 name: pipeline
 # §4.1's nightly chain, for v1.0's engine.
 #
-#   reconcile → score → check → compose → notify
+#   slot → reconcile → score → check · shadow → compose → notify
+#
+#   (`slot` decides nightly vs Saturday from what triggered the chain; `shadow` is §6.4's
+#   attestation and runs beside `check`, both hanging off `score`.)
 #
 # **The chain has no clock; the sessions keep appointments** (ruled 2026-08-05). These jobs lost
 # their crons: they hang off the ingests here, and off each other by `needs:`, so the ordering is a

@@ -20,6 +20,18 @@ is `roadmap-2026-07-31.md`.
    Ask the usage endpoint before spending, and truncate the sweep rather than dying two-thirds in.
 6. Ten concurrent workers draws occasional 429s; eight does not.
 
+63. **A product downgrade is a code change, and the census was the code.** §4.5 names the product
+    (EOD Historical Data — All World) and the roadmap asked Zak to downgrade to it; he did, and the
+    first thing to notice was `ingest-universe`, red on two consecutive Saturdays (2026-09-05,
+    09-12) with `HTTP 403 Forbidden` from the screener — an endpoint the All World plan does not
+    carry (the vendor lists it under All-In-One and EOD+Intraday All World Extended only). The
+    listing and bulk-tape calls beside it still answered. Nothing on the schedule read what the
+    screener fetched — sector, industry and market cap were the retired engine's — so the census
+    was carrying a dependency the plan had already cancelled, and the cost was two unbuilt weeks
+    of September and two Saturday letters that held buys on an ingest red. **When the plan retires
+    a data product, grep the jobs for its endpoints the same day:** a call that decides nothing
+    still decides whether the job goes green.
+
 ## Postgres / Supabase
 
 7. **A view defined `select *` freezes its column list at creation.** Any migration that adds a
@@ -31,6 +43,23 @@ is `roadmap-2026-07-31.md`.
    a vendor-re-pullable cache); the 3-year prune is not optional.
 10. Guard triggers keyed on `current_user` carry no session state, so a pooler cannot silently drop
     them. That is why the "jobs compute, sessions judge" boundary is role-based.
+
+65. **A table without row level security is a public table, and only the linter will say so.**
+    Supabase gives every project two roles anyone holding the publishable key can be — `anon` and
+    `authenticated` — and hands them every privilege on every table the owner creates, by default
+    privilege. RLS-with-no-policy is the locked door every migration since 001 relied on; 051, 054,
+    055 and the research tables forgot the line, so the engine's own sessions and ranks were
+    readable and writable from the open internet with a key Supabase itself calls public. Views run
+    as their owner, so the whole payload was readable regardless, and the ledger function was
+    executable by PUBLIC. Found 2026-09-13 by `get_advisors`, six weeks after 051; the grants test
+    existed and skipped in the harness because the role did not. **Run the advisors after every
+    migration, and stage the public roles in the test database so the lockout is a test, not a
+    hope** (migration 066, `test_public_key_locked_out.py`). One consequence to know on the day the
+    connector is repointed at `yuna_session` (020's intent; the role has no login today, so the
+    connector arrives as the owner): that role has policies only on the seven tables it writes and
+    reads everything else through the owner-rights views, so a direct table read of `book`,
+    `universe` or, since 066, `engine_sessions` returns nothing — silently. The Routines contract's
+    health query reads `engine_sessions` directly and would need a policy or a view then.
 
 ## GitHub Actions
 
@@ -97,6 +126,39 @@ is `roadmap-2026-07-31.md`.
     the 10 sessions §6.5 gates the seed on, zero divergences, `v_shadow_progress.passes` true. The
     twin that ran forty minutes later is the one that died. **A green result banked by a duplicate
     run is not evidence the job works**; the next scheduled shadow has no twin to hide behind.
+
+64. **A work key that closes before the work is a ledger that lies for a month.** `backup.py`
+    closed its heartbeat green with 3,753,011 rows written, and the workflow's separate commit step
+    was refused by GitHub's pre-receive hook a minute later: the dump was 385 MB against the 100 MB
+    file limit, grown from 2.7 MB in August by the September research grid (1.89M `backtest_equity`
+    rows) and by `fundamentals` (6,096 rows, 2.9 GB as JSON). The 09-12 firing read the green row,
+    wrote "backed up 2026-09-05", and exited — September had no backup anywhere, and the guard
+    would have said otherwise until October. The rule of 2026-08-05 (guard by whether the work has
+    run) was followed to the letter and still failed, because the row described the dump and the
+    work was the commit. **A guard's key must be the last step of the work, not the last step
+    inside the Python.** The commit now happens inside the heartbeat, so a refused push is the
+    job's own red with the server's words in the row; the guard reads the month's file in the
+    checkout beside the ledger, so a row from before the fix cannot skip a month either; and the
+    job measures the file against GitHub's limit before it commits, instead of learning it from
+    the hook. The research grid and `fundamentals` are out of the dump by name, and the file says
+    so in its own `_meta`.
+
+66. **A retired job's button is a live hazard.** `check.yml` still ran the retired checker under the
+    live job's own ledger name: one press would have put a row without a `blocks_buys` verdict at
+    the top of `runs`, and the brief — which reads the newest `check` — would have dropped "buys
+    held" for a night. `ingest-filings`, `phase0` and `fills` called fundamentals endpoints the plan
+    no longer buys: a 403, a red row under the ingest verb, and (until the same day's ruling) held
+    buys for 36 hours. None could succeed on the All World plan. **Retired means deleted from
+    `.github/workflows/`**; the source stays in `src/` for history and a test asserts the buttons
+    are gone.
+67. **A row that is not a fact must not decide.** Two shapes on 2026-09-13. `freshness()` read the
+    newest run per job without `not dry_run`, so a DRY_RUN dispatch of the chain that ended red
+    would have held the live desk for 36 hours — every live workflow carries that input. And a
+    census red read as "the prices themselves are suspect" though the census writes no price, which
+    is what held the buys in two Saturday letters. The census is now a warning (§5.6, 2026-09-13),
+    dry runs are excluded, and both are tests. Same class: `backup` declared a 14:00 slot against a
+    14:23 cron, so every on-time run recorded 23 phantom minutes of drift, and the census declared
+    no slot at all.
 
 ## The formulas, as implemented
 61. **A gauge that fires on the same rows every night is a defect report, not weather.** Migration

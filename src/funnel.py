@@ -1,11 +1,24 @@
 """ingest-universe — the L0 census. Fires weekly (Sat); rebuilds only if the month is unbuilt.
 
-Census: US exchange symbol list (common stock, NYSE/NASDAQ/AMEX) x screener (cap >= $300M, +industry).
-Bar-dependent filters (price >= $5, ADDV >= $10M, listed >= 6 mo) are re-applied from our own bars
-inside `score`, so L0 stays honest between censuses. §4.2 gives this job membership and nothing
-else: the filings sweep is `ingest-filings`, and C1 -> CCN -> hurdle -> bench is `score`.
+Census: US exchange symbol list (common stock, NYSE/NASDAQ/AMEX) x the bulk last-day tape (price
+and dollar volume). §3.2 defines the universe as `.US` common stocks minus the delisted, and §4.5
+names the exchange symbol lists and delisted lines as the data — so membership is this job's whole
+mandate: who is listed, who is liquid, who has gone. §3.2's own price and ADDV floors are applied
+nightly from our own bars inside the score, so L0 stays honest between censuses.
 
-**The guard is work-keyed, never date-keyed** (§4.2, ruled 2026-08-05). It used to read "the 1st
+**The screener is gone (2026-09-13).** The census used to end with a sweep of the vendor's screener
+to decorate each name with sector, industry and market cap. §4.5 names the product this system
+runs on — EOD Historical Data, All World — and the screener is not in it: the vendor lists it under
+All-In-One and EOD+Intraday All World Extended only. Zak completed the downgrade the roadmap asked
+for, and the sweep answered `HTTP 403 Forbidden` on its first call, twice (2026-09-05, 09-12). Both
+Saturdays the census died before writing a row, the Saturday `check` read the red as an ingest
+failure and held the buys, and September's universe stayed unbuilt. Nothing on the schedule reads
+the three columns — the engine loads every stock (`desk.TAPE`), ingest fetches every active
+one, and sector, industry and market cap were the retired engine's — so the census carried a
+dependency the plan had already cancelled (learning 63). The columns stay on `universe`, and the
+upsert coalesces, so what the retired machine learned is never erased; it is simply never fetched.
+
+**The guard is work-keyed, never date-keyed** (ruled 2026-08-05). It used to read "the 1st
 Saturday" as `weekday==5 and day<=7`, and it read it BEFORE opening the runs row — so a firing that
 missed the window skipped the month in silence and left no trace at all. This job had never once
 produced a runs row and L0 had never been rebuilt. Now every firing writes its heartbeat and asks
@@ -13,7 +26,7 @@ one question instead: has this calendar month's universe been built? Unbuilt -> 
 exit green, saying so. A missed Saturday is picked up the following week rather than lost.
 
 FORCE=true rebuilds regardless (manual runs)."""
-import os, sys, json, time, urllib.request, urllib.error
+import os, sys, json, time, urllib.request
 import psycopg
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent))
 from db import db_url, key, Heartbeat, scheduled_run
@@ -23,6 +36,8 @@ FORCE = os.environ.get("FORCE","false").lower() in ("1","true","yes")
 # The vendor key is read at CALL time via db.key(), never bound as a module constant here: as a
 # constant it ran the moment anything imported funnel, so the integration suite could not even
 # COLLECT without a secret it has no business holding, and CI had been red on it.
+
+LISTED_ON = {"NYSE", "NASDAQ", "AMEX", "NYSE MKT"}
 
 
 def get(url, calls, tries=3):
@@ -35,7 +50,8 @@ def get(url, calls, tries=3):
             raise
 
 def month_built_at(cur):
-    """§4.2's work key: the timestamp of this calendar month's rebuild, or None if it is unbuilt.
+    """The work key (ruled 2026-08-05): the timestamp of this calendar month's rebuild, or None if
+    it is unbuilt.
 
     The ledger is the key. A rebuild is a run that finished green and actually wrote rows, so a
     dry run, a crash and this job's own skip rows all leave the month unbuilt — which is the whole
@@ -54,11 +70,11 @@ def month_built_at(cur):
 def main():
     calls=[0]
     with psycopg.connect(db_url()) as conn:
-        with Heartbeat(conn, "ingest-universe", dry_run=DRY) as hb:
+        with Heartbeat(conn, "ingest-universe", dry_run=DRY, scheduled_utc="10:23") as hb:
             hb.calls = calls
             with conn.cursor() as cur:
-                # a hand dispatch is never guarded (§4.2: the guard is against a
-                # duplicate SCHEDULED firing, never against a person)
+                # a hand dispatch is never guarded (the guard is against a duplicate SCHEDULED
+                # firing, never against a person — see db.scheduled_run)
                 built = month_built_at(cur) if scheduled_run() and not FORCE else None
             if built:
                 # exits clean, and says which run did the work — a silent skip is what hid this
@@ -74,46 +90,28 @@ def main():
 
 
 def census(conn, hb, calls):
-        # 1) listing census: common stocks on NYSE / NASDAQ / AMEX only
+        # 1) listing census: common stocks on NYSE / NASDAQ / AMEX only, with the vendor's name
         syms = get(f"https://eodhd.com/api/exchange-symbol-list/US?api_token={key()}&fmt=json", calls)
-        common = {s["Code"] for s in syms
-                  if s.get("Type")=="Common Stock" and s.get("Exchange") in {"NYSE","NASDAQ","AMEX","NYSE MKT"}}
+        common = {s["Code"]: s.get("Name") for s in syms
+                  if s.get("Type")=="Common Stock" and s.get("Exchange") in LISTED_ON}
         print(f"listing census: {len(common)} common stocks on NYSE/NASDAQ/AMEX")
-        # 1b) liquidity census: bulk last-day bars for the whole US tape (cheap)
+        # 2) liquidity census: bulk last-day bars for the whole US tape — one call, and the last
+        #    call the census makes. Two calls a census, three retries each, and that is the whole
+        #    vendor budget of the job.
         bulk = get(f"https://eodhd.com/api/eod-bulk-last-day/US?api_token={key()}&fmt=json", calls)
+        # Admission floors of record (§5.6, ratified 2026-09-13): close ≥ $4 and ≥ $5M traded on
+        # the census day. Looser than §3.2's $5 / $10M on purpose — these decide only whether a
+        # newly listed name gets a `universe` row at all, and one day's volume is a noisier test
+        # than §3.2's 50-session median, which the nightly screen applies from our own bars. On
+        # the data (2026-09-13): 2 of the 18 names the live engine had ever ranked top-12 (AXTI,
+        # MXL) printed days under $10M in the prior year; §3.2's numbers on a census day would have
+        # kept them out, so the looser floors stand.
         liquid = {}
         for b in bulk:
             code=b.get("code"); px=float(b.get("close") or 0); vol=float(b.get("volume") or 0)
             if code in common and px>=4 and px*vol>=5_000_000:
                 liquid[code]=px
         print(f"liquidity census: {len(liquid)} names with price>=$4 and ~$5M day volume")
-        # 2) screener sweep: cap >= $300M, descending, harvest industry/sector/cap
-        rows={}
-        ceiling=None            # screener offset caps at 999 -> descend in market-cap bands
-        for sweep in range(30):
-            added=0; prev_ceiling=ceiling
-            for offset in range(0,1000,100):
-                f=[["exchange","=","us"]]
-                f.append(["market_capitalization","<",ceiling] if ceiling is not None
-                         else ["market_capitalization",">",300000000])
-                filt=json.dumps(f)
-                data=get(f"https://eodhd.com/api/screener?api_token={key()}&sort=market_capitalization.desc&filters={urllib.request.quote(filt)}&limit=100&offset={offset}", calls)
-                batch=(data or {}).get("data",[])
-                if not batch: break
-                for b in batch:
-                    code=b.get("code"); cap=float(b.get("market_capitalization") or 0)
-                    if cap>0:                       # null caps must not poison the descent
-                        ceiling = cap+1 if ceiling is None else min(ceiling, cap+1)
-                    if cap>=300000000 and code in liquid and code not in rows:
-                        rows[code]=(b.get("name"), b.get("sector"), b.get("industry"), cap)
-                        added+=1
-                if len(batch)<100: break
-            print(f"  sweep {sweep+1}: +{added} names, floor now ${(ceiling or 0)/1e9:.2f}B")
-            if ceiling is not None and ceiling<=300000001: break
-            if prev_ceiling is not None and ceiling is not None and ceiling>=prev_ceiling: break  # no progress
-        print(f"screener decorations: {len(rows)} names carry cap/industry")
-        for code in liquid:
-            if code not in rows: rows[code]=(None,None,None,None)   # cap/industry arrive in Phase D
         # 3) upsert universe: coarse L0 membership
         if not DRY:
             with conn.cursor() as cur:
@@ -122,7 +120,7 @@ def census(conn, hb, calls):
                 # last census and is absent from this exchange listing has stopped trading; its
                 # bars stay, its status changes, and it keeps counting in every backtest. This
                 # is the survivorship bias that flatters every number we have — the two classic
-                # sins §4.8 names are using data before its filing date and forgetting the dead.
+                # sins are using data before its filing date and forgetting the dead.
                 cur.execute("""update universe set status='delisted',
                                  delisted_at = coalesce(delisted_at, current_date),
                                  note = coalesce(note,'') ||
@@ -133,14 +131,13 @@ def census(conn, hb, calls):
                                  and ticker like '%%.US'
                                  and ticker <> all(%s)""",
                             ([c + ".US" for c in common],))
-                # COALESCE, not assignment. Line ~75 gives every liquid name the screener did
-                # not decorate a row of (None,None,None,None) — so a bare assignment wiped
-                # sector, industry and market cap off 2,108 of 2,762 L0 names every census, and
-                # only the handful re-swept that month got them back. The damage was silent and
-                # large: MCN's industry-group component scored a flat neutral 50 for ~76% of the
-                # field (one of three equal weights, constant), and §2.2's two-per-group cap
-                # filed every wiped name under the same 'unknown' bucket. A census that learns
-                # nothing new must not forget what it knew.
+                # COALESCE, not assignment. Sector, industry and market cap arrive from nowhere
+                # now (see the module docstring) and every row below carries None for them — so a
+                # bare assignment would wipe all three off every L0 name each census. It did
+                # exactly that once, when only the handful the screener re-swept that month got
+                # them back: MCN's industry-group component scored a flat neutral 50 for ~76% of
+                # the field, and the retired engine's two-per-group cap filed every wiped name under 'unknown'.
+                # A census that learns nothing new must not forget what it knew.
                 cur.executemany("""insert into universe(ticker,name,kind,exchange,currency,in_l0,sector,industry,market_cap_usd)
                     values (%s,%s,'stock','US','USD',true,%s,%s,%s)
                     on conflict (ticker) do update set name=coalesce(excluded.name,universe.name),
@@ -148,10 +145,10 @@ def census(conn, hb, calls):
                       industry=coalesce(excluded.industry,universe.industry),
                       market_cap_usd=coalesce(excluded.market_cap_usd,universe.market_cap_usd),
                       status='active'""",
-                    [(c+".US", n, se, ind, cap) for c,(n,se,ind,cap) in rows.items()])
+                    [(c+".US", common.get(c), None, None, None) for c in liquid])
             conn.commit()
-        hb.detail.update(rebuilt=True, listing=len(common), cap_pass=len(rows))
-        return len(rows)
+        hb.detail.update(rebuilt=True, listing=len(common), liquid=len(liquid))
+        return len(liquid)
 
 
 if __name__=="__main__": sys.exit(main())

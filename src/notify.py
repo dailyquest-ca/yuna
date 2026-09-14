@@ -1,11 +1,11 @@
 """notify — §4.2's fourth verb, second half: deliver what compose wrote.
 
-The channel is a config row (`push_channel`, §4.8), because delivery is a decision, not code:
+The channel is a config row (`push_channel`, ruled 2026-08-05), because delivery is a decision, not code:
 
   cowork   — the ruled default (2026-08-05): the scheduled Routines inside the Yuna chat/cowork
              project ARE the doorbell. They fire on their own crons, read the composed row in one
-             select, and put it in front of Zak with a push. This job's duty is then the §4.7
-             contract from the pipeline's side: prove the composed words exist and are fresh, and
+             select, and put it in front of Zak with a push. This job's duty is then the health
+             contract from the pipeline's side (a missing message is the alarm — README): prove the composed words exist and are fresh, and
              go RED when they don't — a Routine that fires onto a missing brief would deliver
              silence, and a missing message is itself the alarm.
   webhook  — POST the composed brief to PUSH_WEBHOOK_URL (a repository secret), for any
@@ -70,7 +70,7 @@ def fresh_composed(cur, kinds):
 
 def main():
     # `or`, not a default argument — see compose.main(): a dead upstream job in the chain hands
-    # this down as an empty string, and silence is the one outcome §4.7 has no reader for.
+    # this down as an empty string, and silence is the one outcome the health contract has no reader for.
     slot = os.environ.get("NOTIFY_SLOT") or "nightly"
     kinds = EXPECTED.get(slot)
     if not kinds:
@@ -87,7 +87,7 @@ def main():
                 hb.detail.update(slot=slot, channel=channel,
                                  delivered=sorted(have), missing=missing)
                 if missing:
-                    # §4.7: the doorbell about to ring on an empty doorstep is a red, tonight,
+                    # the doorbell about to ring on an empty doorstep is a red, tonight,
                     # while there is still time to notice — not tomorrow when Zak does.
                     hb.red(f"composed brief(s) missing for slot {slot}: {', '.join(missing)} — "
                            f"the {channel} delivery would carry silence")

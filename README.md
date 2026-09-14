@@ -66,12 +66,14 @@ src/          ingest + compute jobs (Python); db.py holds the shared heartbeat c
 | `shadow.py` | the tape, `concentrated.py` | `shadow_attestations` — §6.4's written record |
 | `brief.py` | `v_session_payload`, one read | a composed `briefs` row: §5.1's morning brief, or §4.1's Saturday letter |
 | `notify.py` | composed `briefs`, `config.push_channel` | nothing but its runs row — proves the words exist before the Routines deliver them |
-| `backup.py` | everything but the bars | a compressed dump committed here |
+| `funnel.py` (`ingest-universe`, Saturdays) | the US exchange listing and the bulk last-day tape — two calls, no screener | `universe` membership: who is listed, who is liquid, who has gone |
+| `backup.py` | the decisions — everything but the bars, the research grid and `fundamentals` | a compressed dump, committed from inside the job's own heartbeat |
 
 **Dispatch-only.** `desk.py` (tonight's sheet, read-only) · `closeout.py` (§6.2, once) ·
 `migrate.py` · `backfill.py` · `verify_run.py` · `concentrated.py` and the rest of the research
-grid · and the retired legacy machine (`score.py`, `check.py`, `compose.py`, `fills.py`,
-`signals.py`, `arming.py`, `rank.py`, `fundamentals.py`, `funnel.py`, `phase0.py`).
+grid. The retired legacy machine (`score.py`, `check.py`, `compose.py`, `fills.py`, `signals.py`,
+`arming.py`, `rank.py`, `fundamentals.py`, `phase0.py`) keeps its source for history and has no
+workflow at all — its buttons were deleted 2026-09-13 (learning 66).
 
 Debug from `runs.detail`, never from Actions log downloads — those 302 to a blob store that
 403s even unauthenticated. Every job embeds its traceback in the heartbeat, and an

@@ -1,4 +1,4 @@
-"""The freshness line, and the two rules it got wrong (§4.7, §5.6 — both ruled 2026-08-05).
+"""The freshness line, and the two rules it got wrong (ruled 2026-08-05; §5.6).
 
 This is the file for the bug that gagged the desk. `Heartbeat` went amber at thirty minutes of
 schedule drift, `freshness()` held tickets on any amber in a price-critical domain, and so an
@@ -182,3 +182,37 @@ def test_an_ingest_that_wrote_nothing_is_not_out_of_order(db):
     db.commit()
     line, tickets = dbm.freshness(db)
     assert tickets is True and "out of order" not in line
+
+
+# ------------------------------------------- two rows that were not facts (2026-09-13, §5.6)
+
+def test_a_dry_run_that_ended_red_is_a_rehearsal_and_holds_nothing(db):
+    """The newest row per job used to be read without `not dry_run`, while the ordering query two
+    lines below always filtered it. A DRY_RUN dispatch of the chain that ended red — one click on
+    any live workflow — was the newest row for its job and held the live desk for 36 hours."""
+    with db.cursor() as cur:
+        bars_today(cur)
+        run(cur, "ingest-daily", started="now() - interval '60 minutes'",
+            finished="now() - interval '50 minutes'")
+        run(cur, "ingest-daily", "red", started="now() - interval '5 minutes'", dry_run=True,
+            rows=0)
+    db.commit()
+    line, tickets = dbm.freshness(db)
+    assert tickets is True, line
+    assert "ingest-daily red" not in line
+
+
+def test_a_census_red_warns_and_holds_nothing(db):
+    """Ruled 2026-09-13 (§5.6): the census refreshes membership and writes no price, so its red is
+    a warning on the line, never a hold. The Saturday letters of 2026-09-05 and 09-12 held their
+    buys on exactly this red while every bar was current."""
+    with db.cursor() as cur:
+        bars_today(cur)
+        run(cur, "ingest-daily", started="now() - interval '60 minutes'",
+            finished="now() - interval '50 minutes'")
+        run(cur, "ingest-universe", "red", started="now() - interval '5 minutes'", rows=0)
+    db.commit()
+    line, tickets = dbm.freshness(db)
+    assert tickets is True, line
+    assert "ingest-universe red" in line and "tickets held" not in line
+    assert "ingest ✗" in line, "the verb still shows the red — a warning, not silence"
