@@ -151,6 +151,42 @@ def test_the_screen_gauge_lets_a_drift_it_has_seen_before_through(db, migrated):
     assert g["status"] == "amber" and g["change"] == -7
 
 
+def test_the_screen_gauge_ambers_on_an_upward_jump_too(db, migrated):
+    """A census regression or a duplicate listing re-admitting hundreds of names is a break in the
+    other direction, and the band is two-sided."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _three_sessions(cur, days)
+        _set_count(cur, days[-1], 40)                  # +20 against a band of [0, 0]
+        db.commit()
+        g = gauges.screen_within_band(cur, gauges.newest_session(cur))
+    assert g["status"] == "amber" and g["change"] == 20
+
+
+def test_a_night_the_chain_did_not_score_does_not_read_as_a_jump(db, migrated):
+    """The change is judged per elapsed session on the benchmark's calendar. A missed night (a
+    dropped cron, learning 58) makes tonight's change span two sessions; at −3 a session it is the
+    same drift the history has shown, not a −6 jump against a band of single-session −3s."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)                              # tonight, days[-1]
+        for d in (days[-4], days[-3]):                 # two priors; days[-2] was never scored
+            s = desk.sheet(cur, d, 200_000.0)
+            sheet.write_session(cur, s, "live", engine.digest())
+        _set_count(cur, days[-4], 23)
+        _set_count(cur, days[-3], 20)                  # one prior change: −3 a session
+        _set_count(cur, days[-1], 14)                  # −6 over the two sessions since days[-3]
+        db.commit()
+        g = gauges.screen_within_band(cur, gauges.newest_session(cur))
+        assert g["status"] == "green", g["why"]
+        assert g["change"] == -6 and g["sessions_elapsed"] == 2 and g["per_session"] == -3.0
+
+        _set_count(cur, days[-1], 6)                   # −14 over two sessions: −7 a session
+        db.commit()
+        g = gauges.screen_within_band(cur, gauges.newest_session(cur))
+    assert g["status"] == "amber" and g["per_session"] == -7.0
+
+
 def test_the_screen_gauge_needs_two_prior_sessions_before_it_has_a_band(db, migrated):
     with db.cursor() as cur:
         days = _world(cur)
