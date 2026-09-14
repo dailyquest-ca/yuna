@@ -80,6 +80,9 @@ def commit(path, stamp):
     git("config", "user.email", "yuna-backup@users.noreply.github.com")
     git("add", path)
     git("commit", "-m", f"backup: {stamp} (bars, research grid and fundamentals excluded)")
+    # the branch may have moved while the dump ran; the dump is a new file, so replaying it on
+    # top is trivial, and a push that raced a session's commit is not a data fault worth a red
+    git("pull", "--rebase", "--quiet")
     git("push")
 
 

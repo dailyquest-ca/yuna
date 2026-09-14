@@ -42,12 +42,23 @@ def _stage_supabase_public_roles():
     nothing and `test_public_key_locked_out.py` would prove nothing. Staged BEFORE the migrations
     so every table 001–065 creates is handed to them exactly as it was in production, and 066 has
     the same door to close.
+
+    A database that already carries 066 gets the roles and nothing else: the migration will not
+    run again, so re-issuing the grants would undo the lockout it performed and fail the lockout
+    tests on every run after the first (`local_pg.sh` keeps its data between runs by design).
     """
     with psycopg.connect(_url()) as conn, conn.cursor() as cur:
+        cur.execute("select to_regclass('_migrations') is not null")
+        locked_out = False
+        if cur.fetchone()[0]:
+            cur.execute("select 1 from _migrations where name like '066_%'")
+            locked_out = cur.fetchone() is not None
         for role in ("anon", "authenticated"):
             cur.execute("select 1 from pg_roles where rolname = %s", (role,))
             if not cur.fetchone():
                 cur.execute(f"create role {role} nologin")
+            if locked_out:
+                continue
             cur.execute(f"grant usage on schema public to {role}")
             cur.execute(f"grant all privileges on all tables in schema public to {role}")
             cur.execute(f"alter default privileges in schema public grant all on tables to {role}")

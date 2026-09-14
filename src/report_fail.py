@@ -4,8 +4,9 @@ Ships the captured output tail into `runs` as a red row when a job dies. Standal
 imports nothing from `db.py`, because a job that died on an import error is exactly the death this
 has to record.
 
-Three deaths, told apart by the Actions run id `Heartbeat` stamps into `detail.actions` when the
-row opens (2026-09-13):
+Three deaths, told apart by the Actions run id AND attempt `Heartbeat` stamps into `detail.actions`
+when the row opens (2026-09-13). The attempt matters: "Re-run all jobs" keeps the run id, and a
+second attempt that dies before its heartbeat must not rewrite the first attempt's green as red.
   * a row of this run still `running` — the job was killed mid-flight: close it red with the tail;
   * a row of this run already `red` — the heartbeat recorded the crash itself: append the tail to
     THAT row rather than writing a second red that claims the job "died pre-heartbeat" (every
@@ -37,25 +38,22 @@ def url():
 
 
 rid = os.environ.get("GITHUB_RUN_ID")
+att = os.environ.get("GITHUB_RUN_ATTEMPT")
+# this run's rows, or — with no run id to go on — any row of the job
+MINE = """(%s::text is null or (detail->'actions'->>'run_id' = %s
+           and coalesce(detail->'actions'->>'attempt', '') = coalesce(%s::text, '')))"""
 with psycopg.connect(url()) as conn, conn.cursor() as cur:
     killed = json.dumps({"fatal": "died mid-run", "output_tail": tail})
-    if rid:
-        cur.execute("""update runs set finished_at=now(), status='red',
-                         detail = coalesce(detail,'{}'::jsonb) || %s::jsonb
-                       where job=%s and status='running' and detail->'actions'->>'run_id' = %s""",
-                    (killed, job, rid))
-    else:
-        cur.execute("""update runs set finished_at=now(), status='red',
-                         detail = coalesce(detail,'{}'::jsonb) || %s::jsonb
-                       where job=%s and status='running'""", (killed, job))
+    cur.execute(f"""update runs set finished_at=now(), status='red',
+                      detail = coalesce(detail,'{{}}'::jsonb) || %s::jsonb
+                    where job=%s and status='running' and {MINE}""", (killed, job, rid, rid, att))
     if cur.rowcount:
         how = f"closed {cur.rowcount} stuck run(s)"
     else:
         row = None
         if rid:
-            cur.execute("""select id, status from runs
-                           where job=%s and detail->'actions'->>'run_id' = %s
-                           order by id desc limit 1""", (job, rid))
+            cur.execute(f"""select id, status from runs where job=%s and {MINE}
+                            order by id desc limit 1""", (job, rid, rid, att))
             row = cur.fetchone()
         if row and row[1] == "red":
             cur.execute("update runs set detail = coalesce(detail,'{}'::jsonb) || %s::jsonb where id=%s",

@@ -18,13 +18,15 @@ from db import Heartbeat                                                   # noq
 RID = "424242"
 
 
-def autopsy(tmp_path, job="probe", rid=RID, tail="Traceback: boom"):
+def autopsy(tmp_path, job="probe", rid=RID, attempt="1", tail="Traceback: boom"):
     out = tmp_path / "job.out"
     out.write_text(tail)
     env = {**os.environ}
     env.pop("GITHUB_RUN_ID", None)
+    env.pop("GITHUB_RUN_ATTEMPT", None)
     if rid:
         env["GITHUB_RUN_ID"] = rid
+        env["GITHUB_RUN_ATTEMPT"] = attempt
     res = subprocess.run([sys.executable, str(ROOT / "src" / "report_fail.py"), job, str(out)],
                          capture_output=True, text=True, env=env)
     assert res.returncode == 0, res.stderr
@@ -86,6 +88,17 @@ def test_a_step_failing_after_a_green_heartbeat_flips_the_row_red(db, tmp_path):
     assert "flipped to red" in out
     (_, status, detail), = rows(db)
     assert status == "red" and detail["fatal"].startswith("died after the heartbeat closed green")
+
+
+def test_a_rerun_attempt_that_dies_early_leaves_the_first_attempts_green_alone(db, tmp_path):
+    """"Re-run all jobs" keeps the run id and bumps the attempt. Attempt 1 composed the brief and
+    closed green; attempt 2 dies at pip install. That green is a fact about a brief Zak received —
+    the second attempt gets its own pre-heartbeat row instead."""
+    seed(db, "green")                                   # attempt "1"
+    out = autopsy(tmp_path, attempt="2")
+    assert "died before its heartbeat opened" in out
+    (_, first, _), (_, second, d2) = rows(db)
+    assert first == "green" and second == "red" and d2["fatal"] == "job died pre-heartbeat"
 
 
 def test_a_death_before_any_heartbeat_still_gets_its_row(db, tmp_path):

@@ -54,7 +54,12 @@ is `roadmap-2026-07-31.md`.
     executable by PUBLIC. Found 2026-09-13 by `get_advisors`, six weeks after 051; the grants test
     existed and skipped in the harness because the role did not. **Run the advisors after every
     migration, and stage the public roles in the test database so the lockout is a test, not a
-    hope** (migration 066, `test_public_key_locked_out.py`).
+    hope** (migration 066, `test_public_key_locked_out.py`). One consequence to know on the day the
+    connector is repointed at `yuna_session` (020's intent; the role has no login today, so the
+    connector arrives as the owner): that role has policies only on the seven tables it writes and
+    reads everything else through the owner-rights views, so a direct table read of `book`,
+    `universe` or, since 066, `engine_sessions` returns nothing — silently. The Routines contract's
+    health query reads `engine_sessions` directly and would need a policy or a view then.
 
 ## GitHub Actions
 
