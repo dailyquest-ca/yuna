@@ -101,28 +101,70 @@ def test_the_screen_gauge_measures_the_uncensored_count(db, migrated):
     assert len(engine.screen(i, adj, raw, dv, pool=8)) == 8, "the cap censors; the gauge must not"
 
 
-def test_the_screen_gauge_ambers_outside_the_observed_band(db, migrated):
-    """"Within historical band" taken literally: the observed range of every prior session. No
+def _three_sessions(cur, days):
+    """Tonight scored, plus two prior sessions written from the same tape (20 survivors each)."""
+    _score(cur, days)
+    for d in (days[-3], days[-2]):
+        s = desk.sheet(cur, d, 200_000.0)
+        sheet.write_session(cur, s, "live", engine.digest())
+
+
+def _set_count(cur, d, n):
+    cur.execute("update engine_sessions set screen_count = %s where session_date = %s", (n, d))
+
+
+def test_the_screen_gauge_ambers_on_a_jump_the_tape_has_never_made(db, migrated):
+    """"Within historical band" is the band of session-to-session CHANGE (§5.6, 2026-09-14). No
     threshold is chosen here, because §4.4 names none and §0.3 makes choosing one a plan edit."""
     with db.cursor() as cur:
         days = _world(cur)
-        _score(cur, days)
-        db.commit()
-        # two prior sessions, both at 20 survivors
-        for d in (days[-3], days[-2]):
-            s = desk.sheet(cur, d, 200_000.0)
-            sheet.write_session(cur, s, "live", engine.digest())
+        _three_sessions(cur, days)
         db.commit()
         stored = gauges.newest_session(cur)
-        assert gauges.screen_within_band(cur, stored)["status"] == "green"
+        g = gauges.screen_within_band(cur, stored)
+        assert g["status"] == "green" and g["change"] == 0 and g["band"] == [0, 0]
 
-        cur.execute("update engine_sessions set screen_count = 3 where session_date = %s",
-                    (days[-1],))
+        _set_count(cur, days[-1], 3)                   # 17 names gone overnight: a broken tape
         db.commit()
         g = gauges.screen_within_band(cur, gauges.newest_session(cur))
 
     assert g["status"] == "amber"
-    assert g["band"] == [20, 20] and g["survivors"] == 3
+    assert g["change"] == -17 and g["band"] == [0, 0] and g["survivors"] == 3
+
+
+def test_the_screen_gauge_lets_a_drift_it_has_seen_before_through(db, migrated):
+    """Three weeks of −3 a night read as amber under the level band (learning 68). A change the
+    history has already shown is green; one it has not is amber."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _three_sessions(cur, days)
+        _set_count(cur, days[-3], 20)
+        _set_count(cur, days[-2], 17)                  # one prior change: −3
+        _set_count(cur, days[-1], 14)                  # tonight: −3 again, a new low
+        db.commit()
+        g = gauges.screen_within_band(cur, gauges.newest_session(cur))
+        assert g["status"] == "green" and g["change"] == -3 and g["band"] == [-3, -3]
+
+        _set_count(cur, days[-1], 10)                  # tonight: −7, never seen
+        db.commit()
+        g = gauges.screen_within_band(cur, gauges.newest_session(cur))
+    assert g["status"] == "amber" and g["change"] == -7
+
+
+def test_the_screen_gauge_needs_two_prior_sessions_before_it_has_a_band(db, migrated):
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        db.commit()
+        g = gauges.screen_within_band(cur, gauges.newest_session(cur))
+        assert g["status"] == "green" and g["band"] is None and "first stored session" in g["why"]
+
+        s = desk.sheet(cur, days[-2], 200_000.0)      # one prior session: a change, no band
+        sheet.write_session(cur, s, "live", engine.digest())
+        _set_count(cur, days[-1], 3)
+        db.commit()
+        g = gauges.screen_within_band(cur, gauges.newest_session(cur))
+    assert g["status"] == "green" and g["change"] == -17 and g["band"] is None
 
 
 def test_the_rank_gauge_goes_red_when_the_top_twelve_moves(db, migrated):

@@ -20,9 +20,10 @@ protective-direction and never blocked, so the verdict this job writes is `block
 On thresholds. §4.4 names six gauges and gives no tolerances, and this file invents none. Where a
 gauge needs a comparison it comes from the plan's own arithmetic (§3.5's NAV/5, §3.2's screen,
 §3.4's SMA) or from the stored history itself. The one gauge that reads as if it needs a constant
-— "within historical band" — takes the band literally: the observed range of every prior session.
-A tighter band would be a better gauge and it would also be a number nobody ruled, which is the
-trade §0.3 exists to decide rather than this file.
+— "within historical band" — takes the band from the history itself: the observed range of every
+prior session-to-session CHANGE in the count (ruled 2026-09-14, §5.6; it was the range of levels,
+and a level band can never admit a new low). A tighter band would be a better gauge and it would
+also be a number nobody ruled, which is the trade §0.3 exists to decide rather than this file.
 """
 import os
 import pathlib
@@ -95,33 +96,51 @@ def gate_reproduces(cur, stored):
 # ---- 2. screen survivor count within historical band -------------------------------------------
 
 def screen_within_band(cur, stored, mode="live"):
-    """Today's §3.2 survivor count against the observed range of every prior session.
+    """Tonight's CHANGE in the §3.2 survivor count against the observed range of every prior
+    session-to-session change.
+
+    Ruled 2026-09-14 (§5.6). The gauge exists to catch a broken tape — hundreds of names vanishing
+    between one close and the next, which no log records — and until then it banded the LEVEL:
+    the observed min–max of every prior count. A level band can never admit a new low, so three
+    weeks of ordinary attrition (2,336 → 2,274 survivors, 2026-08-21 to 09-11: 47 names losing
+    their $10M median as the summer tape rolled into the 50-session window, 15 closing under $5)
+    read as amber on every down day while the universe stood still. The band is now of the
+    day-to-day change: a jump the tape has never made is amber; a drift it makes every week is
+    green. Still the plan's own arithmetic — the observed history — and still no number chosen
+    here.
 
     Uncensored on purpose — see migration 053. `ranked_count` is capped at §3.2's pool of 500 and
     sits at exactly 500 whatever happens to the tape, so it is the one number in this row that
     cannot report a broken ingest.
 
-    AMBER rather than red, and the level is §4.3's rather than a preference: amber already means
-    "no new buy tickets", which is the correct response to "the universe changed shape and nobody
-    knows why". Red is reserved for a decision that provably disagrees with itself.
+    AMBER rather than red: red is reserved for a decision that provably disagrees with itself.
+    Amber warns; only red holds buys (§4.4, and §5.6's 2026-09-14 reading of §4.3).
     """
     if stored["screen_count"] is None:
         return _gauge("screen", "amber", "the session predates `screen_count` — no survivor count "
                                          "was recorded, so there is nothing to band")
-    cur.execute("""select min(screen_count), max(screen_count), count(*) from engine_sessions
-                    where mode = %s and session_date < %s and screen_count is not null""",
-                (mode, stored["session_date"]))
-    lo, hi, n = cur.fetchone()
+    cur.execute("""select screen_count from engine_sessions
+                    where mode = %s and session_date < %s and screen_count is not null
+                    order by session_date""", (mode, stored["session_date"]))
+    prior = [r[0] for r in cur.fetchall()]
     now = stored["screen_count"]
-    if not n:
+    if not prior:
         return _gauge("screen", "green", f"{now} survivors — first stored session, no band yet",
-                      survivors=now, band=None)
-    if now < lo or now > hi:
+                      survivors=now, change=None, band=None)
+    change = now - prior[-1]
+    deltas = [b - a for a, b in zip(prior, prior[1:])]
+    if not deltas:
+        return _gauge("screen", "green", f"{now} survivors ({change:+d} on the day) — one prior "
+                                         f"session, no band of changes yet",
+                      survivors=now, change=change, band=None)
+    lo, hi = min(deltas), max(deltas)
+    if change < lo or change > hi:
         return _gauge("screen", "amber",
-                      f"{now} survivors is outside the observed band [{lo}, {hi}] over {n} prior "
-                      f"session(s)", survivors=now, band=[lo, hi], sessions=n)
-    return _gauge("screen", "green", f"{now} survivors, inside [{lo}, {hi}]",
-                  survivors=now, band=[lo, hi], sessions=n)
+                      f"{now} survivors, {change:+d} on the day, outside the observed band of "
+                      f"daily changes [{lo:+d}, {hi:+d}] over {len(deltas)} prior change(s)",
+                      survivors=now, change=change, band=[lo, hi], sessions=len(deltas))
+    return _gauge("screen", "green", f"{now} survivors, {change:+d} on the day, inside [{lo:+d}, {hi:+d}]",
+                  survivors=now, change=change, band=[lo, hi], sessions=len(deltas))
 
 
 # ---- 3. rank reproducibility on same-vintage data ----------------------------------------------
