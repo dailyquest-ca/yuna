@@ -208,6 +208,17 @@ is `roadmap-2026-07-31.md`.
     would have stopped Monday's orders. Only the price feed gates tickets. Freshness must also read
     the *latest* run per job, not every run in the window.
 
+68. **A band of levels cannot admit a new low, so it ambers on every down day of a trend.** §4.4's
+    "screen survivor count within historical band" was built as the min–max of every prior
+    session's count — no constant, exactly as §0.3 wants — and it fired nineteen nights running
+    (2026-08-24 to 09-13) while the count slid from 2,336 to 2,274. The slide was the market: of
+    the 63 names that left, 47 lost their $10M median dollar volume as the summer tape rolled into
+    the 50-session window, 15 closed under $5, one lost a bar; the universe count did not move.
+    Nothing held buys, so the cost was a gauge everyone learned to read past — the same shape as
+    learning 58's lateness line. **Band the change, not the level:** a broken tape is a jump the
+    history has never shown, a trend is a drift it shows every week, and the band of daily changes
+    ([−13, +6] on the day of the fix) tells them apart with no number chosen (§5.6, 2026-09-14).
+
 ## Postgres / Supabase, continued
 
 25. **Never `force row level security` on a table a job writes.** FORCE applies RLS to the table

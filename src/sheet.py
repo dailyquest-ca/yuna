@@ -236,7 +236,8 @@ def main():
                                  frozen_at=str(froze_at) if froze_at else None,
                                  frozen_buys=s.get("frozen_buys", []))
             if nav is None and not frozen:
-                # §4.3's amber: no new buy tickets. The rows exist and are unsized, the sells
+                # `score` goes amber, and a price-critical amber holds the buys through the
+                # freshness rule (§4.3 as amended 2026-09-14, §4.4). The rows exist and are unsized, the sells
                 # stand (§5.4), and the reason is the derivation's own, stated rather than
                 # inferred from a null — an unpriced position, a missing cash anchor, or missing
                 # FX are three different repairs and the amber names which.

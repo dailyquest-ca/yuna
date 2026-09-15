@@ -143,7 +143,7 @@ Weekly: the Saturday letter (clinical: gate, rank stability, DD status, divergen
 **4.3 Orders & tickets.**
 - The nightly sheet is the only source of engine orders. Zak executes at the open: market orders (sells first, then buys). **No GTC orders exist anywhere in this system.**
 - Ticket states: proposed → approved → executed → reconciled. Yuna writes rows; Zak's execution is the event; reconcile closes the loop with the receipt.
-- Amber/red pipeline: no new buy tickets. Gate-off exit sheets dispatch regardless of pipeline color — the gate's own data is its authority, and if that data is missing the gate already reads OFF (§3.4).
+- Red pipeline: no new buy tickets. An amber from a price-critical job (`ingest-daily`, `score`) holds buys the same way, through §4.4's freshness rule; any other amber, the check suite's own gauges included, warns and holds nothing. Gate-off exit sheets dispatch regardless of pipeline color — the gate's own data is its authority, and if that data is missing the gate already reads OFF (§3.4).
 
 **4.4 Check suite.** Gate reproducibility from raw bars · screen survivor count within historical band · rank reproducibility on same-vintage data · order sheet completeness & sizing arithmetic · book-vs-broker reconciliation age · data freshness. Any red holds buys; nothing holds exits.
 
@@ -180,6 +180,8 @@ Its worst trough, −60.3% on 2009-03-09, made a new high on 2013-09-10, four an
 - 2026-08-05 (recorded 2026-09-13) — three operating rulings the code cites: **stale means the bars, not the clock**; **schedule drift is not a half-failure and never turns a job amber**; **monthly work is guarded by whether it has run, never by the date**.
 - 2026-09-13 — §4.4's "any red holds buys" binds the check suite's own gauges and the price-critical jobs (`ingest-daily`, `score`). The census (`ingest-universe`) refreshes membership and writes no price; its red is a warning on the freshness line and never holds buys.
 - 2026-09-13 — operating constants of record: bars older than **4 days** hold buys (one long weekend, measured in UTC); a job's newest run within **36 hours** is its current state; lateness under **30 minutes** is not printed; the retry looks back **4 hours** for a green first firing and past that re-ingests the same tape.
+- 2026-09-14 — §4.4's "screen survivor count within historical band" is the band of session-to-session **change**, not of the level. A level band can never admit a new low, and three weeks of ordinary attrition (2,336 → 2,274 survivors, the summer tape rolling into the 50-session median) read as amber on every down day while the universe stood still. A jump the tape has never made is amber; a drift it makes every week is green.
+- 2026-09-14 — §4.3 amended in place (old line: "Amber/red pipeline: no new buy tickets."): a **red** check holds buys; an **amber** from a price-critical job (`ingest-daily`, `score`) holds buys through §4.4's freshness rule; any other amber, the check suite's own gauges included, warns and holds nothing. The code had always read it this way; the plan now says so.
 - 2026-09-13 — census admission floors: a listed US common stock gets a `universe` row when its census-day close is **≥ $4** and it traded **≥ $5M** that day. Looser than §3.2 on purpose: one day's volume is a noisier test than §3.2's 50-session median, which the nightly screen applies from our own bars. On the data, two of the eighteen names the live engine had ranked top-12 (AXTI, MXL) printed days under $10M in the prior year.
 
 ---

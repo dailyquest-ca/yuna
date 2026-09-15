@@ -20,9 +20,10 @@ protective-direction and never blocked, so the verdict this job writes is `block
 On thresholds. §4.4 names six gauges and gives no tolerances, and this file invents none. Where a
 gauge needs a comparison it comes from the plan's own arithmetic (§3.5's NAV/5, §3.2's screen,
 §3.4's SMA) or from the stored history itself. The one gauge that reads as if it needs a constant
-— "within historical band" — takes the band literally: the observed range of every prior session.
-A tighter band would be a better gauge and it would also be a number nobody ruled, which is the
-trade §0.3 exists to decide rather than this file.
+— "within historical band" — takes the band from the history itself: the observed range of every
+prior session-to-session CHANGE in the count (ruled 2026-09-14, §5.6; it was the range of levels,
+and a level band can never admit a new low). A tighter band would be a better gauge and it would
+also be a number nobody ruled, which is the trade §0.3 exists to decide rather than this file.
 """
 import os
 import pathlib
@@ -95,33 +96,70 @@ def gate_reproduces(cur, stored):
 # ---- 2. screen survivor count within historical band -------------------------------------------
 
 def screen_within_band(cur, stored, mode="live"):
-    """Today's §3.2 survivor count against the observed range of every prior session.
+    """Tonight's CHANGE in the §3.2 survivor count against the observed range of every prior
+    session-to-session change.
+
+    Ruled 2026-09-14 (§5.6). The gauge exists to catch a broken tape — hundreds of names vanishing
+    between one close and the next, which no log records — and until then it banded the LEVEL:
+    the observed min–max of every prior count. A level band can never admit a new low, so three
+    weeks of ordinary attrition (2,336 → 2,274 survivors, 2026-08-21 to 09-11: 47 names losing
+    their $10M median as the summer tape rolled into the 50-session window, 15 closing under $5)
+    read as amber on every down day while the universe stood still. The band is now of the
+    day-to-day change: a jump the tape has never made is amber; a drift it makes every week is
+    green. Still the plan's own arithmetic — the observed history — and still no number chosen
+    here. The band learns from what it is shown: a broken-tape session left in `engine_sessions`
+    becomes part of the history, so the standing repair for a broken night is the existing one —
+    re-ingest the date and re-score it (the chain is idempotent per session) — not to leave the
+    row and let the band widen around it.
 
     Uncensored on purpose — see migration 053. `ranked_count` is capped at §3.2's pool of 500 and
     sits at exactly 500 whatever happens to the tape, so it is the one number in this row that
     cannot report a broken ingest.
 
-    AMBER rather than red, and the level is §4.3's rather than a preference: amber already means
-    "no new buy tickets", which is the correct response to "the universe changed shape and nobody
-    knows why". Red is reserved for a decision that provably disagrees with itself.
+    AMBER rather than red: red is reserved for a decision that provably disagrees with itself.
+    Amber warns; only red holds buys (§4.4, and §5.6's 2026-09-14 reading of §4.3).
     """
     if stored["screen_count"] is None:
         return _gauge("screen", "amber", "the session predates `screen_count` — no survivor count "
                                          "was recorded, so there is nothing to band")
-    cur.execute("""select min(screen_count), max(screen_count), count(*) from engine_sessions
-                    where mode = %s and session_date < %s and screen_count is not null""",
-                (mode, stored["session_date"]))
-    lo, hi, n = cur.fetchone()
+    cur.execute("""select session_date, screen_count from engine_sessions
+                    where mode = %s and session_date <= %s and screen_count is not null
+                    order by session_date""", (mode, stored["session_date"]))
+    rows = cur.fetchall()                       # tonight is the last row
     now = stored["screen_count"]
-    if not n:
+    if len(rows) < 2:
         return _gauge("screen", "green", f"{now} survivors — first stored session, no band yet",
-                      survivors=now, band=None)
-    if now < lo or now > hi:
+                      survivors=now, change=None, band=None)
+    # Changes are measured PER ELAPSED SESSION on the benchmark's own calendar (desk.load's
+    # calendar too), so a night the chain did not score does not make the next night's change span
+    # two sessions and read as a jump against single-session history.
+    cur.execute("select d from prices where ticker = %s and d between %s and %s order by d",
+                (engine.REGIME_SOURCE, rows[0][0], rows[-1][0]))
+    pos = {d: i for i, (d,) in enumerate(cur.fetchall())}
+
+    def rate(a, b):
+        (da, ca), (db_, cb) = a, b
+        gap = (pos[db_] - pos[da]) if (da in pos and db_ in pos) else 1
+        return (cb - ca) / max(gap, 1), max(gap, 1)
+
+    per_session, elapsed = rate(rows[-2], rows[-1])
+    change = now - rows[-2][1]
+    deltas = [rate(a, b)[0] for a, b in zip(rows[:-2], rows[1:-1])]
+    if not deltas:
+        return _gauge("screen", "green", f"{now} survivors ({change:+d} on the day) — one prior "
+                                         f"session, no band of changes yet",
+                      survivors=now, change=change, band=None)
+    lo, hi = min(deltas), max(deltas)
+    over = f"{change:+d} over {elapsed} session(s)" if elapsed > 1 else f"{change:+d} on the day"
+    if per_session < lo or per_session > hi:
         return _gauge("screen", "amber",
-                      f"{now} survivors is outside the observed band [{lo}, {hi}] over {n} prior "
-                      f"session(s)", survivors=now, band=[lo, hi], sessions=n)
-    return _gauge("screen", "green", f"{now} survivors, inside [{lo}, {hi}]",
-                  survivors=now, band=[lo, hi], sessions=n)
+                      f"{now} survivors, {over}, outside the observed band of per-session "
+                      f"changes [{lo:+.1f}, {hi:+.1f}] over {len(deltas)} prior change(s)",
+                      survivors=now, change=change, sessions_elapsed=elapsed,
+                      per_session=per_session, band=[lo, hi], changes=len(deltas))
+    return _gauge("screen", "green", f"{now} survivors, {over}, inside [{lo:+.1f}, {hi:+.1f}]",
+                  survivors=now, change=change, sessions_elapsed=elapsed,
+                  per_session=per_session, band=[lo, hi], changes=len(deltas))
 
 
 # ---- 3. rank reproducibility on same-vintage data ----------------------------------------------
@@ -249,8 +287,9 @@ def sheet_arithmetic(cur, stored):
                       failures=bad[:20], tickets=len(rows))
     if unsized:
         return _gauge("sheet", "amber", f"{unsized} buy ticket(s) carry no quantity — the session "
-                                        f"recorded no engine NAV, so §4.3's amber applies and none "
-                                        f"of them may be executed", unsized=unsized)
+                                        f"recorded no engine NAV, so they are unsized and none of "
+                                        f"them can be executed; `score`'s own amber holds the buys "
+                                        f"through the freshness rule (§4.4)", unsized=unsized)
     return _gauge("sheet", "green", f"{len(rows)} ticket(s), every quantity re-derived from §3.5",
                   tickets=len(rows))
 
