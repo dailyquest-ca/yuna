@@ -14,7 +14,6 @@ The channel is a config row (`push_channel`, ruled 2026-08-05), because delivery
 
 Writes nothing but its own runs row — delivery is not allowed to edit the words it delivers.
 """
-import datetime as dt
 import json
 import os
 import sys

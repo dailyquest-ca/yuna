@@ -385,8 +385,9 @@ def saturday_lines(cur, p):
     # Rank stability across §3.5's fill band. Five sessions because a trading week is five
     # sessions and this is the weekly letter — the length of a week, not a tuned lookback.
     cur.execute("""select session_date, array_agg(ticker order by rank) as top
-                     from engine_ranks where mode='live' and rank <= 12
-                    group by session_date order by session_date desc limit 5""")
+                     from engine_ranks where mode='live' and rank <= %s
+                    group by session_date order by session_date desc limit 5""",
+                (engine.FILL_BAND,))                   # §3.5's band, from the one place it lives
     week = cur.fetchall()
     if len(week) >= 2:
         newest, oldest = set(week[0][1]), set(week[-1][1])
