@@ -391,7 +391,7 @@ def saturday_lines(cur, p):
     week = cur.fetchall()
     if len(week) >= 2:
         newest, oldest = set(week[0][1]), set(week[-1][1])
-        out.append(f"  rank stability: {len(newest & oldest)} of 12 names held the band from "
+        out.append(f"  rank stability: {len(newest & oldest)} of {engine.FILL_BAND} names held the band from "
                    f"{week[-1][0]} to {week[0][0]} · in {sorted(newest - oldest)} · "
                    f"out {sorted(oldest - newest)}")
     else:
