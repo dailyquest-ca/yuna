@@ -3,9 +3,10 @@ name: ingest-daily
 # tables only. Everything derived from these rows belongs to
 # `score`, which runs next.
 #
-# FX is the whole of §4.1's row, not just USDCAD: every statement currency a foreign filer reports
-# in gets a pair registered here and backfilled by the per-ticker pass, because §3.0 converts
-# financials at fiscal-period-end rates and cannot do it with rates we never pulled.
+# FX: USDCAD is the pair v1.0 needs, for the CAD NAV the sheet marks. The other pairs on the feed
+# are the retired engine's statement currencies, kept because their bars are history nothing can
+# re-pull; `fundamentals` froze with the 2026-09 downgrade and the census writes every name as
+# USD, so a new pair appears only if a `universe` row arrives in another currency by hand.
 #
 # The earnings calendar is RETIRED (§4.5 reads no calendar feed, and the All World product does
 # not carry the endpoint). `ingest.py` keeps the two calls behind `INGEST_EARNINGS`, default off;

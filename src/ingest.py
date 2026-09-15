@@ -111,11 +111,14 @@ def tape_already_landed(cur, as_of, hours=12):
     return row[0] if row else None
 
 
-# --------------------------------------------------------------------------- FX (§4.1, §3.0)
-# §4.1's FX row reads "USDCAD for CAD NAV **+ statement currencies for foreign filers**
-# (fiscal-period-end rates)". Only USDCAD was ever pulled, so §3.0's one-currency test — a foreign
-# issuer is compounder-eligible only when FCF and market cap are expressed in one currency — had no
-# rates to convert with, and ~185 universe names were excluded rather than converted.
+# --------------------------------------------------------------------------- FX
+# v1.0 needs one pair: USDCAD, for the CAD NAV the sheet marks (sheet.py; Zak, 2026-08-19). The
+# statement currencies registered below were the retired engine's — its §3.0 converted foreign
+# filers' financials at fiscal-period-end rates — read from `v_fundamentals_latest`, a view over a
+# table that froze with the 2026-09 downgrade. The other source is `universe.currency`, which the
+# census writes as USD, so a new pair appears only if a row arrives in another currency by hand.
+# The pairs already on the feed stay: one incremental call a night each, and the bars are history
+# nothing else can re-pull.
 def register_fx_pairs(conn, hb):
     """Put every currency we must convert *out of* on the nightly feed, so its history is ours.
 

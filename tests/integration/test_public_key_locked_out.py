@@ -48,6 +48,19 @@ def test_the_public_role_cannot_execute_the_ledger_function(db, role):
         assert cur.fetchone()[0] is True, "the session's ledger insert still fires it"
 
 
+def test_every_function_in_public_pins_its_search_path(db):
+    """Migration 067. `create or replace function` silently drops the setting, so a redefinition
+    without `set search_path` in its body would reopen the linter's warning — this is what says so."""
+    with db.cursor() as cur:
+        cur.execute("""select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+                       where n.nspname = 'public'
+                         and not exists (select 1 from unnest(coalesce(p.proconfig, '{}')) c
+                                          where c like 'search_path=%')
+                       order by 1""")
+        unpinned = [r[0] for r in cur.fetchall()]
+    assert unpinned == [], f"functions without a pinned search_path: {unpinned}"
+
+
 @pytest.mark.parametrize("role", PUBLIC_ROLES)
 def test_a_table_created_tomorrow_is_not_handed_to_the_public_role(db, role):
     """The default privileges are how every past table became public the moment it was created.

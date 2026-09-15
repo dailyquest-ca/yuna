@@ -1,8 +1,8 @@
 # Learnings — the scar tissue
 
-Facts this build paid for. Every line here is still true as of 2026-07-31; anything that stopped
-being true was deleted rather than archived. Not law — the law is `yuna_plan.md`. The build order
-is `roadmap-2026-07-31.md`.
+Facts this build paid for. Every line here was true when it was written and is deleted, not
+archived, when it stops being true; the dated entries say when they were learned. Not law — the
+law is `yuna_plan.md`. The build order is `roadmap-2026-08-16.md`.
 
 ## The vendor (EODHD)
 
