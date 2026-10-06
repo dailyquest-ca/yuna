@@ -293,6 +293,47 @@ def test_an_unsized_sheet_is_amber_not_red(db, migrated):
     assert g["status"] == "amber" and g["unsized"] == 5
 
 
+FULL_BOOK = ("N00.US", "N01.US", "N02.US", "N03.US", "N04.US")   # the fixture's top five
+
+
+def test_a_quiet_night_with_a_full_book_is_green_not_amber(db, migrated):
+    """The book already matches the rank, so score decides nothing and writes nothing. Before the
+    attestation landed this read amber on 59 of the live era's first 67 nights (2026-10-06)."""
+    with db.cursor() as cur:
+        days = _world(cur, held=FULL_BOOK)
+        s = _score(cur, days)
+        db.commit()
+        assert s["orders"] == []
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "green" and g["decided"] == 0 and g["tickets"] == 0
+
+
+def test_a_decided_sheet_that_was_never_written_is_red(db, migrated):
+    """The failure the old amber existed to catch, now wearing its own colour."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        db.commit()
+        cur.execute("delete from tickets where session_date = %s", (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red" and g["decided"] == 5
+    assert "never written" in g["why"]
+
+
+def test_a_session_without_the_attestation_keeps_the_old_amber(db, migrated):
+    """Sessions stored before the attestation carry no `orders` key. The gauge still cannot tell a
+    quiet night from a failed write for those, so it must not call them green."""
+    with db.cursor() as cur:
+        days = _world(cur, held=FULL_BOOK)
+        _score(cur, days)
+        cur.execute("update engine_sessions set detail = detail - 'orders' - 'sells' - 'buys'")
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "amber"
+    assert "no attestation" in g["why"]
+
+
 def test_the_reconciliation_gauge_reddens_when_an_approval_outlives_a_session(db, migrated):
     """The tolerance is derived rather than chosen: an approval still awaiting a receipt after a
     LATER session was scored means the book has been reasoned from without knowing whether that

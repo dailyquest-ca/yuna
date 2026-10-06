@@ -43,14 +43,16 @@ def _gauge(name, status, why, **detail):
 
 def newest_session(cur, mode="live"):
     cur.execute("""select session_date, gate_on, gate_green, index_close, index_sma,
-                          universe_count, ranked_count, screen_count, nav, param_digest
+                          universe_count, ranked_count, screen_count, nav, param_digest,
+                          detail, mode
                      from engine_sessions where mode = %s
                     order by session_date desc limit 1""", (mode,))
     row = cur.fetchone()
     if not row:
         return None
     keys = ("session_date", "gate_on", "gate_green", "index_close", "index_sma",
-            "universe_count", "ranked_count", "screen_count", "nav", "param_digest")
+            "universe_count", "ranked_count", "screen_count", "nav", "param_digest",
+            "detail", "mode")
     return dict(zip(keys, row))
 
 
@@ -209,6 +211,44 @@ def rank_reproduces(cur, stored, mode="live"):
 
 # ---- 4. order sheet completeness & sizing arithmetic --------------------------------------------
 
+def _sheet_without_tickets(stored):
+    """No ticket on the newest sheet. Three different facts produce that row count, and until
+    2026-10-06 this gauge could not tell them apart — so it read amber on 59 of the live era's
+    first 67 nights, every one of them a quiet session with a full book, and the colour stopped
+    carrying information. §4.4's amber has to be rare enough to be read.
+
+    `score` now attests its decision in `engine_sessions.detail.orders` (sheet.write_session,
+    counted after apply_freeze, so it is the number of tickets write_tickets will write). Then:
+
+      decided none      green — a full book that matches the rank is the ordinary night
+      decided some      red   — the sheet was decided and never written. This is the failure the
+                               old amber existed to catch, and it deserves its own colour.
+      shadow mode       green — §6.4's shadow writes no tickets by design (sheet.write_tickets)
+      no attestation    amber — a session stored before the attestation existed; the old wording
+                               stands, because the gauge still cannot tell.
+    """
+    detail = stored.get("detail") or {}
+    decided = detail.get("orders")
+    if stored.get("mode") not in (None, "live"):
+        return _gauge("sheet", "green", f"{stored.get('mode')} mode writes no tickets (§6.4); "
+                                        f"score decided "
+                                        f"{'?' if decided is None else decided} order(s)",
+                      tickets=0, decided=decided)
+    if decided is None:
+        return _gauge("sheet", "amber", f"no tickets for {stored['session_date']} — a session with "
+                                        f"no orders is ordinary, but so is a score that failed to "
+                                        f"write them, and this session carries no attestation "
+                                        f"either way")
+    if decided == 0:
+        return _gauge("sheet", "green", f"no orders for {stored['session_date']}: score ranked "
+                                        f"{stored.get('ranked_count')} name(s) and decided none — "
+                                        f"by rule", tickets=0, decided=0)
+    return _gauge("sheet", "red", f"score decided {decided} order(s) for {stored['session_date']} "
+                                  f"but no ticket exists for any of them — the sheet was decided "
+                                  f"and never written", tickets=0, decided=decided,
+                  sells=detail.get("sells"), buys=detail.get("buys"))
+
+
 def sheet_arithmetic(cur, stored):
     """Every ticket on the newest sheet, re-derived: does its quantity follow from §3.5?
 
@@ -234,9 +274,7 @@ def sheet_arithmetic(cur, stored):
                     order by action, ticker""", (stored["session_date"],))
     rows = cur.fetchall()
     if not rows:
-        return _gauge("sheet", "amber", f"no tickets for {stored['session_date']} — a session with "
-                                        f"no orders is ordinary, but so is a score that failed to "
-                                        f"write them")
+        return _sheet_without_tickets(stored)
 
     bad, unsized = [], 0
     nav = stored["nav"]
