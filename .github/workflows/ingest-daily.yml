@@ -37,11 +37,12 @@ name: ingest-daily
 # The cost is a new failure mode, and it is guarded: a firing that beats the vendor's bulk file
 # would land YESTERDAY's tape and go green, and the retry would then exit on "already green" —
 # a silent stale day. So a scheduled run whose newest tape is not newer than the store's
-# `data_date` writes nothing and records `awaiting_vendor`; the retry ignores that row and fetches
+# `data_date` — or carries no SPY.US bar, the engine's calendar, as the 311-row Labor Day file did
+# (A47) — writes nothing and records `awaiting_vendor`; the retry ignores that row and fetches
 # again, and if it finds the same — and no run landed that tape this night, since the two firings
 # drift independently — it fails red, because a night with no tape has to have a reader
-# (`ingest.py`). The repair is the `date` input below. A hand dispatch is never guarded: pressing
-# the button means fetch.
+# (`ingest.py`). The repair is the `date` input below. A hand dispatch is never left waiting:
+# pressing the button means fetch — though it too refuses to land a file with no SPY.US bar.
 #
 # The retry stays 60 minutes behind the first firing, and it identifies itself by matching
 # `github.event.schedule` against its own cron string — so the retry's cron is written three
