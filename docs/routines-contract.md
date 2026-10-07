@@ -143,8 +143,9 @@ The first row that matches, top to bottom, is the reading:
 | **sheet current, night red** | not `ingest_landed` | the sheet is the right session's but the night's ingest is red or missing: FLAT, the order sheet exactly as the body prints it (its banner already holds the buys; exits stand), and §6 names the job |
 | **current** | otherwise | delivers the brief |
 
-`>=`, not `=`: a hand run in the evening, after the chain, sees tonight's session, which is newer
-than the morning's expected one and just as current.
+Only *older* than expected reads not in yet, never merely different: a hand run in the evening,
+after the chain, sees tonight's session, which is newer than the morning's expected one and just as
+current.
 
 **The calendar is weekends only, on purpose.** This system holds no exchange holiday calendar
 (`db.next_session`, `ingest.tape_already_landed`), and a list typed in here would be a constant
