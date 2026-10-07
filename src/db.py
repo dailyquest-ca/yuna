@@ -603,9 +603,9 @@ def freshness(conn, *, stale_days=4, own_run=None):
 
     **A run still reading `running` is not a result** (QC 2026-10-07, A45). It is an ingest still
     landing bars or a score still rewriting the sheet, or it is a job that died without closing
-    its row — a cancel, a timeout or a lost runner, none of which ran the `if: failure()` autopsy
-    (production's run 905 has read `running` since 2026-09-14). This line used to print either as
-    ✓ and release the buys. Neither can vouch for the prices, so a price-critical one holds buys
+    its row: a runner GitHub lost, and — until the autopsy steps learned to run on a cancel the
+    same day — any cancel or timeout (production's run 905 has read `running` since 2026-09-14).
+    This line used to print either as ✓ and release the buys. Neither can vouch for the prices, so a price-critical one holds buys
     the way that job's amber does (§4.3 as amended 2026-09-14), and the line says what is known —
     "still running or died". No age decides between the two: the question is whether a result
     exists, and a running row has none. `own_run` is the asking job's own runs id; a run that asks
