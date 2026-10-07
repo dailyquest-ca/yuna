@@ -66,8 +66,9 @@ def test_070_keeps_the_line_still_printing(db):
     assert [(t, r) for t, r, _ in rows] == [("TPX.US", "duplicate_listing")]
     assert funnel.kept_line(rows[0][2]) == "SGI.US", "the row names the line it keeps"
     with db.cursor() as cur:
-        cur.execute(desk.TAPE, (days[-1],))
-        on_the_desk = {r[0] for r in cur.fetchall()}
+        # the names the desk loads a column for — through `desk.load`, not the TAPE query's own
+        # parameters, so the check does not care how the tape is bounded (A34)
+        on_the_desk = set(desk.load(cur, days[-1])[1])
         session, pairs, flags = funnel.reverify_exclusions(cur)
     assert "SGI.US" in on_the_desk and "TPX.US" not in on_the_desk
     assert (session, pairs, flags) == (days[-1], [("TPX.US", "SGI.US")], []), (
