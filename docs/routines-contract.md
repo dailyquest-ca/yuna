@@ -110,9 +110,29 @@ Every row carries a `grade` saying where its authority comes from:
 | `broker` | a row from the bank's export | **law** — never contradicted, only replaced by a later export of the same trade |
 | `stated` | Zak's word, ahead of the export | **true, and provisional** — the engine runs on it until the export trues it |
 
-and one of three verbs in `side`: `buy`, `sell`, or `confirm`. **`confirm` is an opening balance** —
-a position that predates the ledger, recorded with its cost basis so the sells that follow it have
-something to net against. It moves no cash.
+and one of four verbs in `side`: `buy`, `sell`, `confirm` or `split`. **`confirm` is an opening
+balance** — a position that predates the ledger, recorded with its cost basis so the sells that
+follow it have something to net against. It moves no cash.
+
+**`split` is written by the pipeline.** Zak, 2026-10-07: *"Pipeline records splits — a
+vendor-reported split on a held name is written to the ledger as a quantity-only confirm (no cash)
+before score runs, and the brief shows it. Ticker changes and takeovers still fail closed until you
+record them."* Each night `reconcile` writes one `split` row per position the split reaches — `qty`
+is the ratio (2 for a 2:1, 0.1 for a 1:10), `price` 0, `trade_date` the vendor's ex-date — once it
+has checked the split against the raw closes, and the row restates every earlier row of the
+position: the shares move, the cost basis carries, no cash moves (migration 075). **Do not write
+one yourself, and do not record a split as a `confirm`.** If Zak reports a post-split count before
+the pipeline has recorded the split, say so and leave the ledger alone — the next reconcile records
+it once the vendor has posted it (`select * from corporate_actions where ticker = '<name>' and kind
+= 'split'`). The one exception is a split his broker shows that the pipeline will not record —
+the vendor never posts it, or reconcile's amber says the tape contradicts the vendor's posting:
+that is his word like any other statement, and on it you write the row exactly as reconcile would
+(`side = 'split'`, `qty` the ratio, `price` 0, `trade_date` the first session his broker shows on
+the new count, `grade = 'stated'`, `source` naming his words). One per position and date, ever, so
+a later posting of the same date collides instead of doubling, and a vendor posting the tape
+contradicts goes quiet once a split row after it restates the position. Quantity-only rows (price
+0) on or after a split's date are read as his own record of that split: reconcile leaves rows that
+are the split's arithmetic as they are, and goes red, by name, on rows that are not.
 
 ### Zak says he sold something
 
@@ -161,8 +181,11 @@ reference for the rules; a session does it in SQL because a session has no shell
   of a position bought before this ledger existed. Record the opening balance first, as a `confirm`
   row with the quantity and cost the book already holds, then re-record the sell. **Unless the sell
   is larger than everything ever bought** — the share count after a split, or a mistyped quantity.
-  Then the sell is the wrong row, and a `confirm` row would invent shares and move the cost basis:
-  check it against the broker and ask Zak.
+  After a split the vendor has posted (`select * from corporate_actions where ticker = '<name>' and
+  kind = 'split'`), the sell is right and early: write it on its exit ticket (`fill_qty`,
+  `fill_price`, `fill_date`) instead, and tonight's reconcile records the split first and lands the
+  sale after it. Otherwise the sell is the wrong row, and a `confirm` row would invent shares and
+  move the cost basis: check it against the broker and ask Zak.
 - **`NOPE.US is not in universe`** — check the symbol in EODHD form (`NUE.US`, `CNQ.TO`).
 - **anything about `guard_book` or `book_one_open_row_per_position`** — you tried to write `book`.
   Write `transactions` instead: a second purchase of a position is a second ledger row, never a
