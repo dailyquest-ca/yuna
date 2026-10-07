@@ -7,8 +7,9 @@
      reported as held-below-weight, not funded."
 
 The arithmetic lives in `engine.py` so the desk that sizes an order and the gauge that re-derives
-it read one definition.
+it read one definition. And §5.6's 4-day constant, now read by two jobs, is held to one number.
 """
+import inspect
 import math
 import pathlib
 import sys
@@ -17,6 +18,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+import db                                                                 # noqa: E402
 import engine                                                             # noqa: E402
 
 
@@ -47,3 +49,11 @@ def test_the_park_pays_the_shortfall_in_whole_shares_and_never_more_than_the_lot
     assert engine.park_draw(0.0, 810, 155.5) == 0 and engine.park_draw(-5.0, 810, 155.5) == 0
     with pytest.raises(ValueError):
         engine.park_draw(100.0, 810, None)
+
+
+def test_the_four_day_constant_is_one_number():
+    """§5.6, 2026-09-13: "bars older than 4 days hold buys". `freshness` holds the buys on it and
+    `desk.gate_unevaluable` holds the gate on it (Zak, 2026-10-07); learning 58's lesson is that a
+    constant written twice is changed once. `freshness`'s default must be the named one."""
+    assert db.STALE_DAYS == 4
+    assert inspect.signature(db.freshness).parameters["stale_days"].default == db.STALE_DAYS

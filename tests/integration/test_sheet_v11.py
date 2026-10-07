@@ -1,8 +1,9 @@
-"""§4.1's `score` job under v1.1's §3.5, end to end — src/sheet.py as CI invokes it, then the
-record it leaves and what §4.4's check makes of that record.
+"""§4.1's `score` job under v1.1's §3.5 and Zak's ruling R1 of 2026-10-07, end to end — src/sheet.py
+as CI invokes it, then the record it leaves and what §4.4's check makes of that record.
 
-`test_desk_v11` pins the decisions; this pins that the job writes exactly what it decided and
-attests the inputs the sheet gauge re-derives from.
+`test_desk_v11` pins the decisions; this pins that the job writes exactly what it decided, attests
+the inputs the sheet gauge re-derives from, goes amber on a hold with words that name it, and
+writes nothing at all when the gate cannot be evaluated on fresh data.
 """
 import pathlib
 import subprocess
@@ -141,3 +142,42 @@ def test_a_night_whose_buys_the_cash_cannot_reach_names_them_in_the_check(db, mi
         g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
     assert g["status"] == "amber" and "held below weight, no ticket" in g["why"]
     assert all(t in g["why"] for t in ("N00.US", "N04.US"))
+
+
+def test_a_gate_that_cannot_be_evaluated_writes_nothing_and_says_why(db, migrated):
+    """Item 5 end to end (R1). Last night's chain scored the session before, cleanly. Tonight the
+    names print a new session and SPY does not. The job used to re-score last night's close, green,
+    and hand the same sheet back as tonight's (QC A39). Now it writes nothing — last night's sheet
+    stays the sheet in force, untouched — goes amber naming SPY's bar and the tape's, and the check
+    carries those words to the brief beside a red verdict that holds the buys."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",), cash=200_000.0)
+        cur.execute("delete from prices where ticker = 'SPY.US' and d = %s", (days[-1],))
+    db.commit()
+    first = _job(migrated, days[-2], ENGINE_NAV="200000")             # last night: fresh
+    assert first.returncode == 0, first.stdout + first.stderr
+    with db.cursor() as cur:
+        assert _last_score(cur)[0] == "green"
+        cur.execute("select id, session_date, created_at, detail from engine_sessions")
+        sessions_before = cur.fetchall()
+        cur.execute("select id, state, qty, note, updated_at from tickets order by id")
+        tickets_before = cur.fetchall()
+    assert tickets_before, "last night proposed a sheet"
+
+    tonight = _job(migrated, days[-1], ENGINE_NAV="200000")
+    assert tonight.returncode == 0, tonight.stdout + tonight.stderr
+    with db.cursor() as cur:
+        status, detail = _last_score(cur)
+        assert status == "amber", "an unevaluated gate is score's amber, which holds the buys"
+        assert "unevaluated on fresh data" in tonight.stdout
+        said = " ".join(detail["amber"])
+        assert f"newest bar is {days[-2]}" in said and f"printed {days[-1]}" in said
+        assert "never sells the book" in said
+        cur.execute("select id, session_date, created_at, detail from engine_sessions")
+        assert cur.fetchall() == sessions_before, "no session re-written"
+        cur.execute("select id, state, qty, note, updated_at from tickets order by id")
+        assert cur.fetchall() == tickets_before, "last night's sheet stands, untouched"
+    verdict, got = gauges.run(db)
+    sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
+    assert sheet_gauge["status"] == "amber" and f"printed {days[-1]}" in sheet_gauge["why"]
+    assert verdict == "red"

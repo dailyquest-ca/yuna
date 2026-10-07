@@ -1,5 +1,5 @@
-"""§3.5 as v1.1 amended it (promoted 2026-10-06), against a real database — the
-decision, through `desk.sheet`.
+"""§3.5 as v1.1 amended it (promoted 2026-10-06), and Zak's ruling R1 of 2026-10-07, against a
+real database — the decision, through `desk.sheet`.
 
     v1.1 §3.5  "Order size = the lesser of slot weight and deployable TFSA cash — TFSA cash on the
                book plus the same session's sell proceeds, marked at the decision close. When
@@ -7,6 +7,9 @@ decision, through `desk.sheet`.
                capped at slot weight... A slot filled below weight counts as filled and is
                reported; it is never topped up." · "a shortfall beyond TFSA park and cash is
                reported as held-below-weight, not funded."
+    R1         A gate that cannot be evaluated on fresh data is unevaluated: nothing new is
+               proposed, buys are held, the brief names the stale bar, and a data outage alone
+               never sells the book.
 
 The worlds are `test_desk`'s; `_world(cash=...)` states the TFSA cash v1.1 sizes against.
 """
@@ -176,6 +179,80 @@ def test_a_gate_off_sheet_proposes_no_park_buy(db, migrated):
     assert not [o for o in s["orders"] if o["action"] == "buy"], "no buys of any kind while OFF"
     assert "SPY.US" not in [o["ticker"] for o in s["orders"]], "the park: neither bought nor drawn"
     assert sorted(o["ticker"] for o in s["orders"]) == ["N00.US", "N01.US"]
+
+
+def test_a_benchmark_missing_from_the_newest_session_proposes_nothing(db, migrated):
+    """Zak, 2026-10-07 (R1): "if the gate cannot be evaluated on fresh data (SPY missing from the
+    newest session's tape, or the tape older than §5.6's 4-day constant) it is unevaluated: the
+    sheet proposes nothing new, buys are held, and the brief names the stale bar".
+
+    Before it, `load` took its calendar from SPY's own bars, so a SPY bar missing from tonight's
+    tape quietly re-scored LAST night's session — its orders proposed again as tonight's, the
+    names' newest prints dropped (QC A39). Here the names print the last session and SPY does not,
+    with a rank exit and free slots that would otherwise trade."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N00.US", "N01.US", "N15.US"), cash=200_000.0)
+        cur.execute("delete from prices where ticker = 'SPY.US' and d = %s", (days[-1],))
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    assert s["orders"] == [], "nothing new — no exit re-proposed, no buy"
+    assert s["stale"]["index_bar"] == str(days[-2]) and s["stale"]["tape_bar"] == str(days[-1])
+    assert len(s["hold"]) == 1
+    assert f"newest bar is {days[-2]}" in s["hold"][0] and f"printed {days[-1]}" in s["hold"][0]
+    assert "missing from the newest session's tape" in s["hold"][0]
+    text = desk.render(s)
+    assert "unevaluated on fresh data" in text and "nothing new is proposed" in text
+
+
+def test_a_stale_gate_never_sells_the_book(db, migrated):
+    """R1's last clause: "a data outage alone never sells the book". The benchmark has rolled over
+    and its newest bar reads the gate OFF — but that bar is a session behind the names, so the gate
+    is unevaluated and no gate-off sheet is written on it. (The OFF it reached on fresh data was
+    that session's own sheet, which stands.)"""
+    with db.cursor() as cur:
+        days = _world(cur, rising=False, held=("N00.US", "N01.US"))
+        cur.execute("delete from prices where ticker = 'SPY.US' and d = %s", (days[-1],))
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    assert s["gate"] == "OFF", "the stale series says OFF"
+    assert not [o for o in s["orders"] if o["clause"] == "gate_off"], "and sells nothing on it"
+    assert s["stale"] is not None
+
+
+def test_a_tape_older_than_the_four_day_constant_proposes_nothing(db, migrated):
+    """R1's other half: "the tape older than §5.6's 4-day constant". Five days after the newest bar
+    the gate is unevaluated and nothing is proposed; four days is one long weekend (§5.6), and the
+    sheet stands."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",), cash=200_000.0)
+    db.commit()
+    with db.cursor() as cur:
+        late = desk.sheet(cur, days[-1] + dt.timedelta(days=5), 200_000.0)
+        weekend = desk.sheet(cur, days[-1] + dt.timedelta(days=4), 200_000.0)
+    assert late["orders"] == [] and late["stale"]["age_days"] == 5
+    assert "older than §5.6's 4" in late["hold"][0]
+    assert weekend["stale"] is None and weekend["orders"], "four days is one long weekend"
+
+
+def test_a_holiday_print_by_a_name_the_engine_never_ranks_is_not_a_session(db, migrated):
+    """Why R1 asks the names the engine RANKS and not every stock row. The vendor ships thin files
+    for US market holidays — the store holds stock bars dated 2026-05-25, 06-19, 07-03 and 09-07
+    from OTC lines and dead tickers no live session ever ranked — so the whole store's newest bar
+    names each holiday as the newest session, and would hold every buy on the morning after it."""
+    with db.cursor() as cur:
+        days = _world(cur, cash=200_000.0)
+        holiday = days[-1] + dt.timedelta(days=1)
+        cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                       values ('OTCY.US','OTCY','stock','USD','active')""")
+        cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                       values ('OTCY.US',%s,16.5,16.6,16.4,16.58,16.58,78782)""", (holiday,))
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, holiday, 200_000.0)
+    assert not s.get("stale") and not s.get("hold") and s["session"] == days[-1]
+    assert len([o for o in s["orders"] if o["action"] == "buy"]) == 5
 
 
 def test_a_holding_that_left_the_universe_sells_at_its_decision_close(db, migrated):

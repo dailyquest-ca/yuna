@@ -554,6 +554,13 @@ PRICE_CRITICAL = ("ingest-daily", "nightly-ingest", "nightly-retry") + VERBS["sc
 # now the drift that gets named and ignored. Operating constant of record (§5.6, 2026-09-13).
 LATE_MINUTES_FLOOR = 30
 
+# Operating constant of record (§5.6, 2026-09-13): "bars older than **4 days** hold buys (one long
+# weekend, measured in UTC)". `freshness` applies it to the stock bars; `desk.gate_unevaluable`
+# applies it to §3.4's own series, because a gate read off a tape that old is not evaluated on fresh
+# data (Zak, 2026-10-07). One number with two readers — `freshness`'s `stale_days` default must stay
+# equal to it, and `tests/test_v11_sizing.py` holds them together.
+STALE_DAYS = 4
+
 
 def late_minutes(detail):
     """Minutes past slot recorded on a runs row, or None. Reads both shapes: `late_minutes` as

@@ -24,7 +24,7 @@ import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import bars                                                               # noqa: E402
 import engine                                                             # noqa: E402
-from db import cash_by_account, connect                                    # noqa: E402
+from db import STALE_DAYS, cash_by_account, connect                        # noqa: E402
 
 # §3.2: the universe is `.US` common stocks from `universe`, minus `universe_excluded`, minus
 # delisted. Every clause of that sentence is in the query below and none of it is inferred.
@@ -261,6 +261,15 @@ def sheet(cur, as_of, nav):
     when the store cannot state it the buys are written unsized and the sheet says why. The
     arithmetic and its inputs ride out in `sizing`, which `score` attests and §4.4's sheet gauge
     re-derives.
+
+    A hold Zak ruled on 2026-10-07, ahead of the plan's text:
+
+      R1  §3.4's gate cannot be evaluated on fresh data (`gate_unevaluable`). Nothing new is
+          proposed — no buy, and no gate-off sell either: "a data outage alone never sells the
+          book".
+
+    It arrives as a sentence in `hold`, and `score` makes a hold its amber: a price-critical amber
+    holds the buys (§4.3), and nothing holds the exits.
     """
     sessions, tickers, adj, raw, dv, index_px = load(cur, as_of)
     i = len(sessions) - 1
@@ -288,6 +297,11 @@ def sheet(cur, as_of, nav):
         vol = float(np.nanstd(rets))
         base = float(adj[i - engine.SKIP, j] / adj[i - engine.FORMATION, j] - 1.0)
         scores[tickers[j]] = base / vol if vol > 0 else None
+
+    # R1, Zak 2026-10-07: a gate read off stale bars is unevaluated, and an unevaluated gate
+    # proposes nothing — see `gate_unevaluable` for what "fresh" is measured against.
+    stale = gate_unevaluable(cur, as_of, sessions[i], [tickers[j] for j in ranked])
+    hold = [stale["why"]] if stale else []
 
     book = held_book(cur)
     # The park comes out of the ranked book before anything else looks at it. It is engine capital
@@ -319,7 +333,10 @@ def sheet(cur, as_of, nav):
     def twin_of(a, b):
         return bars.same_security(_ret(a), _ret(b))
 
-    sells, buys = engine.orders(ranked, held_cols, gate_on=gate_on, twin_of=twin_of)
+    if stale:
+        sells, buys, unranked = [], [], []
+    else:
+        sells, buys = engine.orders(ranked, held_cols, gate_on=gate_on, twin_of=twin_of)
     sell_tk = [tickers[j] for j in sells] + unranked
 
     orders = []
@@ -398,7 +415,7 @@ def sheet(cur, as_of, nav):
     # topped up." So it is reported here and ordered nowhere. A name the sheet is selling tonight is
     # not reported: its slot is being vacated, not held short (A25's shape on the sheet).
     underweight = []
-    if nav:
+    if nav and not stale:
         for tk in sorted(held):
             if tk not in rank_of or tk in sell_tk:
                 continue
@@ -418,7 +435,7 @@ def sheet(cur, as_of, nav):
                 marked_equity=equity, unpriced=unpriced, underweight=underweight,
                 parked=sorted(parked), parked_qty=parked, phase0_done=phase0_done,
                 held=sorted(held), unranked=unranked,
-                sizing=sizing, held_below=held_below,
+                hold=hold, stale=stale, sizing=sizing, held_below=held_below,
                 top=[tickers[j] for j in ranked[:engine.FILL_BAND]], orders=orders,
                 ranks=[dict(ticker=tickers[j], rank=r, score=scores.get(tickers[j]),
                             mark=float(raw[i, j]) if np.isfinite(raw[i, j]) else None,
@@ -441,6 +458,58 @@ def decision_close(cur, ticker, session, tape_close=None):
         tape_close = row[0] if row and row[0] is not None else float("nan")
     px = float(tape_close)
     return px if np.isfinite(px) and px > 0 else None
+
+
+def gate_unevaluable(cur, as_of, session, pool):
+    """Can §3.4's gate be evaluated on fresh data tonight? None when it can; when it cannot, a dict
+    whose `why` names the benchmark's bar and the tape's.
+
+    §3.4 says a gate that cannot be evaluated on fresh data "reads OFF", and OFF sells the book.
+    Zak ruled how that clause runs on 2026-10-07 (R1): "if the gate cannot be evaluated on fresh
+    data (SPY missing from the newest session's tape, or the tape older than §5.6's 4-day constant)
+    it is unevaluated: the sheet proposes nothing new, buys are held, and the brief names the stale
+    bar; a data outage alone never sells the book." Before it, nothing here asked: `load` takes its
+    calendar from SPY's own bars, so a missing SPY bar silently re-scored the session before and a
+    dead tape re-scored its last good one, gate and all (QC A39).
+
+    The two tests, both measured from `as_of` — the session asked about, today in production:
+
+      * SPY missing from the newest session: the names the engine RANKS tonight (`pool`, §3.2's
+        survivors) printed a session SPY did not. That is db.data_date's question — the newest
+        stock bar — asked of the names that decide the sheet rather than of every stock row, and
+        the narrowing is not cosmetic: the vendor ships thin files for US market holidays, and
+        the store holds stock bars dated 2026-05-25, 06-19, 07-03 and 09-07 (the 311-row Labor Day
+        file of QC A47) from OTC lines and dead tickers no live session ever ranked. Asked of the
+        whole store, the question names each holiday as the newest session and holds every buy
+        on the morning after it. The liquid names §3.2 admits print exactly when the exchange
+        does.
+      * The tape older than §5.6's constant: the benchmark's newest bar more than `STALE_DAYS`
+        days before `as_of`.
+
+    Each name in the pool costs one index probe on (ticker, d), backwards from `as_of`.
+    """
+    tape = None
+    if pool:
+        cur.execute("""select max(newest.d) from unnest(%s::text[]) as p(ticker)
+                       cross join lateral (select x.d from prices x
+                                            where x.ticker = p.ticker and x.d <= %s
+                                            order by x.d desc limit 1) newest""",
+                    (list(pool), as_of))
+        tape = cur.fetchone()[0]
+    src, why = engine.REGIME_SOURCE, []
+    if tape is not None and tape > session:
+        why.append(f"{src}'s newest bar is {session}, but the names the engine ranks printed {tape}"
+                   f" — {src} is missing from the newest session's tape")
+    age = (as_of - session).days
+    if age > STALE_DAYS:
+        why.append(f"{src}'s newest bar, {session}, is {age} days before {as_of} — older than"
+                   f" §5.6's {STALE_DAYS}")
+    if not why:
+        return None
+    return dict(why="the gate cannot be evaluated on fresh data: " + "; ".join(why)
+                    + ". Nothing new is proposed and the buys are held; a data outage alone never"
+                      " sells the book (§3.4; Zak, 2026-10-07)",
+                index_bar=str(session), tape_bar=str(tape) if tape else None, age_days=age)
 
 
 def engine_cash(cur, as_of):
@@ -584,8 +653,16 @@ def render(s):
     else:
         nav = ("NAV **unknown — buys unsized**"
                + (f" — {src['why']}" if src.get("why") else ""))
-    out = [f"### engine · session {s['session']} · gate {s['gate']}", "",
+    stale = s.get("stale")
+    gate = s["gate"] + (" — **unevaluated on fresh data**" if stale else "")
+    out = [f"### engine · session {s['session']} · gate {gate}", "",
            f"universe {s['universe']} · ranked {s['ranked']} · {nav}", ""]
+    if s.get("hold"):
+        # Above everything it governs, the way the brief puts a freeze above the freshness line.
+        out.append("**HOLD — buys held" + ("; nothing new proposed" if stale else "")
+                   + "; nothing holds an exit**")
+        out += [f"  · {h}" for h in s["hold"]]
+        out.append("")
     out.append("top 12: " + ", ".join(f"{t}" for t in s["top"]))
     out.append("held:   " + (", ".join(s["held"]) if s["held"] else "(nothing)"))
     if s.get("parked"):
@@ -607,7 +684,9 @@ def render(s):
                      f" {sz['slot']:,.2f} slot")
     out.append("")
     if not s["orders"]:
-        out.append("**no orders tonight** — the book already matches the rank")
+        out.append("**no orders** — the gate could not be evaluated on fresh data, so nothing new"
+                   " is proposed" if stale else
+                   "**no orders tonight** — the book already matches the rank")
     for o in s["orders"]:
         if o["action"] == "sell":
             out.append(f"  SELL {o['ticker']:<10} qty {o['qty'] or 0:>10,.4g}   "

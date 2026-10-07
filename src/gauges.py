@@ -288,6 +288,23 @@ def _sheet_without_tickets(stored):
                   sells=detail.get("sells"), buys=detail.get("buys"))
 
 
+def _score_hold(cur, stored):
+    """The holds tonight's `score` declared — Zak's 2026-10-07 R1 (a gate that cannot be evaluated
+    on fresh data), worded by the desk.
+
+    Read from the newest `score` run of this mode rather than from the stored session, because R1
+    writes no session at all: its whole point is that nothing new is proposed, so the newest
+    session on record is the last one decided on fresh data, and the only place the hold is
+    written down is the run that declared it. Dry runs are not facts (learning 67).
+    """
+    cur.execute("""select detail from runs
+                    where job = 'score' and not dry_run
+                      and coalesce(detail->>'mode', 'live') = %s
+                    order by id desc limit 1""", (stored.get("mode") or "live",))
+    row = cur.fetchone()
+    return ((row[0] if row else None) or {}).get("hold") or []
+
+
 def sheet_arithmetic(cur, stored):
     """Every ticket on the newest sheet, re-derived: does its quantity follow from §3.5?
 
@@ -310,21 +327,26 @@ def sheet_arithmetic(cur, stored):
     A sizing error is RED. A quantity that does not follow from the plan's arithmetic is the single
     most expensive class of defect this repository can produce, because it does not throw.
 
-    And one thing it reports rather than checks, as an amber that holds nothing by itself (§4.3:
-    the check suite's own amber warns): a buy the cash could not reach, which is no ticket and so
-    appears on no sheet. The brief prints the check's reasons, and v1.1 says a shortfall "is
-    reported".
+    And two things it reports rather than checks, as an amber that holds nothing by itself (§4.3:
+    the check suite's own amber warns): a hold `score` declared (`_score_hold`) — the hold proper
+    is `score`'s amber, which the freshness gauge turns into held buys — and a buy the cash could
+    not reach, which is no ticket and so appears on no sheet. The brief prints the check's reasons
+    and nothing of `score`'s, and both are things Zak is to be told: his ruling is that the brief
+    names the stale bar, and v1.1's that a shortfall "is reported".
     """
     g = _sheet_verdict(cur, stored)
+    hold = _score_hold(cur, stored)
     short = (stored.get("detail") or {}).get("held_below") or []
     said = []
+    if hold:
+        said.append("score held the buys — " + "; ".join(hold))
     if short:
         said.append(f"{len(short)} buy(s) held below weight, no ticket (§3.5, v1.1): "
                     + "; ".join(f"{h['ticker']} — {h['why']}" for h in short))
     if not said:
         return g
     said = " · ".join(said)
-    return dict(g, status="red" if g["status"] == "red" else "amber",
+    return dict(g, status="red" if g["status"] == "red" else "amber", held=hold,
                 held_below=[h["ticker"] for h in short],
                 why=said if g["status"] == "green" else f"{g['why']} · {said}")
 

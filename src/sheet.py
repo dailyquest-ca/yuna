@@ -27,7 +27,9 @@ already forbids new buy tickets under amber.
 
 On cash. Since v1.1 (2026-10-06) a buy is "the lesser of slot weight and deployable TFSA cash", so
 NAV alone sizes nothing: the desk reads the cash from the store whatever the NAV's source, and when
-the store cannot state it the buys are written unsized under the same amber.
+the store cannot state it the buys are written unsized under the same amber. A hold Zak ruled on
+2026-10-07 goes amber too — a gate that cannot be evaluated on fresh data, on which nothing is
+written at all (`desk.sheet`).
 """
 import datetime as dt
 import json
@@ -118,7 +120,9 @@ def write_session(cur, s, mode, digest):
                      # from what the desk actually used rather than from NAV ÷ 5 alone.
                      "sizing": s.get("sizing"),
                      "held_below": [dict(ticker=h["ticker"], rank=h.get("rank"), why=h["why"])
-                                    for h in s.get("held_below") or []]},
+                                    for h in s.get("held_below") or []],
+                     # Zak's 2026-10-07 hold, the reason score went amber.
+                     "hold": s.get("hold") or []},
                     default=str)))
     return cur.fetchone()[0]
 
@@ -250,9 +254,18 @@ def main():
                              param_digest=digest, top=s["top"],
                              sells=[o["ticker"] for o in s["orders"] if o["action"] == "sell"],
                              buys=[o["ticker"] for o in s["orders"] if o["action"] == "buy"],
-                             sizing=s.get("sizing"))
+                             sizing=s.get("sizing"), hold=s.get("hold") or [])
             if dry():
                 hb.detail["skipped"] = "computed, wrote nothing (DRY_RUN)"
+            elif s.get("stale"):
+                # R1 (Zak, 2026-10-07): an unevaluated gate proposes nothing new, so nothing is
+                # written — no session, no ranks, no ticket — and the sheet in force stays the last
+                # one decided on fresh data, its exits standing. Writing here would do harm either
+                # way: re-scoring the same close (SPY's newest bar) overwrites the record of what
+                # was decided on it, and an empty sheet withdraws the exits it proposed.
+                hb.detail["skipped"] = ("the gate could not be evaluated on fresh data — no "
+                                        "session, rank or ticket written; the sheet in force "
+                                        "stands")
             else:
                 write_session(cur, s, mode, digest)
                 ranks = write_ranks(cur, s, mode)
@@ -267,6 +280,11 @@ def main():
                 hb.detail.update(frozen=True, freeze_words=words,
                                  frozen_at=str(froze_at) if froze_at else None,
                                  frozen_buys=s.get("frozen_buys", []))
+            for why in s.get("hold") or []:
+                # Zak's 2026-10-07 hold (R1), worded by the desk. Amber even under a freeze: a gate
+                # read off stale bars is a fault in the data, not a state Zak chose, and the amber
+                # is what holds the buys (§4.3).
+                hb.amber(why)
             if nav is None and not frozen:
                 # `score` goes amber, and a price-critical amber holds the buys through the
                 # freshness rule (§4.3 as amended 2026-09-14, §4.4). The rows exist and are unsized, the sells
