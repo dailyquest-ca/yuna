@@ -216,8 +216,8 @@ def test_the_nav_is_derived_from_the_engines_own_book_and_cash(db, migrated):
     """Zak, 2026-08-19: "You have the balances of all the accounts... You know the NAV."
 
     engine NAV = TFSA marked equity (every position at its last close, park included) + TFSA cash,
-    CAD converted at the session's USDCAD. Every input has provenance in the store — §2.0's
-    "balances are truth, prices are the extrapolation" as one number.
+    CAD converted at the session's USDCAD. Every input has provenance in the store — the retired
+    plan's "balances are truth, prices are the extrapolation" (§2.0, not in v1.0) as one number.
     """
     with db.cursor() as cur:
         days = _world(cur)

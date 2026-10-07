@@ -53,7 +53,8 @@ def engine_nav(cur, as_of=None):
       derived  `desk.derived_engine_nav` — the store's own arithmetic: TFSA marked equity (park
                included) + TFSA cash, CAD converted at the session's USDCAD. Zak, 2026-08-19:
                *"You know the NAV."* He is right — post-059 the book is right by construction and
-               §2.0's doctrine (balances are truth, prices are the extrapolation) IS this formula.
+               the retired plan's §2.0 doctrine (balances are truth, prices are the extrapolation),
+               which v1.0 does not carry, IS this formula.
 
     Household NAV is still deliberately not a source: `nav_snapshots.nav_cad` is every account in
     CAD, wrong for a USD sleeve by both the FX rate and the other two accounts.

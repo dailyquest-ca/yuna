@@ -171,15 +171,19 @@ Since 2026-08-19 the pipeline derives engine NAV itself: TFSA marked equity (par
 cash, CAD at the session's USDCAD. A session never computes it (§0.4) and never needs to pass it.
 `config.engine_nav` still works and OUTRANKS the derivation — writing it is a ruling, so only do it
 when Zak states a number in so many words, and prefer telling him the derived figure already on the
-sheet. Keeping the cash anchors current (below) is what keeps the derived number honest.
+sheet. Keeping the cash anchors current (below) is what keeps the derived number honest — and no
+clause says who keeps them current or how often: v1.0 defines neither engine NAV nor an anchor duty,
+so an anchor moves only when Zak states his cash. That gap is a §0.3 amendment waiting on Zak, not
+something a session fills by habit.
 
 ### Zak says how much cash he has
 
 > *"…or the current dollar availability etc."*
 
-That is not a trade and does not belong in `transactions`. §2.0: **balances are truth, prices are the
-extrapolation.** `balances` is an append ledger read latest-wins per account, and it is
-session-writable — a new row is a new reading, never an edit of the old one:
+That is not a trade and does not belong in `transactions`. **Balances are truth, prices are the
+extrapolation** — the retired plan's §2.0, which v1.0 does not carry; the derived NAV above stands
+on it by Zak's 2026-08-19 ruling. `balances` is an append ledger read latest-wins per account, and
+it is session-writable — a new row is a new reading, never an edit of the old one:
 
 ```sql
 insert into balances (account, as_of, cash_cad, cash_usd, source)

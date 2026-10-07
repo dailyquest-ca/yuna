@@ -593,8 +593,8 @@ law is `yuna_plan.md`. The build order is `roadmap-2026-08-16.md`.
     book right by construction and made three other sums quietly wrong, because every one of them
     had been written when every row counted. The dangerous one was `db.cash_by_account`: a stated
     buy and the broker row correcting it would both leave the account, so one purchase is paid for
-    twice, the account reads poorer than it is, and §2.0 refuses a ticket for want of cash that is
-    there. Exactly the 2026-08-05 defect this function was written to fix, with the sign flipped.
+    twice, the account reads poorer than it is, and the engine NAV every buy is sized from reads low
+    with it. Exactly the 2026-08-05 defect this function was written to fix, with the sign flipped.
     **When you add a filter to one query, grep for every other query over the same table** — and
     say out loud which ones you deliberately left alone and why (`max(trade_date)` does not move
     when a row is superseded; `not exists (... ticket_id)` is still true afterwards).
