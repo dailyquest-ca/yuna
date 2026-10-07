@@ -189,10 +189,11 @@ def tape_already_landed(cur, as_of, hours=12):
                     where r.job = %s and not r.dry_run and coalesce(r.rows_written, 0) > 0
                       and r.detail->'tape'->>'as_of' = %s
                       and r.started_at > now() - (%s * interval '1 hour')
-                      and not exists (select 1 from runs e
-                                       where e.job = r.job and not e.dry_run and e.id < r.id
-                                         and coalesce(e.rows_written, 0) > 0
-                                         and e.detail->'tape'->>'as_of' = r.detail->'tape'->>'as_of')
+                      and not exists (
+                            select 1 from runs e
+                             where e.job = r.job and not e.dry_run and e.id < r.id
+                               and coalesce(e.rows_written, 0) > 0
+                               and e.detail->'tape'->>'as_of' = r.detail->'tape'->>'as_of')
                     order by r.id desc limit 1""", (JOB, str(as_of), hours))
     row = cur.fetchone()
     return row[0] if row else None
@@ -845,7 +846,8 @@ def main():
             # Every re-pull the night owes, written down before the first one is tried and struck
             # off as each lands: the heartbeat records this dict even if the run dies part-way, so
             # the next night inherits exactly what was left (`deferred_repulls`).
-            owing = {t: "not reached" for t, why, _ in repairs if why.startswith("corporate action")}
+            owing = {t: "not reached"
+                     for t, why, _ in repairs if why.startswith("corporate action")}
             owing.update({t: f"past the night's cap of {REPAIR_CAP}"
                           for t, why, _ in skipped if why.startswith("corporate action")})
             hb.detail["repull_deferred"] = owing
@@ -937,19 +939,19 @@ def main():
                 hb.amber(f"{len(unjudged)} split ledger(s) could not be read — a missed split on "
                          f"{', '.join(sorted(unjudged))} cannot be ruled out tonight")
             if uncarried:
-                hb.amber(f"the vendor lists a split its own adjusted history does not carry, so the "
-                         f"re-pull left it unapplied: {', '.join(uncarried)} — a vendor data defect "
-                         f"(§3.2's exclusion table is where one is quarantined)")
+                hb.amber(f"the vendor lists a split its own adjusted history does not carry, so "
+                         f"the re-pull left it unapplied: {', '.join(uncarried)} — a vendor data "
+                         f"defect (§3.2's exclusion table is where one is quarantined)")
             if refused:
                 # Holds buys for the night (§4.3, a price-critical amber), as a failed pull does:
                 # the name's adjusted history is not on the basis tonight's action says it should
                 # be. Re-queued; if it is the STORE that is corrupt, only a hand re-pull mends it.
-                hb.amber(f"{len(refused)} corporate-action re-pull(s) refused — the vendor's reply "
-                         f"contradicted the raw closes already stored, so the stored rows were kept "
-                         f"and re-queued for the next night: {', '.join(sorted(refused))} "
-                         f"(repull_refused has the counts). If the stored rows are the corrupt "
-                         f"side, re-pull by hand with `backfill` (what=bars, tickers=<name>, years "
-                         f"reaching its first bar)")
+                hb.amber(f"{len(refused)} corporate-action re-pull(s) refused — the vendor's "
+                         f"reply contradicted the raw closes already stored, so the stored rows "
+                         f"were kept and re-queued for the next night: "
+                         f"{', '.join(sorted(refused))} (repull_refused has the counts). If the "
+                         f"stored rows are the corrupt side, re-pull by hand with `backfill` "
+                         f"(what=bars, tickers=<name>, years reaching its first bar)")
             if skipped:
                 # never a silent cap — §4.1's budget is real, so the brief has to hear about it
                 hb.amber(f"{len(skipped)} repair(s) deferred past tonight's cap of {REPAIR_CAP}")

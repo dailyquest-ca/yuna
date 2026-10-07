@@ -22,7 +22,7 @@ def test_the_vendors_own_rounding_is_not_a_disagreement():
 
 
 def test_a_different_print_is_a_disagreement():
-    assert not ingest.same_close(783.22, 391.61), "IESC.US 2025-10-01: run 593 stored twice the price"
+    assert not ingest.same_close(783.22, 391.61), "IESC.US 2025-10-01: stored at twice the price"
     assert not ingest.same_close(0.504, 2.52), "TOP.US 2026-07-16: stored at a fifth of the price"
     assert not ingest.same_close(82.4, 83.9), "CTVA.US 2026-08-28: a frozen copy of the day before"
     assert not ingest.same_close(1226.52, 744.54), "IESC.US 2026-07-31: frozen against a real print"

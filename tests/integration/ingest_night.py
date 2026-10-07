@@ -32,14 +32,19 @@ def bar(date, close, adj=None, volume=1_000_000, code=None):
     return b
 
 
+def tape(n, **closes):
+    """The vendor's newest day, `n` days back, one bar per code: tape(0, SPY=602.0, XYZ=51.0)."""
+    return [bar(day(n), close, code=code) for code, close in closes.items()]
+
+
 class Vendor:
     """Answers the nightly's calls from the world a test states, and remembers every question."""
 
     def __init__(self):
-        self.tape = []                                    # the newest day, every name
-        self.bulk = {"splits": [], "dividends": []}       # that day's corporate-action files
-        self.history = {}                                 # ticker -> bars, served by eod/{ticker}
-        self.ledger = {}                                  # ticker -> splits, served by splits/{ticker}
+        self.tape = []                                # the newest day, every name
+        self.bulk = {"splits": [], "dividends": []}   # that day's corporate-action files
+        self.history = {}                             # ticker -> bars, served by eod/{ticker}
+        self.ledger = {}                              # ticker -> splits, served by splits/{ticker}
         self.asked = []
 
     def __call__(self, path, calls, **params):

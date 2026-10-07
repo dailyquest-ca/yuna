@@ -82,7 +82,7 @@ def _held_back_world(db):
         for tk, px in (("SPY.US", 600.0), ("AAA.US", 50.0)):
             night.store(cur, tk, [night.bar(night.day(2), px), night.bar(night.day(1), px + 1)])
     v = night.Vendor()
-    v.tape = [night.bar(night.day(1), 601.0, code="SPY"), night.bar(night.day(1), 51.0, code="AAA")]
+    v.tape = night.tape(1, SPY=601.0, AAA=51.0)
     return v
 
 
@@ -125,7 +125,8 @@ def test_a_firing_or_dispatch_that_first_landed_tonights_tape_still_lets_the_ret
         first = _ledger(cur, started="1 hour", as_of=night.day(1), scheduled=True)
         assert ingest.night_already_green(cur, run_id=-1) == first
     run, raised = night.night(db, monkeypatch, vendor, retry=True)
-    assert raised is None and run["status"] == "green" and "already green" in run["detail"]["skipped"]
+    assert raised is None and run["status"] == "green"
+    assert "already green" in run["detail"]["skipped"]
     assert vendor.asked == [], "an exit fetches nothing"
 
     with db.cursor() as cur:
@@ -145,8 +146,7 @@ def test_a_firing_or_dispatch_that_first_landed_tonights_tape_still_lets_the_ret
 # not a session: a first firing waits on it, the retry fails red, a hand dispatch refuses it.
 
 def _labor_day(vendor):
-    vendor.tape = [night.bar(night.day(0), 3.10, code="JUNK"),
-                   night.bar(night.day(0), 52.0, code="AAA")]
+    vendor.tape = night.tape(0, JUNK=3.10, AAA=52.0)
     return vendor
 
 
@@ -156,9 +156,10 @@ def test_a_first_firing_waits_on_a_file_with_no_spy_and_the_retry_lands_the_real
     run, raised = night.night(db, monkeypatch, vendor)
     assert raised is None and run["status"] == "green"
     assert "carries no SPY.US bar" in run["detail"]["awaiting_vendor"]
-    assert night.day(0) not in night.closes(db, "AAA.US"), "a file that is not a session lands nothing"
+    assert night.day(0) not in night.closes(db, "AAA.US"), (
+        "a file that is not a session lands nothing")
 
-    vendor.tape.append(night.bar(night.day(0), 603.0, code="SPY"))   # the vendor posts the session
+    vendor.tape += night.tape(0, SPY=603.0)                     # the vendor posts the session
     run, raised = night.night(db, monkeypatch, vendor, retry=True)
     assert raised is None and run["status"] == "green"
     assert night.closes(db, "AAA.US")[night.day(0)][0] == 52.0

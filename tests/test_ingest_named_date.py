@@ -47,7 +47,7 @@ def test_no_date_asks_for_the_newest_day_exactly_as_before(monkeypatch):
 
 def test_an_answer_that_is_not_a_list_is_an_error_not_an_empty_file(monkeypatch):
     """A4: a splits file read as `[]` whatever came back is a night with no splits that nobody can
-    tell from a night the feed was broken. The vendor's empty answer is `[]`; anything else halts."""
+    tell from a night the feed was broken. The vendor's empty answer is `[]`; all else halts."""
     monkeypatch.setattr(ingest, "get", lambda path, calls, **params: {"error": "plan"})
     with pytest.raises(RuntimeError, match="type=splits answered dict"):
         ingest.bulk_day([0], kind="splits")

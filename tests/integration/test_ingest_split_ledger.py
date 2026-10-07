@@ -18,21 +18,24 @@ def _spy(cur):
 
 def _actions(db, ticker):
     with db.cursor() as cur:
-        cur.execute("select d::text, kind, detail from corporate_actions where ticker = %s", (ticker,))
+        cur.execute("select d::text, kind, detail from corporate_actions where ticker = %s",
+                    (ticker,))
         out = cur.fetchall()
     db.commit()
     return out
 
 
-def test_a_held_names_split_the_bulk_file_never_carried_is_applied_the_same_night(db, monkeypatch):
+def test_a_held_names_split_the_bulk_file_never_carried_is_applied_the_same_night(db,
+                                                                                  monkeypatch):
     with db.cursor() as cur:
         _spy(cur)
         night.name(cur, "HELD.US")
-        night.store(cur, "HELD.US", [night.bar(night.day(n), 100.0 + n / 2) for n in range(10, 0, -1)])
+        night.store(cur, "HELD.US",
+                    [night.bar(night.day(n), 100.0 + n / 2) for n in range(10, 0, -1)])
         world.position(cur, "HELD.US", qty=10, cost=100.0, stop=None)
     held = night.closes(db, "HELD.US")
     vendor = night.Vendor()
-    vendor.tape = [night.bar(night.day(0), 602.0, code="SPY"), night.bar(night.day(0), 50.0, code="HELD")]
+    vendor.tape = night.tape(0, SPY=602.0, HELD=50.0)
     vendor.ledger["HELD.US"] = [dict(date=night.day(0), split="2.000000/1.000000")]
     vendor.history["HELD.US"] = ([night.bar(d, c, adj=c / 2) for d, (c, _, _) in held.items()]
                                  + [night.bar(night.day(0), 50.0)])
@@ -64,8 +67,7 @@ def test_a_pool_names_split_posted_late_is_applied_the_first_night_the_ledger_li
                            values (%s, 'live', %s, %s, 1.0)""",
                         [(night.day(2), "POOL.US", 161), (night.day(2), "OLD.US", 5)])
     vendor = night.Vendor()
-    vendor.tape = [night.bar(night.day(1), 601.0, code="SPY"), night.bar(night.day(1), 12.57, code="POOL"),
-                   night.bar(night.day(1), 50.5, code="OLD"), night.bar(night.day(1), 10.1, code="OUT")]
+    vendor.tape = night.tape(1, SPY=601.0, POOL=12.57, OLD=50.5, OUT=10.1)
     vendor.ledger["OLD.US"] = [dict(date=night.day(8), split="2.000000/1.000000")]
     vendor.ledger["OUT.US"] = [dict(date=night.day(1), split="1.000000/10.000000")]
 
@@ -73,20 +75,20 @@ def test_a_pool_names_split_posted_late_is_applied_the_first_night_the_ledger_li
     assert raised is None
     assert night.closes(db, "POOL.US")[night.day(5)][1] == 77.65, "nothing to apply yet"
 
-    vendor.tape = [night.bar(night.day(0), 602.0, code="SPY"), night.bar(night.day(0), 13.0, code="POOL"),
-                   night.bar(night.day(0), 51.0, code="OLD"), night.bar(night.day(0), 10.2, code="OUT")]
+    vendor.tape = night.tape(0, SPY=602.0, POOL=13.0, OLD=51.0, OUT=10.2)
     vendor.ledger["POOL.US"] = [dict(date=night.day(1), split="6665.000000/1000.000000")]
     vendor.history["POOL.US"] = ([night.bar(night.day(n), 77.65, adj=round(77.65 / 6.665, 4))
                                   for n in range(10, 1, -1)]
                                  + [night.bar(night.day(1), 12.57), night.bar(night.day(0), 13.0)])
     run, raised = night.night(db, monkeypatch, vendor)
     assert night.closes(db, "POOL.US")[night.day(5)][1] == round(77.65 / 6.665, 4), (
-        "the first night the vendor lists it, the split is applied — though no bulk file named it")
+        "the first night the vendor lists it, the split is applied, though no bulk file named it")
     assert raised is None and run["status"] == "green", run["detail"].get("amber")
-    assert run["detail"]["split_ledger"]["found"] == {"POOL.US": f"split 6.665:1 on {night.day(1)}"}
+    assert run["detail"]["split_ledger"]["found"] == {
+        "POOL.US": f"split 6.665:1 on {night.day(1)}"}
     assert first["detail"]["split_ledger"] == dict(asked=2, errors={}, found={})
     assert "OUT.US" not in vendor.pulled("splits/"), "outside the pool and the book: never asked"
-    assert "OLD.US" not in vendor.pulled("eod/"), "a split the store already carries costs nothing"
+    assert "OLD.US" not in vendor.pulled("eod/"), "a split the store carries costs nothing"
 
 
 def test_a_ledger_the_store_cannot_read_or_a_split_the_vendor_never_applied_is_named(db,
@@ -99,8 +101,7 @@ def test_a_ledger_the_store_cannot_read_or_a_split_the_vendor_never_applied_is_n
             night.store(cur, tk, [night.bar(night.day(n), 40.0) for n in range(10, 0, -1)])
             world.position(cur, tk, qty=10, cost=40.0, stop=None)
     vendor = night.Vendor()
-    vendor.tape = [night.bar(night.day(0), 602.0, code="SPY"), night.bar(night.day(0), 20.0, code="ODD"),
-                   night.bar(night.day(0), 41.0, code="DARK"), night.bar(night.day(0), 40.5, code="GARBLED")]
+    vendor.tape = night.tape(0, SPY=602.0, ODD=20.0, DARK=41.0, GARBLED=40.5)
     vendor.ledger["GARBLED.US"] = ["2.000000/1.000000"]           # an entry with no date to read
     # ODD.US: the ledger says 2:1 tonight, but the vendor's own history is still unadjusted
     vendor.ledger["ODD.US"] = [dict(date=night.day(0), split="2.000000/1.000000")]
