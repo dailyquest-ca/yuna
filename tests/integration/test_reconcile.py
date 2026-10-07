@@ -18,6 +18,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+import fixtures as world                                                  # noqa: E402
 import reconcile                                                          # noqa: E402
 
 
@@ -397,9 +398,12 @@ def test_a_fill_reported_in_chat_reaches_the_book_with_no_manifest_at_all(db, mi
 
         cur.execute("select qty, status from book where ticker = 'NUE.US'")
         assert cur.fetchone() == (0.0, "closed")
+        # The derived row, by name: the opening `confirm` matches the ticker too, and which of the
+        # two came back first was the planner's choice (an index scan on (ticker, trade_date desc)
+        # returns the sell; a sequential scan returns the confirm).
         cur.execute("""select ticket_id, confirmed, applied_at is not null
-                         from transactions where ticker = 'NUE.US'""")
-        assert cur.fetchone() == (tid, True, True)
+                         from transactions where ticker = 'NUE.US' and side = 'sell'""")
+        assert cur.fetchall() == [(tid, True, True)]
 
 
 def test_the_chat_route_is_idempotent_in_both_halves(db, migrated):
@@ -541,3 +545,131 @@ def test_the_job_folds_chat_receipts_on_a_night_with_no_manifest(db, migrated, t
     with db.cursor() as cur:
         cur.execute("select qty, status from book where ticker = 'NUE.US'")
         assert cur.fetchone() == (0.0, "closed")
+
+
+def _reconcile(migrated, tmp_path):
+    """The job as `pipeline.yml` runs it, on a night with no manifest unless the test writes one."""
+    return subprocess.run([sys.executable, str(ROOT / "src" / "reconcile.py")],
+                          capture_output=True, text=True,
+                          env={"DATABASE_URL": migrated, "DB_SSLMODE": "disable",
+                               "RECONCILE_GLOB": str(tmp_path / "*.json"),
+                               "PATH": "/usr/bin:/bin"})
+
+
+def _newest_run(db):
+    with db.cursor() as cur:
+        cur.execute("""select status, detail from runs where job = 'reconcile'
+                        order by id desc limit 1""")
+        return cur.fetchone()
+
+
+# ---- one receipt the ledger refuses is that receipt's, not the night's (A21) -------------------
+
+def test_a_refused_receipt_is_named_and_every_other_receipt_lands(db, migrated, tmp_path):
+    """QC 2026-10-07, A21. After a 2:1 split the broker shows 200 shares where the book holds 100,
+    Zak sells all 200 — correctly — and the chat records it on the exit ticket. The ledger refuses a
+    sell larger than its history, and it is right to (059). What was wrong is everything else: the
+    whole reconcile rolled back, an unrelated fill reported the same night with it, and it died the
+    same way every night after, red with no name on it ("0 position break(s)").
+
+    Now the refusal is that ticket's alone: the run is red and names the ticker and the ledger's
+    reason, every other receipt lands, and the refused ticket keeps its fill to be tried again —
+    without anything doubling — until the history is repaired.
+    """
+    with db.cursor() as cur:
+        _universe(cur, "N01.US", "N05.US")
+        cur.execute("""insert into transactions (ticker,account,side,qty,price,currency,trade_date,
+                                                 confirmed,confirmed_at,applied_at,grade,source)
+                       values ('N01.US','TFSA','buy',100,50.0,'USD','2026-08-10',true,now(),now(),
+                               'broker','export')""")
+        cur.execute("""insert into tickets (session_date, ticker, account, sleeve, action, clause,
+                                            order_type, qty, state, fill_qty, fill_price, fill_date)
+                       values ('2026-08-14','N01.US','TFSA','momentum','sell','rank_exit','market',
+                               100,'executed',200,30.0,'2026-08-17') returning id""")
+        split_sale = cur.fetchone()[0]
+        other = _filled_ticket(cur, "N05.US", "buy", 10, 20.0)
+    db.commit()
+
+    for night in (1, 2):
+        out = _reconcile(migrated, tmp_path)
+        assert out.returncode == 0, f"night {night}: " + out.stdout + out.stderr
+        assert "REFUSED TFSA N01.US" in out.stdout
+        status, detail = _newest_run(db)
+        assert status == "red", f"night {night}"
+        assert [(r["ticker"], r["ticket"]) for r in detail["refused"]] == [("N01.US", split_sale)]
+        assert "history for this name is incomplete" in detail["refused"][0]["why"]
+        assert "N01.US" in detail["red"][0] and "incomplete" in detail["red"][0]
+        with db.cursor() as cur:
+            cur.execute("""select ticker, qty, status from book
+                            where ticker in ('N01.US','N05.US') order by ticker""")
+            assert cur.fetchall() == [("N01.US", 100.0, "open"), ("N05.US", 10.0, "open")], (
+                f"night {night}: the unrelated fill landed; the refused sale did not")
+            cur.execute("select ticket_id from transactions where ticket_id is not null")
+            assert [r[0] for r in cur.fetchall()] == [other], "one row for the fill that landed"
+
+
+def test_a_receipt_for_a_position_split_across_book_rows_is_refused_alone(db, migrated):
+    """A21 meets A11, where migration 069's index is not: a tranche-three row recorded while VXC.TO
+    sat in one book row, then a second row written beside it before reconcile ran — production's
+    state on any night between 2026-09-28 and 069. Stamping the receipt used to move whichever row
+    came first; the ledger now refuses to choose, a caller with nowhere to report that has it
+    raised, and the job's own call names it while the night's other receipt lands."""
+    with world.book_before_069(db), db.cursor() as cur:
+        cur.execute("set constraints ledger_moves_the_book immediate")   # nothing here commits
+        _universe(cur, "VXC.TO", "N05.US")
+        for qty, px, applied in ((140, 85.45, True), (139, 86.30, True), (10, 87.00, False)):
+            cur.execute("""insert into transactions (ticker,account,side,qty,price,currency,
+                                                     trade_date,confirmed,confirmed_at,applied_at,
+                                                     grade,source)
+                           values ('VXC.TO','NONREG','buy',%s,%s,'CAD','2026-09-22',true,now(),
+                                   case when %s then now() end,'broker','export')""",
+                        (qty, px, applied))
+        cur.execute("""insert into book (ticker,account,sleeve,lot,qty,avg_cost,currency,status)
+                       values ('VXC.TO','NONREG','levered','tranche2',139,86.30,'CAD','open')""")
+        _filled_ticket(cur, "N05.US", "buy", 10, 20.0)
+        assert len(reconcile.derive_ticket_fills(cur)) == 1
+
+        cur.execute("savepoint night")
+        with pytest.raises(psycopg.errors.RaiseException, match=r"NONREG VXC\.TO in 2 open rows"):
+            reconcile.apply_unapplied(cur)
+        cur.execute("rollback to savepoint night")
+
+        refused = []
+        applied = reconcile.apply_unapplied(cur, refused)
+        assert [(r["account"], r["ticker"]) for r in refused] == [("NONREG", "VXC.TO")]
+        assert len(applied) == 1 and "N05.US" in applied[0], "the other receipt landed"
+        cur.execute("""select qty from book where ticker = 'VXC.TO' and status = 'open'
+                        order by id""")
+        assert [r[0] for r in cur.fetchall()] == [289.0, 139.0], "neither row was picked"
+        cur.execute("select ticker from transactions where applied_at is null")
+        assert cur.fetchall() == [("VXC.TO",)], "the refused receipt waits, unstamped"
+
+
+# ---- the witness reads the book the engine reads (A27) -------------------------------------
+
+def test_the_witness_sums_a_position_the_way_the_engine_does(db, migrated):
+    """QC 2026-10-07, A27. `compare_positions` kept one book row per ticker — whichever Postgres
+    returned last — while `desk.held_book` sums every open row. With VXC.TO's two rows (279 + 139)
+    a broker showing the true 279 would most likely have matched the 279 row and attested the
+    account reconciled over a book of 418, or else reported the wrong row with the wrong sign. The
+    witness now reads the summed position, and a position held in two rows is a break even where
+    they add up to the broker's number. (Built where migration 069's index is not, since the index
+    now refuses the second row.)"""
+    import desk
+    with world.book_before_069(db), db.cursor() as cur:
+        cur.execute("set constraints ledger_moves_the_book immediate")   # nothing here commits
+        _universe(cur, "N00.US")
+        cur.execute("""insert into transactions (ticker,account,side,qty,price,currency,trade_date,
+                                                 confirmed,confirmed_at,grade,source)
+                       values ('N00.US','TFSA','buy',279,85.87,'USD','2026-08-17',true,now(),
+                               'broker','export')""")
+        cur.execute("""insert into book (ticker,account,sleeve,lot,qty,avg_cost,currency,status)
+                       values ('N00.US','TFSA','momentum','tranche2',139,86.30,'USD','open')""")
+
+        breaks = reconcile.compare_positions(cur, "TFSA", [dict(ticker="N00.US", qty=279)])
+        assert [(b["ticker"], b["broker"], b["book"]) for b in breaks] == [("N00.US", 279.0, 418.0)]
+        assert breaks[0]["book"] == desk.held_book(cur)["N00.US"], "the book the engine reads"
+        assert "differ from the broker by -139" in breaks[0]["why"]
+
+        agreeing = reconcile.compare_positions(cur, "TFSA", [dict(ticker="N00.US", qty=418)])
+        assert [(b["ticker"], b["open_rows"]) for b in agreeing] == [("N00.US", 2)]

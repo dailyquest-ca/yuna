@@ -42,6 +42,8 @@ import os
 import pathlib
 import sys
 
+import psycopg
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from db import connect, dry, Heartbeat                                     # noqa: E402
 
@@ -52,6 +54,12 @@ DEFAULT_GLOB = str(pathlib.Path(__file__).resolve().parent.parent / "data" / "re
 # them) but no broker reports a position to four decimal places, so anything above this is a
 # genuine disagreement rather than a representation artefact.
 QTY_TOL = 1e-3
+
+
+def refusal(e):
+    """The ledger's own words for a refused receipt: what it refused, and the repair it names."""
+    hint = e.diag.message_hint
+    return e.diag.message_primary + (f" (hint: {hint})" if hint else "")
 
 
 def manifests(pattern=None):
@@ -133,7 +141,7 @@ def apply_to_book(cur, account, ticker):
     cur.execute("select yuna_book_from_ledger(%s, %s)", (account, ticker))
 
 
-def derive_ticket_fills(cur):
+def derive_ticket_fills(cur, refused=None):
     """Tickets carrying a fill but no ledger row -> the `transactions` row they imply.
 
     **This is the step that went missing, and it is the reason chat-reported trades stopped
@@ -147,6 +155,21 @@ def derive_ticket_fills(cur):
 
     Idempotent by the same guard the old pass used: one transaction per ticket, and a ticket that
     already has one is skipped.
+
+    **Each ticket is derived under its own savepoint, and checked there** (A21). The ledger trigger
+    is deferred to COMMIT (059), so an insert proves nothing on its own: a reported sell larger than
+    the ledger's history — the true post-split sale, or a mistyped quantity — used to raise at the
+    first recompute and take the whole night down with it, every unrelated receipt included, and
+    then again every night after. The recompute is now forced inside the savepoint, so a refusal
+    is that ticket's alone: it is rolled back, the ticket keeps its fill for the next night, and the
+    refusal goes into `refused` with the ledger's own words, for the caller to put in the run's red.
+
+    With no `refused` list the refusal is raised, exactly as before — a caller that cannot report
+    it does not get to swallow it.
+
+    Within a day buys are derived before sells. The ledger's rule is the END state (migration 059:
+    the book is what the ledger says at commit), so a sell must not be refused for the one instant
+    before a same-day purchase that covers it has been written.
     """
     cur.execute("""select k.id, k.ticker, k.account, k.action, k.fill_qty, k.fill_price,
                           coalesce(k.currency, 'USD'), k.fill_fx, k.fill_fees,
@@ -156,7 +179,8 @@ def derive_ticket_fills(cur):
                       and k.account is not null
                       and k.state in ('executed', 'confirmed', 'provisional')
                       and not exists (select 1 from transactions t where t.ticket_id = k.id)
-                    order by coalesce(k.fill_date, current_date), k.id""")
+                    order by coalesce(k.fill_date, current_date),
+                             case when k.action = 'sell' then 1 else 0 end, k.id""")
     made = []
     for tid, tk, acct, action, qty, price, ccy, fx, fees, when, state, sleeve in cur.fetchall():
         # Grade `stated` — always, whatever the ticket's state. A ticket fill reaches this table
@@ -170,12 +194,25 @@ def derive_ticket_fills(cur):
         # correctly... **But the engine should run assuming both.**"* The old rule made the book
         # wait for a confirmation that arrives days later, which is the ghost-book failure written
         # down as policy: for those days the engine reasons from a position Zak has already sold.
-        cur.execute("""insert into transactions (ticket_id, ticker, account, side, qty, price,
-                                                 currency, fx_rate, fees, trade_date, confirmed,
-                                                 confirmed_at, grade, source)
-                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,now(),'stated',%s) returning id""",
-                    (tid, tk, acct, "sell" if action == "sell" else "buy", float(qty),
-                     float(price), ccy, fx, float(fees or 0), when, f"ticket {tid} ({state})"))
+        cur.execute("savepoint ticket_fill")
+        try:
+            cur.execute("""insert into transactions (ticket_id, ticker, account, side, qty, price,
+                                                     currency, fx_rate, fees, trade_date,
+                                                     confirmed, confirmed_at, grade, source)
+                           values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,now(),'stated',%s)
+                           returning id""",
+                        (tid, tk, acct, "sell" if action == "sell" else "buy", float(qty),
+                         float(price), ccy, fx, float(fees or 0), when, f"ticket {tid} ({state})"))
+            apply_to_book(cur, acct, tk)
+        except psycopg.errors.RaiseException as e:
+            cur.execute("rollback to savepoint ticket_fill")
+            if refused is None:
+                raise
+            refused.append(dict(account=acct, ticker=tk, ticket=tid,
+                                receipt=f"{action} {float(qty):g} @ {float(price):g} on {when}",
+                                why=refusal(e)))
+            continue
+        cur.execute("release savepoint ticket_fill")
         made.append(f"{action} {float(qty):g} {tk} @ {float(price):g} ({acct}, {when}) — "
                     f"derived from ticket {tid} as `stated`"
                     + ("  (provisional ticket — the export will true the pennies)"
@@ -183,7 +220,7 @@ def derive_ticket_fills(cur):
     return made
 
 
-def apply_unapplied(cur):
+def apply_unapplied(cur, refused=None):
     """Ledger rows nobody has stamped -> stamped, their tickets advanced. Returns [labels].
 
     Since migration 059 this no longer moves the book, because **the book has already moved**: the
@@ -206,6 +243,11 @@ def apply_unapplied(cur):
 
     `applied_at` stays the idempotence stamp for the ticket advance, so a re-run finds nothing and
     advances nothing twice.
+
+    One row at a time, under its own savepoint, for the reason `derive_ticket_fills` gives (A21): a
+    position the ledger refuses to move — a row committed while the trigger was missing, or a
+    position split across book rows wherever migration 069's index is not — keeps its row
+    unstamped and goes into `refused`, and every other receipt still lands.
     """
     cur.execute("""select t.id, t.ticket_id, t.ticker, t.account, t.side, t.qty, t.price,
                           t.trade_date
@@ -218,7 +260,18 @@ def apply_unapplied(cur):
         # Belt and braces: the trigger has already done this, and calling it again costs one query
         # and cannot produce a different answer — it is a recompute, not an increment. If the
         # trigger is ever missing (a database restored from before 059), this is what still holds.
-        apply_to_book(cur, acct, tk)
+        cur.execute("savepoint receipt")
+        try:
+            apply_to_book(cur, acct, tk)
+        except psycopg.errors.RaiseException as e:
+            cur.execute("rollback to savepoint receipt")
+            if refused is None:
+                raise
+            refused.append(dict(account=acct, ticker=tk, ticket=ticket, transaction=txn,
+                                receipt=f"{side} {float(qty):g} @ {float(price):g} on {when}",
+                                why=refusal(e)))
+            continue
+        cur.execute("release savepoint receipt")
         cur.execute("update transactions set applied_at = now() where id = %s", (txn,))
         if ticket is not None:
             # `-> executed` is a fact about the broker and this receipt states it. The advance to
@@ -268,26 +321,44 @@ def compare_positions(cur, account, positions):
     is a position the engine will never sell — it is not in the book, so it is not in `held`, so no
     rank exit can ever queue it. A name the book holds and the broker does not is a phantom the
     engine counts against its five slots, so it blocks a real entry for ever.
+
+    "The book" is what the engine reads: every open row of the (account, ticker), SUMMED, exactly
+    as `desk.held_book` sums them (A27). This used to key one row per ticker, so a position in two
+    open rows compared whichever row Postgres happened to return last — and since the ledger's
+    single-row update moves the full-quantity row to the end of the heap, a broker showing VXC.TO's
+    true 279 would most likely have matched the 279 row, attested the account reconciled, and left
+    the 418 the engine and the brief read unchallenged. A position held in more than one open row
+    is also a break of its own, whatever the sum says: the ledger refuses to move it, and only a
+    direct write to `book` where migration 069's index is not can produce it.
     """
     said = {p["ticker"]: float(p["qty"]) for p in positions}
-    cur.execute("""select ticker, qty, sleeve from book
-                    where account = %s and status = 'open' order by ticker""", (account,))
-    ours = {t: (float(q), s) for t, q, s in cur.fetchall()}
+    cur.execute("""select ticker, sum(qty), min(sleeve), count(*) from book
+                    where account = %s and status = 'open'
+                    group by ticker order by ticker""", (account,))
+    ours = {t: (float(q), s, n) for t, q, s, n in cur.fetchall()}
 
     breaks = []
     for tk in sorted(set(said) | set(ours)):
         broker = said.get(tk)
-        book_qty = ours[tk][0] if tk in ours else None
+        book_qty, sleeve, rows = ours.get(tk, (None, None, 0))
         if broker is not None and book_qty is None:
             breaks.append(dict(ticker=tk, broker=broker, book=None,
                                why="the broker holds it and the book does not — the engine can "
                                    "never queue an exit for a position it cannot see"))
         elif book_qty is not None and broker is None:
-            breaks.append(dict(ticker=tk, broker=None, book=book_qty, sleeve=ours[tk][1],
+            breaks.append(dict(ticker=tk, broker=None, book=book_qty, sleeve=sleeve,
                                why="the book holds it and the broker does not — a phantom "
                                    "position occupies one of §3.5's five slots"))
+        elif rows > 1:
+            off = ("" if abs(broker - book_qty) <= QTY_TOL
+                   else f"; together they differ from the broker by {broker - book_qty:+g} shares")
+            breaks.append(dict(ticker=tk, broker=broker, book=book_qty, sleeve=sleeve,
+                               open_rows=rows,
+                               why=f"the book holds it in {rows} open rows, {book_qty:g} shares "
+                                   f"between them — a position is one row, and the ledger refuses "
+                                   f"to move this one until the stray row is closed{off}"))
         elif abs(broker - book_qty) > QTY_TOL:
-            breaks.append(dict(ticker=tk, broker=broker, book=book_qty, sleeve=ours[tk][1],
+            breaks.append(dict(ticker=tk, broker=broker, book=book_qty, sleeve=sleeve,
                                why=f"quantities differ by {broker - book_qty:+g} shares"))
     return breaks
 
@@ -311,10 +382,18 @@ def close_the_loop(cur, account):
     return [f"{a} {tk} -> ticket {i} reconciled" for i, tk, a in cur.fetchall()]
 
 
+def named(r):
+    """One refused receipt, as the run's red and the log name it: the position, the receipt, and
+    the ledger's own reason with the repair it points at."""
+    by = (f"ticket {r['ticket']}" if r.get("ticket") is not None
+          else f"transaction {r['transaction']}")
+    return f"{r['account']} {r['ticker']} ({by}, {r['receipt']}): {r['why']}"
+
+
 def main():
     docs = manifests()
     with connect() as conn, Heartbeat(conn, "reconcile", dry_run=dry()) as hb:
-        folded, settled, orphans, breaks, closed = [], [], [], [], []
+        folded, settled, orphans, breaks, closed, refused = [], [], [], [], [], []
         with conn.cursor() as cur:
             # The chat route runs FIRST and on manifest-less nights too, because it is the ordinary
             # path: §4.3 makes a session's report of a fill the routine way a receipt enters the
@@ -338,8 +417,14 @@ def main():
                 chat = ([f"{pending_txns} ledger row(s) would fold into the book"]
                         if pending_txns else [])
             else:
-                derived = derive_ticket_fills(cur)
-                chat = apply_unapplied(cur)
+                # A refusal is collected per receipt, not raised (A21): one sell the ledger cannot
+                # take must not hold back every other fill reported that night, and it must not
+                # leave the night's red without a name.
+                derived = derive_ticket_fills(cur, refused)
+                chat = apply_unapplied(cur, refused)
+                # Committed on its own: the ordinary route's receipts are not hostage to a manifest
+                # that dies below.
+                conn.commit()
 
             for name, doc in docs:
                 account = doc.get("account", "TFSA")
@@ -375,7 +460,7 @@ def main():
         hb.rows = len(folded) + len(derived) + len(chat)
         hb.detail.update(manifests=[n for n, _ in docs], folded=folded, settled=settled,
                          orphan_fills=orphans, breaks=breaks, reconciled=closed,
-                         ticket_fills_derived=derived, book_folds=chat)
+                         ticket_fills_derived=derived, book_folds=chat, refused=refused)
         with conn.cursor() as cur:
             cur.execute("select * from v_reconciliation_age")
             cols = [d[0] for d in cur.description]
@@ -384,6 +469,13 @@ def main():
         if orphans:
             hb.amber(f"{len(orphans)} fill(s) with no engine ticket behind them — an engine "
                      f"position nobody proposed is one the engine will not manage")
+        if refused:
+            # Red for the reason a break is red: the receipt Zak reported has not reached the book,
+            # so the book still holds what he no longer does and §3.5 would size against it. §4.4
+            # holds the buys; the refused ticket keeps its fill and is tried again every night
+            # until the history is repaired, and this line says which one and why.
+            hb.red(f"{len(refused)} receipt(s) refused by the ledger — every other receipt "
+                   f"landed: " + "; ".join(named(r) for r in refused))
         if breaks:
             # §4.4: any red holds buys; nothing holds exits. A book that disagrees with the broker
             # cannot be sized against, and every §3.5 decision is a function of what is held.
@@ -391,7 +483,7 @@ def main():
                    + "; ".join(f"{b['ticker']} broker={b['broker']} book={b['book']}"
                                for b in breaks))
 
-        if not docs and not derived and not chat:
+        if not docs and not derived and not chat and not refused:
             # Not a failure. §4.4 gauges the AGE of the last reconciliation, and a night with no
             # export and nothing reported in chat is an ordinary night — the gauge, not this job,
             # is what notices a stale one.
@@ -401,9 +493,11 @@ def main():
 
         print(f"reconcile: {len(derived)} ticket fill(s) derived · {len(chat)} folded into the "
               f"book · {len(folded)} manifest receipt(s) · {len(settled)} ticket(s) executed · "
-              f"{len(closed)} reconciled · {len(breaks)} break(s)")
+              f"{len(closed)} reconciled · {len(refused)} refused · {len(breaks)} break(s)")
         for line in derived + chat + folded + settled + orphans + closed:
             print(f"  {line}")
+        for r in refused:
+            print(f"  REFUSED {named(r)}")
         for b in breaks:
             print(f"  BREAK {b['ticker']:<10} broker={b['broker']} book={b['book']} — {b['why']}")
     return 0
