@@ -249,6 +249,92 @@ def test_the_derivation_fails_closed_on_an_unpriced_position(db, migrated):
         assert nav is None and "DARK.US" in source["why"]
 
 
+def _hold(cur, ticker, qty, closes, *, ccy="USD"):
+    """A TFSA holding outside the ranked tape, carrying exactly the bars given ({date: close})."""
+    cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                   values (%s,%s,'etf',%s,'active') on conflict (ticker) do nothing""",
+                (ticker, ticker, ccy))
+    for d, close in closes.items():
+        cur.execute("""insert into prices (ticker,d,close,adj_close,volume)
+                       values (%s,%s,%s,%s,1000)""", (ticker, d, close, close))
+    if qty:
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values (%s,'TFSA','momentum',%s,10.0,'open')""", (ticker, qty))
+
+
+def test_a_padded_zero_close_is_no_mark_and_the_derivation_names_it(db, migrated):
+    """A15. The vendor pads a delisting tail with 0.0000 (learning 33), and production stores those
+    rows as the last bars of AEL, CONN, HIBB and PACW. A held name marked at 0 is still a number, so
+    it walked past the unpriced fail-closed: NAV silently lost the slot and every buy came out
+    small. A close at or below zero is not a price — the derivation refuses and names it, and the
+    sheet's own marked equity lists it instead of counting it at nothing."""
+    import desk
+    with db.cursor() as cur:
+        days = _world(cur)
+        _engine_world(cur, days)
+        _hold(cur, "GONE.US", 50, {d: 30.0 for d in days[-10:-2]} | {days[-2]: 0.0, days[-1]: 0.0})
+        db.commit()
+        nav, source = sheet.engine_nav(cur, days[-1])
+        assert nav is None
+        assert "GONE.US" in source["why"] and "not a price" in source["why"]
+        s = desk.sheet(cur, days[-1], 200_000.0)
+        assert "GONE.US" in s["unpriced"], "named on the session row, not marked at zero"
+
+
+def test_a_holding_its_exchange_printed_without_is_stale_and_named(db, migrated):
+    """A15. §3.5 sizes at engine NAV ÷ 5 "marked at the decision close". A holding with no bar on
+    the decision session — a halt, a vendor omission, a cash-merged line — has only an older close,
+    and marking it there kept a full slot of NAV at a price nobody could trade, with every gauge
+    green. SPY.US and the rest of `.US` printed the last session and HALT.US did not, so the
+    derivation refuses and says which bar it has and which session it missed.
+
+    The sheet's marked equity still counts HALT.US at its last close. That number is §5.2's
+    drawdown record, where a halt is a data boundary and not a loss."""
+    import desk
+    with db.cursor() as cur:
+        days = _world(cur)
+        _engine_world(cur, days)
+        _hold(cur, "HALT.US", 5, {d: 30.0 for d in days[-10:-2]})       # last bar: days[-3]
+        db.commit()
+        nav, source = sheet.engine_nav(cur, days[-1])
+        assert nav is None
+        why = source["why"]
+        assert "stale TFSA position(s): HALT.US" in why
+        assert str(days[-3]) in why and str(days[-1]) in why
+
+        s = desk.sheet(cur, days[-1], 200_000.0)
+        cur.execute("""select ticker, close from prices
+                        where ticker in ('N00.US','N01.US') and d = %s""", (days[-1],))
+        px = dict(cur.fetchall())
+        assert "HALT.US" not in s["unpriced"]
+        assert s["marked_equity"] == pytest.approx(20 * px["N00.US"] + 10 * px["N01.US"] + 5 * 30.0)
+
+
+def test_a_tsx_holding_is_judged_by_the_tsx_calendar(db, migrated):
+    """A15, and the trap in it. The decision calendar is SPY's, and the TSX keeps holidays the
+    NYSE does not: on 2025-10-13 and 2026-08-03 SPY.US printed and no `.TO` name in the store did.
+    A `.TO` holding with no bar on such a session is on its own exchange's calendar, not stale, so
+    staleness is read off the tape — did another name on the holding's own exchange print it?
+
+    (§2.1 keeps the engine on `.US` names, but `held_book` reads the account, and the rule has to be
+    right for whatever the account holds.)"""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _engine_world(cur, days)
+        tsx_week = {d: 30.0 for d in days[-10:-1]}                       # shut on days[-1]
+        _hold(cur, "XYZ.TO", 5, tsx_week, ccy="CAD")
+        _hold(cur, "PEER.TO", 0, tsx_week, ccy="CAD")
+        db.commit()
+        nav, source = sheet.engine_nav(cur, days[-1])
+        assert nav is not None, f"a TSX holiday is not a stale bar: {source}"
+
+        # The same night with the TSX open: another `.TO` name printed it, and XYZ.TO did not.
+        _hold(cur, "PEER.TO", 0, {days[-1]: 30.5}, ccy="CAD")
+        db.commit()
+        nav, source = sheet.engine_nav(cur, days[-1])
+        assert nav is None and "stale TFSA position(s): XYZ.TO" in source["why"]
+
+
 def test_shadow_and_live_are_separate_records_of_the_same_close(db, migrated):
     """§6.4 runs the pipeline live producing sheets nobody trades. The shadow's answer for a close
     must not overwrite the live answer for that close, or the comparison compares nothing."""
