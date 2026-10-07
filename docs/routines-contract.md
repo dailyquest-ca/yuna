@@ -58,16 +58,75 @@ close is the newest session all weekend, so a brief composed Friday night is *co
 a three-hour window would call it silence. That exact bug was live on 2026-08-17 and is what this
 file exists to stop being repeated in the Routines.
 
-The session is the anchor:
+**The session is the anchor — the session that ought to exist, not two tables agreeing with each
+other.** Until 2026-10-07 this section compared `max(engine_sessions.session_date)` with
+`max(briefs.session_date)` and called them equal "the desk has spoken". Both lag together: on a
+night the chain has not run, both still name the previous session, and the test passes. That is how
+the morning note served 2026-08-25's sheet on 08-27 and 08-26's on 08-28 as that morning's orders,
+when the queue held the night's ingest past the note (learning 58). Nobody traded a wrong order —
+the desk was still in shadow on 08-27, and a person caught 08-28 — but on any night both firings
+are dropped it would re-serve a sheet Zak has already executed.
+
+The expected session is the last trading day before the morning the Routine fires, in New York:
+the close whose sheet executes at that morning's open. Three facts about it, one read:
 
 ```sql
-select (select max(session_date) from engine_sessions where mode = 'live') as newest_session,
+with e as (
+  select d as fire_date,
+         d - case extract(isodow from d)::int
+               when 1 then 3              -- Monday: the Friday before
+               when 7 then 2              -- Sunday: the Friday before
+               else 1 end                 -- any other day: the day before
+           as expected_session
+    from (select (now() at time zone 'America/New_York')::date as d) f
+)
+select e.fire_date, e.expected_session,
+       (select max(session_date) from engine_sessions where mode = 'live') as newest_session,
        (select max(session_date) from briefs
-         where kind = 'nightly' and detail->>'engine' = 'v1') as briefed_session;
+         where kind = 'nightly' and detail->>'engine' = 'v1')            as briefed_session,
+       exists (select 1 from runs
+                where job = 'ingest-daily' and status = 'green' and not dry_run
+                  and not (detail ? 'awaiting_vendor')
+                  and started_at > (e.expected_session + time '16:00')
+                                   at time zone 'America/New_York')       as ingest_landed
+  from e;
 ```
 
-Equal → the desk has spoken for the current session. Different → the chain scored a session it
-never composed, which is worth saying out loud rather than swallowing.
+`ingest_landed` asks for the night's own ingest: a green, non-dry `ingest-daily` that started
+after the expected session's 16:00 New York close, which every slot follows (22:23 UTC on
+weekdays). A first firing that found the vendor not yet published is green and landed nothing
+(`awaiting_vendor`, learning 58), so it does not count; a retry that exits because the night is
+already green does, because it found a firing that landed.
+
+The first row that matches, top to bottom, is the reading:
+
+| reading | when | what the Routine does |
+|---|---|---|
+| **scored, not composed** | `newest_session > briefed_session` | says the chain scored a session it never composed — out loud, not swallowed — and relays **no order** from the older sheet |
+| **not in yet** | `briefed_session < expected_session` | says the sheet for `expected_session` is not in — the night's run never came (`ingest_landed` false) or has not finished (true) — and relays **no order** from the older sheet. The older brief may ride as the attachment, under its own date |
+| **sheet current, night red** | not `ingest_landed` | the sheet is the right session's but the night's ingest is red or missing: FLAT, the order sheet exactly as the body prints it (its banner already holds the buys; exits stand), and §6 names the job |
+| **current** | otherwise | delivers the brief |
+
+`>=`, not `=`: a hand run in the evening, after the chain, sees tonight's session, which is newer
+than the morning's expected one and just as current.
+
+**The calendar is weekends only, on purpose.** This system holds no exchange holiday calendar
+(`db.next_session`, `ingest.tape_already_landed`), and a list typed in here would be a constant
+with no source. So the morning after an NYSE holiday reads *not in yet* though nothing was missed:
+the safe direction. The note says what it sees, never decides the market was shut, and the previous
+session's sheet — the one that still stands — rides as the attachment under its own date. The store
+cannot settle it alone: on Labor Day 2026 the vendor posted a 132-row tape dated 2026-09-07, the
+ingest went green, and the engine's newest session stayed 2026-09-04 because SPY did not print —
+the same shape a real session with a missing SPY bar would leave.
+
+Replayed over the 37 weekday mornings from 2026-08-17 to 10-06 (from `runs`, which keeps the time
+each compose finished): the old test passed all 37; this one passes 33, catches 08-27, 08-28 and
+09-01 (session 08-31 never scored), and reads 09-08 — the morning after Labor Day — as not in yet.
+
+**The Saturday letter** uses the same read with `kind = 'saturday'`: it is current when its session
+is at or after the expected one (Friday's) and equals `newest_session`. Its chain hangs off the
+census, whose red holds nothing (§5.6, 2026-09-13), so it needs no ingest of its own; when it is not
+current, §6 says which job has not run.
 
 ---
 
@@ -277,25 +336,54 @@ that is SPMO in the TFSA and the RRSP, bought with the §6.1 proceeds.
 - **Never suppress the brief because the check is red.** §4.4 holds the *buys*; §5.4 makes exits
   unblockable. The brief already carries `**buys held; exits stand**` at the top when that applies,
   and a red night is exactly the night Zak needs the message.
+- **Never relay an older session's orders as this morning's.** When §3 reads anything but current,
+  no order from the older sheet goes into the note or the push line (§0.4: a stale pipeline means
+  no new tickets). The older brief may still ride as the attachment, named for its own session —
+  which is also how a sheet that still stands, the morning after a market holiday, reaches Zak.
 
 ---
 
 ## 6. Health, in one line
 
+The chain behind the session being delivered — the last trading session's, §3's expected one —
+not a fixed window:
+
 ```sql
-select job, status, finished_at, detail->'amber', detail->'red'
-  from (select distinct on (job) * from runs
-         where started_at > now() - interval '36 hours'
-         order by job, id desc) r
- order by job;
+with e as (
+  select d - case extract(isodow from d)::int when 1 then 3 when 7 then 2 else 1 end
+           as expected_session
+    from (select (now() at time zone 'America/New_York')::date as d) f
+)
+select r.job, r.status, r.finished_at, r.detail->'amber' as amber, r.detail->'red' as red
+  from e, lateral (select distinct on (job) * from runs
+                    where not dry_run
+                      and started_at > (e.expected_session + time '16:00')
+                                       at time zone 'America/New_York'
+                    order by job, id desc) r
+ order by r.job;
 ```
 
-Six jobs on an ordinary night: `reconcile · score · shadow · check · compose · notify`.
+The newest non-dry run of each job since the expected session's close. Seven jobs on an ordinary
+weeknight: `ingest-daily · reconcile · score · shadow · check · compose · notify`. On a Monday it is
+Friday night's chain and Saturday's re-run of it, plus `ingest-universe` and `backup` — the whole
+weekend, which is exactly what the Monday note has to vouch for.
+
+Until 2026-10-07 this read `started_at > now() - interval '36 hours'`. Thirty-six hours is
+`db.freshness`'s constant of record (§5.6, 2026-09-13) and it is right where it lives, at compose
+time, inside the night it describes. Read at a fixed morning hour it is wrong one weekday in five:
+on a Monday the window opens on Sunday evening, when nothing runs, so it returned no rows at all on
+09-07, 09-21, 09-28 and 10-05. On 09-07 the weekend it hid held a red backup, a red census and a red
+check (learnings 63, 64 and 67). It also read DRY_RUN rows, which `db.freshness` stopped doing on
+2026-09-13 (learning 67).
 
 - `notify` **green** means the words exist and are deliverable.
 - `notify` **red** means the doorbell is about to ring on an empty doorstep — say so.
 - `score` **amber** with `frozen: true` in its detail is not a fault; it is §5.5, and the brief
   leads with Zak's own words.
+- `ingest-universe` **red** is a warning on the freshness line and holds nothing (§5.6,
+  2026-09-13).
+- **No row** for a nightly job means it has not run since that close. On a weekday morning with no
+  `ingest-daily` row, §3 already reads *not in yet*.
 
 ---
 
