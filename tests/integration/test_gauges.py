@@ -397,6 +397,27 @@ def test_a_red_reconcile_today_holds_the_buys_even_after_a_green_yesterday(db, m
     assert g["last_attested"] is not None, "yesterday's success is still reported, just not trusted"
 
 
+def test_a_red_reconcile_names_the_receipt_the_ledger_refused(db, migrated):
+    """QC 2026-10-07, A21. A receipt the ledger refuses — the true post-split sale, a mistyped
+    quantity — holds the buys every night until the history is repaired, and the gauge is the line
+    of the brief that says why. It used to print "went red on 0 position break(s):" and nothing
+    else, because it read only the broker breaks; the refusal's ticker and the ledger's reason are
+    what Zak needs to act on."""
+    import json
+    refused = [{"account": "TFSA", "ticker": "N01.US", "ticket": 7,
+                "receipt": "sell 200 @ 30 on 2026-08-17",
+                "why": "ledger drives TFSA N01.US to -100 shares — the history for this name is "
+                       "incomplete"}]
+    with db.cursor() as cur:
+        cur.execute("""insert into runs (job, status, finished_at, detail)
+                       values ('reconcile','red', now(), %s)""",
+                    (json.dumps({"breaks": [], "refused": refused}),))
+        db.commit()
+        g = gauges.reconciliation_age(cur)
+    assert g["status"] == "red"
+    assert "TFSA N01.US: ledger drives TFSA N01.US to -100 shares" in g["why"]
+
+
 def test_a_green_reconcile_after_a_red_one_clears_the_gauge(db, migrated):
     """The newest run is what governs, in both directions — a gauge that latched red would need a
     hand to clear it, and §4.4's suite has no such state."""
