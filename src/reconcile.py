@@ -4,10 +4,10 @@
 This is the loop closing. A receipt reaches the system by two routes and this job walks both —
 after one step that comes before any receipt:
 
-  S. **A split on a held name enters the ledger first.** Zak, 2026-10-07: *"Pipeline records
-     splits — a vendor-reported split on a held name is written to the ledger as a quantity-only
-     confirm (no cash) before score runs, and the brief shows it. Ticker changes and takeovers
-     still fail closed until you record them."* `record_splits` writes one `split` row per
+  S. **A split on a held name enters the ledger first.** Zak's ruling of 2026-10-07 ("Pipeline
+     records splits"): a vendor-reported split on a held name is written to the ledger, quantity
+     only and no cash, before score runs, and the brief shows it; ticker changes and takeovers
+     still fail closed until he records them. `record_splits` writes one `split` row per
      position (migration 075) — the shares restated by the ratio, the cost basis carried, no cash
      — so the book `score` reads holds the post-split count, and a post-split sale reported the
      same night lands after it rather than being refused (A21).
@@ -203,7 +203,7 @@ def apply_to_book(cur, account, ticker):
     cur.execute("select yuna_book_from_ledger(%s, %s)", (account, ticker))
 
 
-# ---- a split on a held name (Zak, 2026-10-07; migration 075) ------------------------------------
+# ---- a split on a held name (Zak's ruling, 2026-10-07; migration 075) ----------------------------
 
 def ratio_text(ratio):
     """A split the way it is spoken of: 2.0 -> "2:1", 0.1 -> "1:10", 6.665 -> "6.665:1"."""
@@ -257,8 +257,8 @@ def tape_on_split(cur, ticker, d, ratio):
 def record_splits(cur, refused, write=True):
     """Every vendor-reported split on a held name, into the ledger before `score` reads the book.
 
-    Zak, 2026-10-07: *"Pipeline records splits — a vendor-reported split on a held name is written
-    to the ledger as a quantity-only confirm (no cash) before score runs, and the brief shows it."*
+    Zak's ruling of 2026-10-07 ("Pipeline records splits"): a vendor-reported split on a held name
+    is written to the ledger, quantity only and no cash, before score runs, and the brief shows it.
     One `split` row per position (migration 075 says why it is a verb of its own and not a
     `confirm`): qty is the ratio, price 0, dated the vendor's ex-date. It restates every earlier row
     of the position — shares x ratio, money unchanged — and `yuna_book_from_ledger` moves the book.
@@ -723,8 +723,8 @@ def main():
     with connect() as conn, Heartbeat(conn, "reconcile", dry_run=dry()) as hb:
         folded, settled, orphans, breaks, closed, refused = [], [], [], [], [], []
         with conn.cursor() as cur:
-            # A split on a held name goes in before any receipt (Zak, 2026-10-07): `score` reads
-            # the book next, and a post-split sale reported tonight must find the post-split
+            # A split on a held name goes in before any receipt (Zak's ruling, 2026-10-07): `score`
+            # reads the book next, and a post-split sale reported tonight must find the post-split
             # count to net against, not be refused for exceeding the pre-split one (A21). The
             # dry run reads the same verdicts and writes nothing. Committed on its own, like the
             # receipts below, so a manifest that dies later cannot take the split with it.

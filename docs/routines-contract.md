@@ -114,10 +114,10 @@ and one of four verbs in `side`: `buy`, `sell`, `confirm` or `split`. **`confirm
 balance** — a position that predates the ledger, recorded with its cost basis so the sells that
 follow it have something to net against. It moves no cash.
 
-**`split` is written by the pipeline.** Zak, 2026-10-07: *"Pipeline records splits — a
-vendor-reported split on a held name is written to the ledger as a quantity-only confirm (no cash)
-before score runs, and the brief shows it. Ticker changes and takeovers still fail closed until you
-record them."* Each night `reconcile` writes one `split` row per position the split reaches — `qty`
+**`split` is written by the pipeline** (Zak's ruling of 2026-10-07, "Pipeline records splits": a
+vendor-reported split on a held name enters the ledger, quantity only and no cash, before score
+runs, and the brief shows it; ticker changes and takeovers still fail closed until he records
+them). Each night `reconcile` writes one `split` row per position the split reaches — `qty`
 is the ratio (2 for a 2:1, 0.1 for a 1:10), `price` 0, `trade_date` the vendor's ex-date — once it
 has checked the split against the raw closes, and the row restates every earlier row of the
 position: the shares move, the cost basis carries, no cash moves (migration 075). **Do not write

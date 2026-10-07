@@ -2,11 +2,10 @@
 -- `split`, so a vendor-reported split on a held name moves the position's shares and cost basis
 -- and no cash. QC 2026-10-07, findings A1, A2, A21 (its root) and A32.
 --
--- Zak, 2026-10-07:
---
---   "Pipeline records splits — a vendor-reported split on a held name is written to the ledger as
---    a quantity-only confirm (no cash) before score runs, and the brief shows it. Ticker changes
---    and takeovers still fail closed until you record them."
+-- Zak's ruling, 2026-10-07. Asked how a split on a held name should reach the book, he chose
+-- "Pipeline records splits", the option put to him as: a vendor-reported split on a held name is
+-- written to the ledger as a quantity-only confirm (no cash) before score runs, and the brief shows
+-- it; ticker changes and takeovers still fail closed until he records them.
 --
 -- ---- what broke ---------------------------------------------------------------------------------
 --
@@ -30,7 +29,7 @@
 --
 -- ---- why a verb of its own, and not a `confirm` row ---------------------------------------------
 --
--- Zak's words describe the substance — shares move, money does not — and a `confirm` row is the
+-- The ruling describes the substance — shares move, money does not — and a `confirm` row is the
 -- obvious way to write it down. It cannot carry it both ways. `yuna_book_from_ledger` (059, 069)
 -- averages cost over every buy and confirm the name has ever had, avg = Σ qty×price / Σ qty, and
 -- sells do not enter it:

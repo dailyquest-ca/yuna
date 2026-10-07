@@ -1,8 +1,8 @@
 """A split on a held name, through the ledger (migration 075, Zak's ruling of 2026-10-07).
 
-Zak, 2026-10-07: *"Pipeline records splits — a vendor-reported split on a held name is written to
-the ledger as a quantity-only confirm (no cash) before score runs, and the brief shows it. Ticker
-changes and takeovers still fail closed until you record them."*
+Zak chose "Pipeline records splits" on 2026-10-07: a vendor-reported split on a held name is
+written to the ledger, quantity only and no cash, before score runs, and the brief shows it; ticker
+changes and takeovers still fail closed until he records them.
 
 The doctrine (`market-mechanics`): "Split / reverse split — share count and per-share cost base
 change; total cost base does not." Every test below is that sentence, or the QC finding it closes:
