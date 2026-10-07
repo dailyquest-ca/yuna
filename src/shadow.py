@@ -61,9 +61,25 @@ def sim_gate(index_px, upto):
     return bool(on)
 
 
+def sim_reads():
+    """`concentrated.rank_at`'s reads of the tape, in the sim's own constants, as sessions back from
+    the decision session — for `rank_at` as `compare` calls it (risk-adjusted, no participation
+    floor). `desk.tape` loads only the window the engine reads (A34), so the sim's reads are handed
+    to it as well: the two sets agree today, and if they ever stop, the window still covers both
+    and the comparison stays one of rules rather than of bars the window left out.
+    """
+    return {
+        "sim formation close, adj[i - FORMATION]": concentrated.FORMATION,
+        "sim skip close, adj[i - SKIP]": concentrated.SKIP,
+        "sim finite bars, the last FORMATION closes": concentrated.FORMATION - 1,
+        "sim ADDV, the median of the last ADDV_WINDOW sessions": concentrated.ADDV_WINDOW - 1,
+        "sim vol, VOL_WINDOW daily returns ending at i": concentrated.VOL_WINDOW,
+    }
+
+
 def compare(cur, as_of):
     """Both comparisons for one session. Returns [(compared, matched, live, sim, detail)]."""
-    sessions, tickers, adj, raw, dv, index_px = desk.load(cur, as_of)
+    sessions, tickers, adj, raw, dv, index_px = desk.load(cur, as_of, also=sim_reads())
     i = len(sessions) - 1
     out = []
 

@@ -481,3 +481,47 @@ def test_topups_cannot_pyramid_winners_once_the_park_is_empty(db, migrated):
         s = desk.sheet(cur, days[-1], 200_000.0)
     assert not [o for o in s["orders"] if o["clause"] in ("top_up", "fund")]
     assert [u["ticker"] for u in s["underweight"]] == ["N00.US"], "still visible, never bought"
+
+
+def test_the_tape_is_read_over_the_window_the_engine_reads_and_decides_as_the_whole_tape(
+        db, migrated, monkeypatch):
+    """QC 2026-10-07, A34. The load read every bar since 2003 — 9.2M rows a call, 73.7 s on average
+    and 117.1 s at worst against the server's 120 s statement timeout — for a decision that reads
+    the last 253 sessions. Both halves have to hold: nothing before the window reaches the arrays,
+    and the sheet is exactly the one the whole tape gives.
+
+    The depth is stated here from §3's constants rather than read back from `desk.reads()`: the
+    deepest reads are §3.3's formation close and its 252-return vol window, and §3.7(3)'s
+    252-return pair test.
+    """
+    import bars
+    deepest = max(engine.FORMATION, engine.SKIP, engine.VOL_WINDOW, engine.SCREEN_WINDOW - 1,
+                  engine.ADDV_WINDOW - 1, bars.TWIN_WINDOW)
+    with db.cursor() as cur:
+        days = _world(cur, held=("N03.US", "N15.US"))     # one kept, one a rank exit
+        # a listed name that stopped printing long ago: it has bars, and none in the window
+        cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                       values ('GONE.US','GONE.US','stock','USD','active')""")
+        for d in days[:200]:
+            cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                           values ('GONE.US',%s,30,30,30,30,30,9000000)""", (d,))
+    db.commit()
+    with db.cursor() as cur:
+        sessions, tickers, adj, raw, dv, _ = desk.load(cur, days[-1])
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    i = len(sessions) - 1
+    first = i - deepest
+    assert first > 0, "the fixture must reach further back than the window, or this proves nothing"
+    for name, a in (("adj", adj), ("raw", raw), ("dv", dv)):
+        assert np.isnan(a[:first]).all(), f"{name}: a bar from before the window was loaded"
+    printing = [j for j, t in enumerate(tickers) if t != "GONE.US"]
+    assert np.isfinite(adj[first:, printing]).all(), "and every bar inside it was"
+    assert "GONE.US" in tickers and s["universe"] == 21, \
+        "a name with no bar in the window keeps its column — universe_count means what it did"
+    assert [o["ticker"] for o in s["orders"] if o["action"] == "sell"] == ["N15.US"]
+
+    # The same code with the window opened to every session: the decision may not move.
+    monkeypatch.setattr(desk, "reads", lambda: {"the whole tape": len(sessions)}, raising=False)
+    with db.cursor() as cur:
+        whole = desk.sheet(cur, days[-1], 200_000.0)
+    assert whole == s
