@@ -108,6 +108,48 @@ def test_the_retired_engines_buttons_are_gone():
         assert not (ROOT / ".github" / "workflows" / name).exists(), f"{name} is retired"
 
 
+# ---- a rehearsal says it is one (QC 2026-10-07, A9 and A24; learning 67) -------------------------
+#
+# `dry_run` promises "compute everything, write nothing". A job that never hears it writes a live
+# row on a rehearsal, and a live row of the wrong colour holds — or releases — the desk.
+
+DRY = "${{ inputs.dry_run || 'false' }}"
+
+
+def _is_autopsy(step):
+    return "src/report_fail.py" in (step.get("run") or "")
+
+
+def _runs_a_job(step):
+    run = step.get("run") or ""
+    return "src/" in run and ".py" in run and not _is_autopsy(step)
+
+
+def test_every_chain_job_hears_that_the_dispatch_is_a_rehearsal():
+    """A9: `check` was the one job in the chain without DRY_RUN (and `notify` the other), so a dry
+    dispatch wrote a live check row — the newest verdict the brief reads — on a rehearsal."""
+    for name, spec in _pipeline()["jobs"].items():
+        for step in spec.get("steps") or []:
+            if _runs_a_job(step):
+                assert (step.get("env") or {}).get("DRY_RUN") == DRY, \
+                    f"pipeline.yml:{name} runs {step['run']!r} without the dispatch's DRY_RUN"
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_an_autopsy_records_a_rehearsal_as_a_rehearsal(path):
+    """A24: the autopsy writes the row for a job that died before its heartbeat, so it must carry
+    the DRY_RUN its job carried — or a dry dispatch's death is a live red under a price-critical
+    name, and `freshness()` holds the buys on it."""
+    for name, spec in (yaml.safe_load(path.read_text()).get("jobs") or {}).items():
+        steps = spec.get("steps") or []
+        told = {(s.get("env") or {}).get("DRY_RUN") for s in steps if _runs_a_job(s)} - {None}
+        assert len(told) <= 1, f"{path.name}:{name} gives its steps different DRY_RUNs"
+        want = next(iter(told), None)
+        for step in filter(_is_autopsy, steps):
+            assert (step.get("env") or {}).get("DRY_RUN") == want, \
+                f"{path.name}:{name}'s autopsy does not get the DRY_RUN its job gets"
+
+
 def test_the_composed_kind_is_the_kind_notify_expects():
     """The seam with no other guard: `brief` writes a kind and `notify` looks for one. When they
     disagree the chain is green end to end and Zak gets silence — which §4.7 rules is itself the

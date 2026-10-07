@@ -88,11 +88,14 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      # Every autopsy gets the DRY_RUN its job got (QC 2026-10-07, A24): a rehearsal that dies
+      # before its heartbeat leaves a rehearsal's row, never a live red that holds the desk.
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py reconcile /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   score:
     # §4.1's second verb: "§3.2–3.5 logic: screen, rank, gate, queue, order decisions". A pure
@@ -127,6 +130,7 @@ jobs:
         run: python src/report_fail.py score /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   shadow:
     # §6.4's attestation: the live engine against the sim, on the same bars, written down. Ten
@@ -154,6 +158,7 @@ jobs:
         run: python src/report_fail.py shadow /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   check:
     # §4.4's six gauges. Writes nothing but its own report row — a checker that can edit what it
@@ -171,12 +176,16 @@ jobs:
       - run: set -o pipefail; python src/gauges.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Like every job beside it (QC 2026-10-07, A9): a dry dispatch's check is a rehearsal,
+          # and its row must say so rather than stand as the newest live verdict.
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
           ENGINE_MODE: ${{ inputs.engine_mode || 'live' }}
       - name: autopsy on failure
         if: failure()
         run: python src/report_fail.py check /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   compose:
     # §5.1's morning brief, rendered from the one payload read. It renders and does not decide:
@@ -205,6 +214,7 @@ jobs:
         run: python src/report_fail.py compose /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   notify:
     # Prove the composed rows exist and are deliverable. The one thing this job may never do is
@@ -222,6 +232,7 @@ jobs:
       - run: set -o pipefail; python src/notify.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
           PUSH_WEBHOOK_URL: ${{ secrets.PUSH_WEBHOOK_URL }}
           NOTIFY_SLOT: ${{ needs.slot.outputs.slot }}
       - name: autopsy on failure
@@ -229,3 +240,4 @@ jobs:
         run: python src/report_fail.py notify /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}

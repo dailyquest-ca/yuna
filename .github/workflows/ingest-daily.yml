@@ -96,3 +96,6 @@ jobs:
         run: python src/report_fail.py ingest-daily /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # the DRY_RUN the job got (QC 2026-10-07, A24): a dry dispatch that dies before its
+          # heartbeat must not leave a live price-critical red that holds the chain it triggers
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}

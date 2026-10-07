@@ -44,3 +44,4 @@ jobs:
         run: python src/report_fail.py backtest-compounders /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}

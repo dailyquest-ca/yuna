@@ -78,3 +78,4 @@ jobs:
         run: python src/report_fail.py backfill /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}

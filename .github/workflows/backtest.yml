@@ -136,6 +136,7 @@ jobs:
         run: python src/report_fail.py blend /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   # The duplicate-listing scan lives here for the reason the comment above already gives: GitHub
   # only registers dispatch workflows from the DEFAULT branch, and `dedupe.yml` is not on it. That
@@ -276,6 +277,7 @@ jobs:
         run: python src/report_fail.py push_study /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   concentrated:
     # **Two arms at a time, and none inside the hour before the 22:23 UTC ingest** (learning 62).
@@ -360,6 +362,7 @@ jobs:
         run: python src/report_fail.py concentrated /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   backtest:
     if: github.event_name != 'workflow_dispatch' || inputs.research == ''
@@ -442,3 +445,4 @@ jobs:
         run: python src/report_fail.py backtest /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}

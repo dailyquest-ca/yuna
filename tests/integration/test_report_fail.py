@@ -13,17 +13,21 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+import db as dbm                                                           # noqa: E402
+import fixtures as world                                                   # noqa: E402
 from db import Heartbeat                                                   # noqa: E402
 
 RID = "424242"
 
 
-def autopsy(tmp_path, job="probe", rid=RID, attempt="1", tail="Traceback: boom"):
+def autopsy(tmp_path, job="probe", rid=RID, attempt="1", tail="Traceback: boom", **extra):
+    """Run the autopsy as the workflow step does. `extra` is the step's own env (DRY_RUN)."""
     out = tmp_path / "job.out"
     out.write_text(tail)
     env = {**os.environ}
-    env.pop("GITHUB_RUN_ID", None)
-    env.pop("GITHUB_RUN_ATTEMPT", None)
+    for k in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "DRY_RUN"):
+        env.pop(k, None)
+    env.update(extra)
     if rid:
         env["GITHUB_RUN_ID"] = rid
         env["GITHUB_RUN_ATTEMPT"] = attempt
@@ -114,3 +118,23 @@ def test_without_a_run_id_it_closes_any_stuck_row_of_the_job(db, tmp_path):
     autopsy(tmp_path, rid=None)
     (_, status, _), = rows(db)
     assert status == "red"
+
+
+def test_a_rehearsal_that_dies_before_its_heartbeat_leaves_a_rehearsals_row(db, tmp_path):
+    """QC 2026-10-07 (A24) — learning 67's class, on the path that fix did not reach.
+
+    A DRY_RUN dispatch of the chain whose `score` dies before its heartbeat (an import error on the
+    branch being tried, a mistyped engine_mode) used to get a red row with `dry_run=false`. `score`
+    is price-critical, so `freshness()` read that rehearsal as the live desk's state and held the
+    buys for a day and a half. The workflow now hands the autopsy its job's DRY_RUN."""
+    with db.cursor() as cur:
+        world.add_name(cur, "AAA.US")
+        world.flat_then_base(cur, "AAA.US")                # the bars themselves are current
+    db.commit()
+    out = autopsy(tmp_path, job="score", DRY_RUN="true")
+    assert "died before its heartbeat opened" in out
+    with db.cursor() as cur:
+        cur.execute("select status, dry_run from runs where job = 'score'")
+        assert cur.fetchall() == [("red", True)], "red, and marked as the rehearsal it was"
+    line, tickets = dbm.freshness(db)
+    assert tickets is True and "score red" not in line, line

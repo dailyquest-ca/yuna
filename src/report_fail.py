@@ -13,7 +13,8 @@ second attempt that dies before its heartbeat must not rewrite the first attempt
     crash used to leave two rows, one of them lying — runs 799/800, 879/880, 807/808);
   * a row of this run closed `green` (or amber) — a later step failed, the 2026-09-05 backup shape:
     flip it red, because a workflow that failed is not a green run whatever the Python thought;
-  * no row of this run at all — the job really did die before its heartbeat opened: a new row.
+  * no row of this run at all — the job really did die before its heartbeat opened: a new row,
+    a rehearsal's row when the dispatch was a DRY_RUN (2026-10-07).
 Without a run id (a local run, an old row) it falls back to closing any `running` row of the job.
 """
 import sys, os, json, psycopg
@@ -39,6 +40,12 @@ def url():
 
 rid = os.environ.get("GITHUB_RUN_ID")
 att = os.environ.get("GITHUB_RUN_ATTEMPT")
+# A rehearsal's death is a rehearsal's row (QC 2026-10-07, A24; learning 67). The new-row path
+# below wrote `dry_run=false` whatever the dispatch said, so a DRY_RUN dispatch that died before
+# its heartbeat opened left a live red under a price-critical name — and `freshness()` held the
+# desk on it. The workflow hands the autopsy the same DRY_RUN its job got; read as `db.dry()`
+# reads it, copied rather than imported for the reason at the top of this file.
+dry = os.environ.get("DRY_RUN", "false").lower() in ("1", "true", "yes")
 # this run's rows, or — with no run id to go on — any row of the job
 MINE = """(%s::text is null or (detail->'actions'->>'run_id' = %s
            and coalesce(detail->'actions'->>'attempt', '') = coalesce(%s::text, '')))"""
@@ -70,8 +77,9 @@ with psycopg.connect(url()) as conn, conn.cursor() as cur:
             how = f"the heartbeat had closed {row[1]} before the job died — run {row[0]} flipped to red"
         else:
             cur.execute("""insert into runs(job,finished_at,status,dry_run,detail)
-                           values (%s,clock_timestamp(),'red',false,%s)""",
-                        (job, json.dumps({"fatal": "job died pre-heartbeat", "output_tail": tail})))
+                           values (%s,clock_timestamp(),'red',%s,%s)""",
+                        (job, dry,
+                         json.dumps({"fatal": "job died pre-heartbeat", "output_tail": tail})))
             how = "new row: the job died before its heartbeat opened"
     conn.commit()
 print(f"red autopsy written for {job} ({how})")
