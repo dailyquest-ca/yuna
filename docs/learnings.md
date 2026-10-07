@@ -43,7 +43,7 @@ law is `yuna_plan.md`. The build order is `roadmap-2026-08-16.md`.
    is exactly why nothing may prune them.** This line used to call a 3-year prune "not optional",
    at 2.2M rows. No prune was ever built, and Zak raised `bars_retention_years` from 3 to 10 on
    2026-08-03; `ingest.py` is its only reader, and it reads it as a backfill horizon, never a cap.
-   *Corrected 2026-10-07:* `prices` holds 13.09M rows in 2.45 GB, back to 2003-08-18, and 4.98M of
+   *Corrected 2026-10-07:* `prices` holds 13.09M rows in 2,452 MB, back to 2003-08-18, and 4.98M of
    them are older than ten years — the 2007-onward tape every §3.1 window is measured on, and the
    delisted census back to 2005 (learning 35). No backup holds them and the delisted census alone
    is 32,611 names to re-pull one call at a time (`backfill.yml`), so cutting the table is a plan
