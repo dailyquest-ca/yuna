@@ -52,7 +52,8 @@ class Vendor:
             frm = params.get("from") or ""
             return [dict(b) for b in self.history.get(path[len("eod/"):], []) if b["date"] >= frm]
         if path.startswith("splits/"):
-            return [dict(s) for s in self.ledger.get(path[len("splits/"):], [])]
+            ledger = self.ledger.get(path[len("splits/"):], [])
+            return [dict(s) for s in ledger] if isinstance(ledger, list) else ledger
         if path.startswith("real-time/"):
             code = path[len("real-time/"):].removesuffix(".US")
             return {"close": next((r["close"] for r in self.tape if r["code"] == code), None)}

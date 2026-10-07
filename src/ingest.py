@@ -8,7 +8,9 @@ cold start, corporate-action refreshes, gap repair, and names entering L0."
 
 So one bulk call carries the whole US tape, two more carry the day's splits and dividends, and
 per-ticker pulls are reserved for those four cases — capped per night, because a split touching two
-hundred names must not spend the day's quota.
+hundred names must not spend the day's quota. One small read per name a split can hurt tonight —
+the book and the pool the engine ranks — asks the vendor's own split ledger as well: the bulk file
+is read for one date, and a split it did not carry that night was never seen again (A4).
 
 Why corporate actions matter this much: a split rewrites a stock's entire adjusted history. Without
 the re-pull a 4:1 split reads as a −75% crash and fires false alarms through the whole stop layer.
@@ -28,6 +30,7 @@ a per-ticker sweep could reach it. This is the named-date path: one bulk call fo
 missed. The schedule never sets it, so the nightly is unchanged.
 """
 import datetime as dt
+import math
 import os
 import sys
 
@@ -440,6 +443,16 @@ def describe_action(kind, row):
         return "dividend"
 
 
+def _listed(rows, what):
+    """The vendor's answer, which must be a list. Anything else is not an empty answer: a splits
+    file read as `[]` whatever came back is a night with no splits that nobody can tell from a
+    night the feed was broken (A4)."""
+    if not isinstance(rows, list):
+        raise RuntimeError(f"{what} answered {type(rows).__name__}, not a list — refusing to read "
+                           f"it as an empty one")
+    return rows
+
+
 def bulk_day(calls, date=None, kind=None):
     """One call for the whole US tape. `kind` fetches splits or dividends instead of bars."""
     params = {}
@@ -447,16 +460,8 @@ def bulk_day(calls, date=None, kind=None):
         params["date"] = date.isoformat()
     if kind:
         params["type"] = kind
-    rows = get("eod-bulk-last-day/US", calls, **params)
-    return rows if isinstance(rows, list) else []
-
-
-def _listed(rows, what):
-    """The vendor's answer, which must be a list. Anything else is not an empty answer."""
-    if not isinstance(rows, list):
-        raise RuntimeError(f"{what} answered {type(rows).__name__}, not a list — refusing to read "
-                           f"it as an empty one")
-    return rows
+    return _listed(get("eod-bulk-last-day/US", calls, **params),
+                   "eod-bulk-last-day/US" + (f" type={kind}" if kind else ""))
 
 
 def per_ticker(ticker, frm, calls):
@@ -598,6 +603,96 @@ def deferred_repulls(cur, run_id):
     return row[0], row[1]
 
 
+# --------------------------------------------------------------------------- the split ledger (A4)
+#
+# The bulk splits file is read for one date: the newest tape's. A split the vendor records after
+# that night's fetch — or never carries in the bulk file at all — was therefore never applied, and
+# the name's adjusted history kept a fake crash or a fake moonshot for good. In production no split
+# has been recorded since tape 2026-09-03 while 656 dividends were, and both splits on stored names
+# since then were missed: DCX.US 1:160 (2026-09-28, absent from run 1067's file, fetched 02:02 UTC
+# the next morning) and CTVA.US 6.665:1 (2026-10-01, absent from run 1109's, 01:42 UTC). The seven
+# splits recorded before them (08-03..09-03) all came from the bulk file on their own night.
+# Whether the vendor posts some splits late or its bulk file has carried none since the 2026-09
+# downgrade cannot be settled from outside that endpoint, so the fix does not depend on the answer:
+# the vendor's per-ticker split ledger (`splits/{ticker}`) carries both, and RUSHA.US's correction
+# from 08-11 to 09-01 besides. `bulk_actions` in each run now records how many rows each bulk file
+# returned, so the runs themselves will say which it was.
+
+def split_population(cur):
+    """The names a split can hurt tonight: every open position, and the pool the engine last ranked.
+
+    §3.3 ranks only §3.2's pool (the top 500 by ADDV), so a name outside it reaches no sheet, and a
+    held name's exit is an order (§3.5) whatever its rank — so the book is in here unconditionally,
+    every night. The pool is the last live session's (`engine_ranks`); a name that first enters it
+    tonight is asked tomorrow. A missed split does not move a name's ADDV (raw close times raw
+    volume is continuous across it), so it cannot push a name into the pool on its own.
+    """
+    cur.execute("""select ticker from book where status = 'open'
+                   union
+                   select ticker from engine_ranks
+                    where mode = 'live'
+                      and session_date = (select max(session_date) from engine_ranks
+                                           where mode = 'live')""")
+    return sorted(r[0] for r in cur.fetchall())
+
+
+def carries_split(cur, ticker, on, ratio):
+    """Does the stored series already carry the split the vendor lists for `on`? None if it cannot
+    say (no stored bar on one side of the date).
+
+    A split leaves every raw close where it was and rescales the adjusted history before it, so
+    across its date the stored adj/close factor steps by 1/ratio where the store carries the split
+    (CTVA.US, 6.665:1 — 11.6504/77.65 = 0.150 the session before, 12.57/12.57 = 1 on the day) and
+    does not move where it does not (77.65/77.65 = 1). Those are the only two states a series can
+    be in, so the step is read as whichever it is nearer, in log terms: a decision between two named
+    hypotheses, with no tolerance of its own to choose. A dividend paid between the two sessions
+    moves the factor by its yield — a hundredth or so — which is not near the line for any split.
+    """
+    cur.execute("""select close, adj_close from prices where ticker = %s and d < %s
+                    order by d desc limit 1""", (ticker, on))
+    before = cur.fetchone()
+    cur.execute("""select close, adj_close from prices where ticker = %s and d >= %s
+                    order by d limit 1""", (ticker, on))
+    after = cur.fetchone()
+    if not before or not after:
+        return None
+    try:
+        factors = [float(a if a is not None else c) / float(c) for c, a in (before, after)]
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if min(factors) <= 0:
+        return None
+    step = math.log(factors[0] / factors[1])
+    return abs(step + math.log(ratio)) < abs(step)
+
+
+def splits_not_carried(conn, hb, names):
+    """[(ticker, row)] — every split the vendor's per-ticker ledger lists for `names` that the
+    stored series does not carry, plus {ticker: why} for every name it could not judge."""
+    found, errors = [], {}
+    with conn.cursor() as cur:
+        for ticker in names:
+            try:
+                ledger = _listed(get(f"splits/{ticker}", hb.calls), f"splits/{ticker}")
+            except Exception as e:
+                errors[ticker] = f"{type(e).__name__}: {e}"
+                continue
+            for entry in ledger:
+                ratio = sg.split_ratio(entry)
+                try:
+                    on = dt.date.fromisoformat(str(entry.get("date")))
+                except ValueError:
+                    on = None
+                if on is None or not ratio or ratio <= 0:
+                    errors[ticker] = f"a split it cannot read: {entry!r}"
+                    continue
+                if ratio != 1 and carries_split(cur, ticker, on, ratio) is False:
+                    found.append((ticker, dict(code=ticker.rsplit(".", 1)[0], date=on.isoformat(),
+                                               split=entry.get("split"),
+                                               source=f"splits/{ticker}")))
+    return found, errors
+
+
 def main():
     with connect() as conn:
         with Heartbeat(conn, JOB, scheduled_utc=SCHEDULE_UTC) as hb:
@@ -676,13 +771,32 @@ def main():
                 conn.commit()
 
             # ---- 2. corporate actions
-            actions = {}
+            actions, bulk_rows = {}, {}
             for kind in ("splits", "dividends"):
-                for row in bulk_day(hb.calls, kind=kind, date=TAPE_DATE):
+                rows = bulk_day(hb.calls, kind=kind, date=TAPE_DATE)
+                bulk_rows[kind] = len(rows)       # every US ticker's, before our universe filter
+                for row in rows:
                     code = row.get("code")
                     tk = code if str(code).endswith(".US") else f"{code}.US"
                     if tk in names:
                         actions.setdefault(tk, []).append((kind[:-1], row))
+            hb.detail["bulk_actions"] = bulk_rows
+
+            # ---- 2b. the per-ticker split ledger, for every name a split can hurt tonight (A4).
+            # A split the bulk file did not carry tonight — late, or never — joins tonight's
+            # actions here, and its re-pull runs through the same checked path as any other.
+            with conn.cursor() as cur:
+                population = [t for t in split_population(cur) if t in names]
+            late, unjudged = splits_not_carried(conn, hb, population)
+            late = [(t, r) for t, r in late
+                    if not any(k == "split" and str(x.get("date") or as_of) == r["date"]
+                               for k, x in actions.get(t, []))]     # tonight's file had it
+            for t, r in late:
+                actions.setdefault(t, []).append(("split", r))
+            hb.detail["split_ledger"] = dict(
+                asked=len(population), errors=unjudged,
+                found={t: f"{describe_action('split', r)} on {r['date']}" for t, r in late})
+
             if actions and not dry():
                 with conn.cursor() as cur:
                     cur.executemany("""insert into corporate_actions(ticker,d,kind,detail)
@@ -768,6 +882,15 @@ def main():
                     per_name[ticker] = f"{why}: {len(bars)}"
                 conn.commit()
 
+            # A split the ledger found must now be carried. If the vendor's own adjusted history
+            # still does not carry the split its ledger lists, re-pulling again cannot mend it.
+            uncarried = []
+            if late and not dry():
+                with conn.cursor() as cur:
+                    uncarried = [f"{t} on {r['date']}" for t, r in late if t not in owing
+                                 and carries_split(cur, t, dt.date.fromisoformat(r["date"]),
+                                                   sg.split_ratio(r)) is False]
+
             # ---- 4. the earnings calendar — RETIRED by v1.0 (§6.3), off unless asked for
             #
             # §4.5: "No fundamentals, news, intraday, or calendar feeds are read by any decision."
@@ -809,6 +932,14 @@ def main():
                              repairs_skipped=[r[0] for r in skipped], repull_refused=refused)
             if errors:
                 hb.amber(f"{len(errors)} per-ticker pull(s) failed")
+            if unjudged:
+                # held and pool names only: a split on one of these cannot be ruled out tonight
+                hb.amber(f"{len(unjudged)} split ledger(s) could not be read — a missed split on "
+                         f"{', '.join(sorted(unjudged))} cannot be ruled out tonight")
+            if uncarried:
+                hb.amber(f"the vendor lists a split its own adjusted history does not carry, so the "
+                         f"re-pull left it unapplied: {', '.join(uncarried)} — a vendor data defect "
+                         f"(§3.2's exclusion table is where one is quarantined)")
             if refused:
                 # Holds buys for the night (§4.3, a price-critical amber), as a failed pull does:
                 # the name's adjusted history is not on the basis tonight's action says it should
