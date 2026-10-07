@@ -12,6 +12,9 @@ hundred names must not spend the day's quota.
 
 Why corporate actions matter this much: a split rewrites a stock's entire adjusted history. Without
 the re-pull a 4:1 split reads as a −75% crash and fires false alarms through the whole stop layer.
+So the re-pull rewrites the name's whole stored history, and only once the vendor's reply has
+confirmed the raw closes the store already holds — no split or dividend moves a past raw close, and
+run 593 wrote IESC.US at twice its price for want of asking (`repull`).
 
 §4.2, 2026-08-02: this job touches source-of-truth tables ONLY and derives nothing. Everything
 computed from these rows — stops, NAV, scores, arming — belongs to `score`, which runs after.
@@ -448,9 +451,16 @@ def bulk_day(calls, date=None, kind=None):
     return rows if isinstance(rows, list) else []
 
 
+def _listed(rows, what):
+    """The vendor's answer, which must be a list. Anything else is not an empty answer."""
+    if not isinstance(rows, list):
+        raise RuntimeError(f"{what} answered {type(rows).__name__}, not a list — refusing to read "
+                           f"it as an empty one")
+    return rows
+
+
 def per_ticker(ticker, frm, calls):
-    rows = get(f"eod/{ticker}", calls, **{"from": frm.isoformat()})
-    return rows if isinstance(rows, list) else []
+    return _listed(get(f"eod/{ticker}", calls, **{"from": frm.isoformat()}), f"eod/{ticker}")
 
 
 def upsert(cur, ticker, bars):
@@ -464,6 +474,128 @@ def upsert(cur, ticker, bars):
                              adj_close=excluded.adj_close, volume=excluded.volume,
                              ingested_at=now()""", rows)
     return len(rows)
+
+
+# --------------------------------------------------------------------------- the re-pull (A14, A31)
+def _quantum(x):
+    """One unit in the last decimal place `x` was quoted to: 0.01 for 83.05, 0.001 for 0.073."""
+    mantissa, _, exponent = repr(float(x)).lower().partition("e")
+    places = len(mantissa.partition(".")[2].rstrip("0")) - int(exponent or 0)
+    return 10.0 ** -max(places, 0)
+
+
+def same_close(stored, quoted):
+    """Do two raw closes for one session agree, at the precision the vendor quoted them?
+
+    A past raw close is a fact of the market: no split and no dividend ever changes it. The vendor's
+    two products do not quote it alike, though — the bulk file carries a sub-dollar close to four
+    decimals and the per-ticker history to three (DCX.US 2026-09-25: 0.0494 in the store from the
+    bulk file, 0.049 from the history today) — so agreement is judged at the coarser of the two
+    quotes, within half a unit in its last decimal place. Anything tighter reads the vendor's own
+    rounding as a disagreement (learning 35).
+    """
+    try:
+        a, b = float(stored), float(quoted)
+    except (TypeError, ValueError):
+        return False
+    return abs(a - b) <= max(_quantum(a), _quantum(b)) / 2
+
+
+def confirms(stored, reply):
+    """(agree, contradicted, missing) — how much of what the store holds a re-pull confirms.
+
+    `stored` is {date: raw close} over the window the re-pull would replace; `reply` the vendor's
+    bars. A stored session is confirmed when the reply carries it at the same close, contradicted
+    when it carries a different one, and missing when it does not carry it at all. Sessions after
+    the reply's newest bar are outside what it would replace — they are kept — so they do not vote.
+    """
+    quoted = {}
+    for b in reply:
+        try:
+            quoted[dt.date.fromisoformat(str(b.get("date")))] = b.get("close")
+        except ValueError:
+            continue
+    newest = max(quoted, default=None)
+    agree, contradicted, missing = 0, [], []
+    for d, close in sorted(stored.items()):
+        if newest is not None and d > newest:
+            continue
+        if d not in quoted:
+            missing.append(d)
+        elif same_close(close, quoted[d]):
+            agree += 1
+        else:
+            contradicted.append(d)
+    return agree, contradicted, missing
+
+
+def earliest_bar(cur, ticker):
+    """The oldest session the store holds for `ticker`, or None — one probe of its primary key."""
+    cur.execute("select min(d) from prices where ticker = %s", (ticker,))
+    return cur.fetchone()[0]
+
+
+def repull(cur, ticker, held_from, bars):
+    """Replace a name's whole stored history with the vendor's re-pull, if the reply confirms it.
+
+    `held_from` is the name's earliest stored bar (`earliest_bar`), the date the re-pull was asked
+    from; `bars` is the vendor's reply. Returns (rows written, None), or (0, why the stored rows
+    were kept).
+
+    A corporate action rewrites the ADJUSTED history and never a raw close, so the reply is checked
+    against the raw closes the store already holds before anything is deleted (A14). Run 593 is
+    why: IESC.US's split re-pull came back with every bar from 2016 to 2026 at twice the price, 25
+    frozen zero-volume sessions and a half-price day, and the old code — checking only that the
+    reply was non-empty — deleted ten years and wrote it, green. The verdict is the majority's:
+    the reply must confirm more of the stored sessions than it contradicts or leaves out. A vendor
+    correction moves a bar here and there (CTVA.US 2026-08-28 is stored as a frozen zero-volume
+    copy of the day before; the vendor now serves the real 83.90), so it passes and the correction
+    lands; a half-rebuilt history moves all of them, and is refused.
+
+    The window is the name's whole stored history, not the last ten years (A31). Bars reach back to
+    2005; a re-pull that rewrote only `today - 3650` left everything older on the old basis, and
+    every re-pulled split a fake 33-50% step at the seam (APH.US, 2016-09-06: 14.26 -> 7.12). One
+    series sits on one basis or it is not a series. Only the span the reply covers is replaced:
+    stored bars after its newest session are newer than any action it knows about, and bars before
+    its oldest are history it cannot give back — they vote as missing, so a truncated reply is
+    refused rather than allowed to delete what it does not carry.
+    """
+    stored = {}
+    if held_from is not None:
+        cur.execute("""select d, close from prices
+                        where ticker = %s and close is not null and close > 0""", (ticker,))
+        stored = dict(cur.fetchall())
+    agree, contradicted, missing = confirms(stored, bars)
+    if (contradicted or missing) and agree <= len(contradicted) + len(missing):
+        held = agree + len(contradicted) + len(missing)
+        example = ", ".join(str(d) for d in (contradicted or missing)[:3])
+        return 0, (f"the vendor's reply confirmed {agree} of {held} stored closes — "
+                   f"{len(contradicted)} contradicted, {len(missing)} missing (e.g. {example})")
+    dates = sorted(b["date"] for b in bars if b.get("date"))
+    if dry() or not dates:
+        return 0, None
+    if held_from is not None:
+        cur.execute("delete from prices where ticker = %s and d >= %s and d <= %s",
+                    (ticker, dt.date.fromisoformat(dates[0]), dt.date.fromisoformat(dates[-1])))
+    return upsert(cur, ticker, bars), None
+
+
+def deferred_repulls(cur, run_id):
+    """(run id, {ticker: why}) — the re-pulls the newest run to reach them left unfinished.
+
+    The bulk file names a corporate action once, on its own night. A re-pull refused because the
+    vendor's reply contradicted the store, cut off by the night's cap, or failed outright would
+    otherwise never be asked for again (A14). Each run writes the list it leaves — before the
+    per-ticker pass starts, so a run that dies part-way leaves every name it had not finished — and
+    the next run picks it up, whatever the bulk file says.
+    """
+    cur.execute("""select id, detail->'repull_deferred' from runs
+                    where job = %s and not dry_run and id <> %s and detail ? 'repull_deferred'
+                    order by id desc limit 1""", (JOB, run_id))
+    row = cur.fetchone()
+    if not row or not isinstance(row[1], dict):
+        return None, {}
+    return row[0], row[1]
 
 
 def main():
@@ -491,6 +623,9 @@ def main():
                 names = {r[0]: r[1] for r in cur.fetchall()}
                 last_bar = last_bars(cur)
                 store_date = data_date(cur)
+            # How deep a cold start's first pull reaches — not a retention rule. Nothing prunes
+            # `prices` (it holds bars back to 2005), and a corporate-action re-pull rewrites a
+            # name's whole stored history from its own first bar (A31), not from this date.
             backfill_from = dt.date.today() - dt.timedelta(days=365 * years)
 
             # ---- 1. the whole US tape, in one call
@@ -558,6 +693,10 @@ def main():
                 conn.commit()
 
             # ---- 3. per-ticker work, for the four cases §4.1 allows and no others
+            # A corporate-action re-pull an earlier night could not finish is still owed, whatever
+            # tonight's bulk file says (A14).
+            with conn.cursor() as cur:
+                owed_by, owed = deferred_repulls(cur, hb.id)
             repairs = []
             for ticker in names:
                 have = last_bar.get(ticker)
@@ -567,6 +706,8 @@ def main():
                     # very different amounts of attention.
                     why = "corporate action (" + ", ".join(sorted({
                         describe_action(kind, row) for kind, row in actions[ticker]})) + ")"
+                elif ticker in owed:
+                    why = f"corporate action (re-queued by run {owed_by}: {owed[ticker]})"
                 elif not have:
                     why = "cold start"
                 elif not ticker.endswith(".US"):
@@ -587,21 +728,42 @@ def main():
             skipped = repairs[REPAIR_CAP:]
             repairs = repairs[:REPAIR_CAP]
 
-            errors, per_name = {}, {}
+            # Every re-pull the night owes, written down before the first one is tried and struck
+            # off as each lands: the heartbeat records this dict even if the run dies part-way, so
+            # the next night inherits exactly what was left (`deferred_repulls`).
+            owing = {t: "not reached" for t, why, _ in repairs if why.startswith("corporate action")}
+            owing.update({t: f"past the night's cap of {REPAIR_CAP}"
+                          for t, why, _ in skipped if why.startswith("corporate action")})
+            hb.detail["repull_deferred"] = owing
+
+            errors, per_name, refused = {}, {}, {}
             with conn.cursor() as cur:
                 for ticker, why, have in repairs:
-                    frm = (backfill_from if why == "cold start"
-                                        or why.startswith("corporate action")
-                           else (have + dt.timedelta(days=1) if have else backfill_from))
+                    full = why.startswith("corporate action")
+                    held_from = earliest_bar(cur, ticker) if full else None
+                    if full:
+                        frm = held_from or backfill_from     # the whole stored history (A31)
+                    elif why == "cold start":
+                        frm = backfill_from
+                    else:
+                        frm = have + dt.timedelta(days=1) if have else backfill_from
                     try:
                         bars = per_ticker(ticker, frm, hb.calls)
                     except Exception as e:
                         errors[ticker] = f"{type(e).__name__}: {e}"
+                        if full:
+                            owing[ticker] = "the re-pull failed"
                         continue
-                    if not dry():
-                        if why.startswith("corporate action") and bars:
-                            cur.execute("delete from prices where ticker=%s and d >= %s",
-                                        (ticker, frm))
+                    if full:
+                        landed, kept = repull(cur, ticker, held_from, bars)
+                        if kept:
+                            refused[ticker] = kept
+                            owing[ticker] = "the vendor's reply contradicted the store"
+                            per_name[ticker] = f"{why}: kept the stored rows — {kept}"
+                            continue
+                        owing.pop(ticker, None)
+                        written += landed
+                    elif not dry():
                         written += upsert(cur, ticker, bars)
                     per_name[ticker] = f"{why}: {len(bars)}"
                 conn.commit()
@@ -644,9 +806,19 @@ def main():
                              corporate_actions={k: [describe_action(kd, r) for kd, r in v]
                                                 for k, v in actions.items()},
                              repairs=per_name, repair_errors=errors,
-                             repairs_skipped=[r[0] for r in skipped])
+                             repairs_skipped=[r[0] for r in skipped], repull_refused=refused)
             if errors:
                 hb.amber(f"{len(errors)} per-ticker pull(s) failed")
+            if refused:
+                # Holds buys for the night (§4.3, a price-critical amber), as a failed pull does:
+                # the name's adjusted history is not on the basis tonight's action says it should
+                # be. Re-queued; if it is the STORE that is corrupt, only a hand re-pull mends it.
+                hb.amber(f"{len(refused)} corporate-action re-pull(s) refused — the vendor's reply "
+                         f"contradicted the raw closes already stored, so the stored rows were kept "
+                         f"and re-queued for the next night: {', '.join(sorted(refused))} "
+                         f"(repull_refused has the counts). If the stored rows are the corrupt "
+                         f"side, re-pull by hand with `backfill` (what=bars, tickers=<name>, years "
+                         f"reaching its first bar)")
             if skipped:
                 # never a silent cap — §4.1's budget is real, so the brief has to hear about it
                 hb.amber(f"{len(skipped)} repair(s) deferred past tonight's cap of {REPAIR_CAP}")
