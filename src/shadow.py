@@ -9,7 +9,8 @@
 
 **What this compares, exactly.** The live side is `engine.py`, which `sheet.py` runs every night.
 The sim side is `concentrated.py` — the research engine that produced the cell of record, run at
-the same session index on the same arrays:
+the same session index on the same closes, with its dollar volume built from the same bars the way
+its own grid builds it (`sim_dollar_volume`, since QC finding A7):
 
   rank   `engine.rank`          vs  `concentrated.rank_at(risk_adjusted=True, top_by_addv=500)`
   gate   `engine.gate_history`  vs  `concentrated.regime_latch(confirm_out=1, confirm_in=3)`
@@ -77,9 +78,40 @@ def sim_reads():
     }
 
 
+def sim_dollar_volume(sessions, tickers, rows):
+    """The sim side's dollar volume, built from `desk.tape`'s rows the way `concentrated.build_grid`
+    builds the cell of record's: a bar off the benchmark's calendar is no session, a bar with no
+    positive adjusted close is no bar, and dollar volume is the adjusted close times the volume,
+    NaN where the vendor sent none.
+
+    QC finding A7, 2026-10-07. Both sides of the rank comparison used to read `desk.load`'s dollar
+    volume, so a live loader that priced §3.2's ADDV on another basis than the sim's was invisible
+    here by construction — and one did: from 2026-08-17 live read the raw close times
+    split-adjusted volume while build_grid read the adjusted close times volume, and this file
+    attested a match every night. Built here, from the rows and not from the live arrays, so the
+    two constructions can disagree and the comparison can see it. `tests/test_addv_basis.py` pins
+    this to build_grid's own output, so the copy cannot drift from the rule it copies.
+    """
+    at = {d: i for i, d in enumerate(sessions)}
+    col = {t: j for j, t in enumerate(tickers)}
+    dv = np.full((len(sessions), len(tickers)), np.nan)
+    for tk, d, a, _close, vol in rows:
+        i = at.get(d)
+        if i is None or a is None or a <= 0:
+            continue
+        dv[i, col[tk]] = float(a) * float(vol) if vol is not None else np.nan
+    return dv
+
+
 def compare(cur, as_of):
-    """Both comparisons for one session. Returns [(compared, matched, live, sim, detail)]."""
-    sessions, tickers, adj, raw, dv, index_px = desk.load(cur, as_of, also=sim_reads())
+    """Both comparisons for one session. Returns [(compared, matched, live, sim, detail)].
+
+    The sim side ranks on its own dollar volume (`sim_dollar_volume`) and on the live closes; the
+    closes are one read of one table, and ADDV is the clause where the two loaders were built twice.
+    """
+    sessions, index_px, tickers, rows = desk.tape(cur, as_of, also=sim_reads())
+    adj, raw, dv = desk.grid(sessions, tickers, rows)
+    sim_dv = sim_dollar_volume(sessions, tickers, rows)
     i = len(sessions) - 1
     out = []
 
@@ -90,7 +122,7 @@ def compare(cur, as_of):
                      latch=f"{engine.LATCH_OUT} red -> OFF, {engine.LATCH_IN} green -> ON")))
 
     live_rank = [tickers[j] for j in engine.rank(i, adj, raw, dv)]
-    sim_rank = [tickers[j] for j in concentrated.rank_at(i, adj, raw, dv, risk_adjusted=True,
+    sim_rank = [tickers[j] for j in concentrated.rank_at(i, adj, raw, sim_dv, risk_adjusted=True,
                                                         top_by_addv=engine.POOL)]
     band = engine.FILL_BAND
     # The whole ordering is compared, and the top 12 is reported separately because that is the
@@ -100,10 +132,17 @@ def compare(cur, as_of):
     same_band = live_rank[:band] == sim_rank[:band]
     first_diff = next((k for k, (a, b) in enumerate(zip(live_rank, sim_rank), start=1) if a != b),
                       None)
+    # Written down even when the ranks agree: names whose §3.2 ADDV differs between the live loader
+    # and the sim's construction tonight. Zero is the attestation that the two bases are one; a
+    # difference too small to move tonight's pool is still a difference in the rule.
+    live_addv = engine.median_addv(dv, i)
+    sim_addv = engine.median_addv(sim_dv, i, window=concentrated.ADDV_WINDOW)
+    differs = ~((live_addv == sim_addv) | (np.isnan(live_addv) & np.isnan(sim_addv)))
     out.append(("rank", same_all, live_rank[:band], sim_rank[:band],
                 dict(session=str(sessions[i]), ranked_live=len(live_rank), ranked_sim=len(sim_rank),
                      top_band_matches=same_band, first_disagreement_at=first_diff,
-                     band=band)))
+                     band=band, addv_differs=int(differs.sum()),
+                     addv_differs_first=[tickers[j] for j in np.where(differs)[0][:5]])))
     return out
 
 

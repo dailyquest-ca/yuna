@@ -135,6 +135,24 @@ def grid(sessions, tickers, rows):
 
     Rows before the window stay NaN. They are full height anyway, so session `i` is the same row
     here as in `index_px` and every caller's `len(sessions) - 1` keeps meaning tonight.
+
+    **Dollar volume is the adjusted close times the volume** — the code of record's basis
+    (`concentrated.build_grid`, and `backtest.py` since 2026-08-11), and since 2026-10-07 this
+    one's (QC finding A7). The vendor's per-ticker history carries the RAW close beside
+    split-ADJUSTED volume, so the raw close times the volume that stood here from 2026-08-17 read
+    every bar before a split at the split factor times its turnover once the name was re-pulled:
+    APH.US, 2:1 on 2026-09-03, read 1.67x its true ADDV on 10-05, and a reverse split reads a
+    fraction. It is learning 34's basis, removed from the sim and left live — look-ahead in a
+    backtest; here, where the split has happened by the time the history is restated, the same
+    factor inflating the trailing 50 sessions — and the market-mechanics rule it breaks:
+    `adj_close x volume` cancels the split factor, `raw_close x adjusted volume` compounds it.
+    The adjusted close cancels it however the bar is stored: a re-pulled bar is adjusted on both
+    sides, a bar that landed nightly and was never restated is raw on both. A bar with no
+    positive adjusted close is no bar, as in build_grid. The adjusted close folds in dividends
+    too, so a payer reads a little under its raw turnover — on the cell of record's basis as
+    well, and on an ordinary night that is what moves a name across the pool's 500th place.
+
+    The raw close stays in `raw`, for the one clause that wants the actual print: §3.2's $5 floor.
     """
     at = {d: i for i, d in enumerate(sessions)}
     col = {t: j for j, t in enumerate(tickers)}
@@ -147,7 +165,7 @@ def grid(sessions, tickers, rows):
         j = col[tk]
         adj[i, j] = float(a)
         raw[i, j] = float(c)
-        dv[i, j] = float(c) * float(v) if c is not None and v is not None else np.nan
+        dv[i, j] = float(a) * float(v) if v is not None and a > 0 else np.nan
     return adj, raw, dv
 
 
