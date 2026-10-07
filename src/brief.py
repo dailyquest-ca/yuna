@@ -8,11 +8,17 @@ That division is the whole design of this file. It renders and it does not decid
 here was computed by `sheet`, checked by `gauges` and read back through `v_session_payload`. If a
 figure appears in the brief that no other job wrote, this file has overstepped.
 
+Two reads go past the payload, both information and neither a decision: the accounts' cash
+(`db.cash_by_account`, the same anchor-plus-ledger arithmetic the engine's NAV is made of, §2.4)
+and the Saturday letter's household NAV against §1's destination (§4.1). Neither sizes, holds or
+releases anything.
+
     DATABASE_URL=... python src/brief.py
     DATABASE_URL=... DRY_RUN=true python src/brief.py     # render, print, write nothing
 
 **Nothing here places an order** (§0.2). The sheet is a proposal; Zak executes at the open.
 """
+import datetime as dt
 import json
 import os
 import pathlib
@@ -21,7 +27,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import desk                                                                # noqa: E402
 import engine                                                              # noqa: E402
-from db import connect, dry, freeze_state, Heartbeat                       # noqa: E402
+from db import cash_by_account, connect, dry, freeze_state, Heartbeat      # noqa: E402
 
 # §4.3's ticket states. The payload's `order_sheet` carries only the two a ticket can be acted on
 # in — proposed, approved — and everything else on the session arrives as `not_orders` (migration
@@ -480,25 +486,205 @@ def tranche_lines(p, frozen=False):
                    f"{planned - headroom:,.2f}. The cap is hard; the ramp is a plan. One of them "
                    f"needs Zak's ruling before the last tranche. **")
 
-    gate_on = (p["gate"] or {}).get("gate_on")
-    for t in (p["tranches"] or []):
+    # §2.3, verbatim: "Each tranche requires the gate (§3.4) ON that week; a skipped tranche shifts
+    # one month; never two tranches in one month." THAT week is the tranche's own — the week of its
+    # planned date — so tonight's gate is stated beside the tranche and never read as permission
+    # outside it (A71): "gate ON this week" printed against a tranche planned a month out, and would
+    # have printed against one whose week had passed with the gate OFF, which §2.3 has already
+    # moved a month on. The week is the calendar week of the planned date; whether a passed week
+    # was a skip, and where the shifted tranche lands, are Zak's to record — the ladder is his
+    # ledger and nothing here writes it.
+    g = p["gate"] or {}
+    gate_on = g.get("gate_on")
+    session = _date(g.get("session_date"))
+    tranches = p["tranches"] or []
+    drawn = [(t["seq"], _date(t["drawn_on"])) for t in tranches
+             if t["status"] == "drawn" and t.get("drawn_on")]
+    for t in tranches:
+        amount = f"${float(t['amount_cad']):,.0f}"
         when = f"{'~' if t['approximate'] else ''}{t['planned_on']}"
         if t["status"] == "drawn":
-            out.append(f"  tranche {t['seq']}: ${float(t['amount_cad']):,.0f} — drawn {t['drawn_on']}")
-        elif t["status"] == "skipped":
-            out.append(f"  tranche {t['seq']}: ${float(t['amount_cad']):,.0f} — skipped; §2.3 "
-                       f"shifts it one month, and never two tranches in one month")
+            # `amount_cad` is the PLAN's figure; the ladder has no column for what was drawn, and
+            # the facility line above is the balance. Printed as drawn, two C$12,000 draws read as
+            # C$25,000 one line below a facility drawn 24,000.00.
+            out.append(f"  tranche {t['seq']}: drawn {t['drawn_on']} against a planned {amount} — "
+                       f"the amount drawn is the facility's balance above, not this line's")
+            continue
+        if t["status"] == "skipped":
+            out.append(f"  tranche {t['seq']}: {amount} — skipped; §2.3 shifts it one month, and "
+                       f"never two tranches in one month")
+            continue
+        planned = _date(t["planned_on"])
+        week = planned - dt.timedelta(days=planned.weekday())
+        twin = [(seq, d) for seq, d in drawn if (d.year, d.month) == (planned.year, planned.month)]
+        # §5.5 names levered tranches explicitly among the buys a freeze halts, so the freeze is
+        # checked before the gate — a frozen tranche is held whatever the gate says.
+        if frozen:
+            why = "**held: FROZEN — §5.5 halts levered tranches with every other buy**"
+        elif twin:
+            why = (f"**held: §2.3 — never two tranches in one month; tranche {twin[0][0]} was "
+                   f"drawn {twin[0][1]}**")
+        elif session is None:
+            why = "no session has been scored, so the gate is unread"
+        elif session < week:
+            why = (f"its week (of {week}) has not come; tonight the gate reads "
+                   f"{'ON' if gate_on else 'OFF'}, and §2.3 needs it ON that week")
+        elif session <= week + dt.timedelta(days=6):
+            why = ("this is its planned week and the gate is ON (§2.3)" if gate_on
+                   else "**held: §2.3 requires the gate ON that week — it is OFF**")
         else:
-            # §5.5 names levered tranches explicitly among the buys a freeze halts, so the freeze
-            # is checked before the gate — a frozen tranche is held whatever the gate says.
-            if frozen:
-                why = "**held: FROZEN — §5.5 halts levered tranches with every other buy**"
-            elif gate_on:
-                why = "gate ON this week"
-            else:
-                why = "**held: §2.3 requires the gate ON that week**"
-            out.append(f"  tranche {t['seq']}: ${float(t['amount_cad']):,.0f} planned {when} — {why}")
+            why = (f"**its planned week (of {week}) has passed undrawn — §2.3: a skipped tranche "
+                   f"shifts one month; whether this one was skipped, and its new date, are "
+                   f"Zak's to record**")
+        out.append(f"  tranche {t['seq']}: {amount} planned {when} — {why}")
     return out
+
+
+def _date(x):
+    """A date from the payload, which carries dates as ISO strings inside its JSON items."""
+    if x is None or isinstance(x, dt.date):
+        return x
+    return dt.date.fromisoformat(str(x)[:10])
+
+
+# §2.3: "Every draw purchases VXC.TO in the NONREG the same day — one draw, one purchase." The
+# account a facility draw lands in, quoted rather than inferred.
+LEVERED_ACCOUNT = "NONREG"
+
+
+def account_cash(cur):
+    """Each account's cash: `db.cash_by_account`, with §2.3's draws put where §2.3 puts them.
+
+    `cash_by_account` is the one definition — the newest `balances` anchor, carried forward by the
+    ledger's trades, the arithmetic the engine's NAV is made of. A trade moves cash; a facility
+    draw is not a trade, so the levered account's carried cash pays for every VXC.TO purchase and
+    never receives the draw that funded it. Production, 2026-09-22: the second tranche bought 139
+    VXC.TO for C$11,995.70 out of a NONREG anchored at C$37.01 on 08-17, and the carried figure read
+    −C$11,958.69 against a real C$41.31 — while the LOC's newer reading had already taken the
+    C$12,000 draw onto the debt side. §2.3 says where every draw goes, so the facilities' drawn
+    balance since the levered account's own anchor is credited there: borrowing is NAV-neutral at
+    the moment of use (`cash_by_account`), and this is what keeps it so when the facility has been
+    read more recently than the account.
+
+    Returns {account: dict} as `cash_by_account` does; the levered account gains
+    `draws_since_anchor` (CAD), or `draws_unknown` naming a facility with no reading on or before
+    its anchor, which leaves its cash uncorrected and says so. "Drawn now" is the facility's own
+    `cash_by_account` entry — the same figure `household_nav` subtracts as debt.
+    """
+    cash = {a: dict(c) for a, c in cash_by_account(cur).items()}
+    lev = cash.get(LEVERED_ACCOUNT)
+    if lev is None or lev.get("as_of") is None:
+        return cash
+    cur.execute("""select a.code,
+                          (select b.drawn from balances b
+                            where b.account = a.code and b.drawn is not null and b.as_of <= %s
+                            order by b.as_of desc, b.id desc limit 1)
+                     from accounts a where a.kind = 'facility' order by a.code""",
+                (lev["as_of"],))
+    since, unknown = 0.0, []
+    for code, then in cur.fetchall():
+        now = (cash.get(code) or {}).get("drawn")
+        if now is None:
+            continue
+        if then is None:
+            unknown.append(code)
+            continue
+        since += float(now) - float(then)
+    if unknown:
+        lev["draws_unknown"] = unknown
+    elif since:
+        lev["draws_since_anchor"] = round(since, 2)
+        lev["cad"] = float(lev.get("cad") or 0) + since
+    return cash
+
+
+def cash_lines(cash, session):
+    """§2.4: "Cash that is not awaiting a same-week engine order sits in the account's designated
+    holding." Information, never a ticket — §0.2 leaves every order to Zak, and §2.4 names no
+    amount below which cash may sit, so none is applied here (A72).
+
+    Nothing showed account cash before this. The C$584.87 the RRSP was anchored with on 2026-08-17
+    sat seven weeks without a line in any brief, and the anchors' own age — the one thing that says
+    how far to trust a carried figure — was printed nowhere.
+    """
+    accounts = [(a, c) for a, c in sorted(cash.items()) if c.get("kind") != "facility"]
+    out = ["", "## Cash (§2.4 — information; nothing here is ordered)", ""]
+    if not accounts:
+        out.append("  no cash anchor on record (`balances`) — §2.4 cannot be read without one")
+        return out
+    day = _date(session)
+    for acct, c in accounts:
+        as_of = _date(c.get("as_of"))
+        age = f", {(day - as_of).days} days before this session" if day and as_of else ""
+        line = (f"  {acct:<8} {float(c.get('cad') or 0):>12,.2f} CAD · "
+                f"{float(c.get('usd') or 0):>10,.2f} USD   anchor {as_of}{age}")
+        if c.get("draws_since_anchor"):
+            line += (f"; includes {c['draws_since_anchor']:,.2f} CAD drawn on the facility since "
+                     f"it (§2.3)")
+        if c.get("draws_unknown"):
+            line += (f"; ** no {', '.join(c['draws_unknown'])} reading on or before this anchor, so "
+                     f"draws since it are not counted **")
+        out.append(line)
+    out.append("  An anchor is a reading; the ledger carries it forward by trades only — deposits,")
+    out.append("  dividends and interest wait for the next anchor. §2.4: cash not awaiting a")
+    out.append("  same-week engine order sits in the account's designated holding (§2.1: RRSP SPMO,")
+    out.append("  NONREG VXC.TO). Every order is Zak's (§0.2).")
+    return out
+
+
+def household_nav(cur, session, cash):
+    """§4.1's "NAV vs the §1 destination", from the store as it stands. Returns (dict, None) or
+    (None, why).
+
+    Everything held, at its last close on or before the session; every account's cash
+    (`account_cash`); less what the facilities are drawn. USD converts at the session's USDCAD.
+
+    The letter used to print the newest `nav_snapshots` row, and the only writer of that table is
+    the retired `arming.py`: seven letters, 2026-08-22 to 10-03, printed the same provisional
+    2026-08-15 snapshot of the pre-liquidation book — 204,109 CAD (4.1%), its debt still the legacy
+    C$7,980 — with nothing to say it was seven weeks old (A50).
+
+    Fails closed rather than understating: a holding with no close, or a currency with no rate,
+    makes the number unknown, and the letter says which.
+    """
+    s = str(session)
+    cur.execute("""select close, d from prices where ticker = 'USDCAD.FOREX' and d <= %s
+                    order by d desc limit 1""", (s,))
+    row = cur.fetchone()
+    fx, fx_on = (float(row[0]), row[1]) if row and row[0] else (None, None)
+    rate = {"CAD": 1.0, "USD": fx}
+    cur.execute("""select b.account, b.ticker, coalesce(b.currency, 'USD'), b.qty, p.close
+                     from book b
+                     left join lateral (select close from prices
+                                         where ticker = b.ticker and d <= %s
+                                         order by d desc limit 1) p on true
+                    where b.status = 'open'""", (s,))
+    positions = cur.fetchall()
+    unpriced = sorted({tk for _, tk, _, _, close in positions if close is None})
+    if unpriced:
+        return None, f"no close on or before {s} for {', '.join(unpriced)}"
+    accounts = {a: c for a, c in cash.items() if c.get("kind") != "facility"}
+    unanchored = sorted({a for a, *_ in positions} - set(accounts))
+    if unanchored:
+        return None, f"no cash anchor for {', '.join(unanchored)} — its cash is unknown"
+    blind = sorted({f for c in accounts.values() for f in c.get("draws_unknown") or ()})
+    if blind:
+        return None, (f"no {', '.join(blind)} reading on or before the {LEVERED_ACCOUNT} anchor, "
+                      f"so the draws since it cannot be put against the debt")
+    if not positions and not accounts:
+        return None, "nothing held and no cash anchor on record"
+    needs = {ccy for _, _, ccy, _, _ in positions} | (
+        {"USD"} if any(float(c.get("usd") or 0) for c in accounts.values()) else set())
+    missing = sorted(ccy for ccy in needs if rate.get(ccy) is None)
+    if missing:
+        return None, f"no {', '.join(missing)}→CAD rate on or before {s}"
+    held = sum(float(q) * float(close) * rate[ccy] for _, _, ccy, q, close in positions)
+    money = sum(float(c.get("cad") or 0) + float(c.get("usd") or 0) * (fx or 0.0)
+                for c in accounts.values())
+    debt = sum(float(c.get("drawn") or 0) for c in cash.values() if c.get("kind") == "facility")
+    return dict(nav_cad=held + money - debt, held_cad=held, cash_cad=money, debt_cad=debt,
+                fx=fx, fx_on=fx_on,
+                anchors=sorted({str(c.get("as_of")) for c in accounts.values()})), None
 
 
 # §1, Zak's words: "Get to $5M as fast as possible, so I can retire and do whatever work I want —
@@ -560,20 +746,51 @@ def saturday_lines(cur, p):
                + (", ".join(f"{d[0]} gate {d[1]}/{d[2]}" for d in diverged) if diverged
                   else "none on the gate"))
 
-    household = (n.get("household") or {}).get("nav_cad")
-    if household:
-        pct = 100.0 * float(household) / DESTINATION
-        out.append(f"  NAV vs the §1 destination: {float(household):,.0f} of "
+    session = (p.get("gate") or {}).get("session_date")
+    house, why = (household_nav(cur, session, account_cash(cur)) if session
+                  else (None, "no session has been scored"))
+    if house:
+        pct = 100.0 * house["nav_cad"] / DESTINATION
+        out.append(f"  NAV vs the §1 destination: {house['nav_cad']:,.0f} of "
                    f"{DESTINATION:,.0f} {DESTINATION_CURRENCY} ({pct:.1f}%)")
+        rate = f", USDCAD {house['fx']:.4f} of {house['fx_on']}" if house["fx"] else ""
+        out.append(f"    every account at the {session} closes{rate}: holdings "
+                   f"{house['held_cad']:,.0f} + cash {house['cash_cad']:,.0f} (anchored "
+                   f"{', '.join(house['anchors']) or '—'}, carried by the ledger) − facility "
+                   f"{house['debt_cad']:,.0f}")
         out.append(f"    §1 names the number and not the currency; the household is measured in "
                    f"{DESTINATION_CURRENCY}, so the comparison is made there. Engine NAV above is "
                    f"the TFSA alone, in USD.")
     else:
-        out.append("  NAV vs the §1 destination: no NAV snapshot recorded")
+        out.append(f"  NAV vs the §1 destination: not computable — {why}")
+    return out + exclusion_lines(p)
+
+
+def exclusion_lines(p):
+    """§3.2: "The live table is surfaced in the payload and the Saturday letter." It was in the
+    payload and in no letter (A43): SGI.US — Somnigroup, a live common stock — was excluded on
+    2026-08-12 to "keep TPX", a line whose last bar is 2025-02-14, and seven letters went by
+    without the row appearing once.
+
+    Every row, as the payload carries it, with the excluded line's own last bar beside its reason:
+    §3.2 keeps "the line still printing", so the date is the fact a reader checks the reason
+    against. Nothing is judged here — an exclusion that removes a real, tradable common stock for
+    an editorial reason is a strategy change, and that ruling is Zak's (§3.2).
+    """
+    rows = p.get("exclusions") or []
+    out = [f"  exclusions (§3.2 — the live table, {len(rows)} row(s); data hygiene only, and "
+           f"excluding a real, tradable common stock for any editorial reason needs a ruling):"]
+    for e in rows:
+        out.append(f"    {e['ticker']:<12} {e['reason']:<18} last bar {e.get('last_bar') or '—'}"
+                   f" · {e.get('detail') or ''}")
+    if not rows:
+        out.append("    none")
     return out
 
 
-def render(p, frozen=False, words=None):
+def render(p, frozen=False, words=None, cash=None):
+    """The brief. `cash` is `account_cash`'s read, passed in by `main` because the payload does not
+    carry it; without it the cash section is left out rather than printed empty."""
     g = p["gate"] or {}
     out = [f"# Yuna · {g.get('session_date') or 'no session'}", ""]
     if frozen:
@@ -594,6 +811,8 @@ def render(p, frozen=False, words=None):
     out += ["", "## NAV & drawdown (§5.2)", ""] + dd_lines(p)
     out += ["", "## Levered layer (§2.3) — CAD, as the draw and the purchase both are", ""]
     out += tranche_lines(p, frozen=frozen)
+    if cash is not None:
+        out += cash_lines(cash, g.get("session_date"))
 
     top = p["top12"] or []
     if top:
@@ -624,7 +843,7 @@ def main():
         with conn.cursor() as cur:
             p = payload(cur)
             frozen, words, froze_at, _ = freeze_state(cur)
-            report = render(p, frozen=frozen, words=words)
+            report = render(p, frozen=frozen, words=words, cash=account_cash(cur))
             if slot == "saturday":
                 report += "\n\n## The week (§4.1)\n\n" + "\n".join(saturday_lines(cur, p))
         print(report)

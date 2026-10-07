@@ -1,9 +1,9 @@
--- 068_the_payload_answers_for_tonight.sql — 2026-10-07. Two payload items that answered for
+-- 068_the_payload_answers_for_tonight.sql — 2026-10-07. Three payload items that answered for
 -- something other than tonight's sheet, and the drawdown series that measured the wrong number.
 --
--- QC review 2026-10-07, findings A10, A9/A20 and A28. All three are §4.2's payload ("the single
--- read of every session"), so every reader inherits them: the brief Zak executes from and every
--- chat session that judges from the one read (§0.4).
+-- QC review 2026-10-07, findings A10, A9/A20, A28 and A43. All four are §4.2's payload ("the
+-- single read of every session"), so every reader inherits them: the brief Zak executes from and
+-- every chat session that judges from the one read (§0.4).
 --
 -- ---------------------------------------------------------------------------------------------
 -- 1. THE ORDER SHEET CARRIES ORDERS (A10)
@@ -72,6 +72,15 @@
 -- contribution would read as a new high and a withdrawal as a fall, at the first anchor after it.
 --
 -- ---------------------------------------------------------------------------------------------
+-- 4. THE EXCLUSION TABLE SAYS WHICH LINE STILL PRINTS (A43)
+--
+-- §3.2: duplicate listings are excluded keeping "the line still printing", and "the live table is
+-- surfaced in the payload and the Saturday letter". The letter now renders it (src/brief.py), and
+-- each row carries the excluded line's own last bar, read from the store — so an exclusion whose
+-- line is the one still printing (SGI.US, excluded 2026-08-12 to keep TPX.US, whose last bar is
+-- 2025-02-14) shows its date beside its reason instead of passing seven letters unread.
+--
+-- ---------------------------------------------------------------------------------------------
 -- `create or replace` throughout: same columns, same order, same types, so grants and every
 -- reader survive; new columns only at the end, new keys only inside the JSON items.
 
@@ -137,9 +146,13 @@ select
         and session_date = (select max(session_date) from engine_sessions where mode = 'live')
         and rank <= 12) t)                                                  as top12,
 
-  -- 5. the exclusion table (§3.2 permits four categories and nothing else)
+  -- 5. the exclusion table (§3.2 permits four categories and nothing else), each row with the
+  --    excluded line's own last bar — §3.2 keeps "the line still printing" (068, A43)
   (select jsonb_agg(row_to_json(e) order by e.reason, e.ticker) from (
-     select ticker, reason, detail from universe_excluded) e)               as exclusions,
+     select x.ticker, x.reason, x.detail, lb.d as last_bar
+       from universe_excluded x
+       left join lateral (select d from prices where ticker = x.ticker
+                           order by d desc limit 1) lb on true) e)          as exclusions,
 
   -- 6. NAV & DD status (§5.2 — information, never action). The drawdown is on engine NAV (068,
   --    A28); `nav_source` says where tonight's NAV came from (derived, or an override), USD.
