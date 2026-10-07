@@ -171,22 +171,73 @@ def _returns(cur, a, b):
     return cols[a], cols[b], len(days)
 
 
+def quarantine_verdict(cur, line, twin):
+    """Is the quarantine on `line` still evidenced by its pairing with `twin`? Returns
+    (verdict, shared, why): 'no-bars', 'clean', 'twin-is-the-copy' or 'corrupt'.
+
+    The question 050 asked — are these two lines one series? — accuses BOTH lines of the same
+    defect, and for a common stock beside its own warrant that is the wrong question (QC 2026-10-07,
+    A73). VGNT.US's quarantine reads "warrant/common pair share an identical series", and they do:
+    on production at 2026-10-06, 124 of 125 shared closes identical. But the -W line never prints
+    on a session the common does not, while the common prints eight sessions alone, every one a
+    real trade, and its 133 bars cover every session of its span. A copy cannot print without its
+    source, so the copy runs FROM the common INTO the warrant line, and the defect is the warrant
+    line's — which is excluded on its own account (`not_common_equity`). Asked as "same series?",
+    the test returns True for as long as the vendor keeps copying, whatever is true of the common,
+    and Zak's 2026-08-16 ruling ("if the defect is gone then we can allow them") can never be met.
+
+    So when the two ARE one series, the census asks which line carries it as a copy, and the test
+    is the plan's own definition of a print (§8: "an actual executed trade on the tape" — a bar
+    with volume): `line` printed on sessions where `twin` did not, and `twin` never printed where
+    `line` did not. No number is chosen. Two conditions keep it from releasing the wrong thing:
+    `twin` must stay out on an exclusion of its own, not this quarantine, so releasing `line` does
+    not re-admit the duplicate; and two unrelated companies on one series (APPS/BDN, both
+    quarantined) never qualify, because the direction of a copy cannot say whose prices they are.
+
+    The verdict PROPOSES and writes nothing. 056 recorded this quarantine as standing under Zak's
+    conditional ruling, and the identical series it names is still there, so whether the common's
+    own series being clean meets his condition is put back to him rather than read into it.
+    """
+    import bars
+
+    ra, rb, n = _returns(cur, line, twin)
+    if n < 2:
+        return "no-bars", 0, "fewer than two shared sessions — no bars to compare"
+    shared = int((~(ra != ra) & ~(rb != rb)).sum())
+    if not bars.same_security(ra, rb):
+        return "clean", shared, ("CLEAN — the defect is gone, and §3.2 calls a standing exclusion "
+                                 "of a live tradable common stock a strategy change. Propose "
+                                 "RELEASING it.")
+    cur.execute("""select ticker, d from prices
+                    where ticker in (%s, %s) and volume > 0""", (line, twin))
+    prints = {line: set(), twin: set()}
+    for tk, d in cur.fetchall():
+        prints[tk].add(d)
+    alone, copied = prints[line] - prints[twin], prints[twin] - prints[line]
+    cur.execute("select reason from universe_excluded where ticker = %s", (twin,))
+    row = cur.fetchone()
+    own_account = row[0] if row and row[0] != "quarantine" else None
+    if alone and not copied and own_account:
+        return "twin-is-the-copy", shared, (
+            f"ONE SERIES, AND {twin} IS THE COPY — it never prints without {line}, which prints "
+            f"{len(alone)} session(s) alone. The defect is {twin}'s, and {twin} stays out on its "
+            f"own account ({own_account}). {line}'s series is its own: propose RELEASING it. The "
+            f"identical series is still there, so whether that meets the 2026-08-16 condition is "
+            f"Zak's word, not the census's.")
+    return "corrupt", shared, "STILL CORRUPT — the exclusion stands"
+
+
 def held_back(cur):
     import bars
 
     print("\n=== 050's quarantine rows: does the identical series survive the re-pull? ===")
     for a, b in QUARANTINED:
-        ra, rb, n = _returns(cur, a, b)
-        if n < 2:
-            print(f"  {a} / {b}: fewer than two shared sessions — no bars to compare")
+        verdict, shared, why = quarantine_verdict(cur, a, b)
+        if verdict == "no-bars":
+            print(f"  {a} / {b}: {why}")
             continue
-        twins = bars.same_security(ra, rb)
-        shared = int((~(ra != ra) & ~(rb != rb)).sum())
-        print(f"  {a} / {b}: {shared} shared sessions · same series = {twins}")
-        verdict = ("STILL CORRUPT — the exclusion stands" if twins else
-                   "CLEAN — the defect is gone, and §3.2 calls a standing exclusion of a live "
-                   "tradable common stock a strategy change. Propose RELEASING it.")
-        print(f"      {verdict}")
+        print(f"  {a} / {b}: {shared} shared sessions · same series = {verdict != 'clean'}")
+        print(f"      {why}")
 
     print("\n=== 050's dead pairs: does §3.2's rule decide? ===")
     for a, b in DEAD_PAIRS:
