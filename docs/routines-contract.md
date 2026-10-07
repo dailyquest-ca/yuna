@@ -28,8 +28,10 @@ select session_date, summary, body, at
 - **`body`** is the complete brief — freshness banner, gate and latch, the order sheet, the book,
   NAV and drawdown, the levered layer, the top 12, reconciliation, learnings. Send it as-is.
 - **`summary`** is a one-liner for a push title: `gate ON · 6 order(s)`.
-- **`detail->>'engine' = 'v1'`** matters. The retired `compose.py` also writes `kind = 'nightly'`,
-  and it is still dispatchable. Without this filter a Routine can pick up the old engine's row.
+- **`detail->>'engine' = 'v1'`** matters. The retired `compose.py` also wrote `kind = 'nightly'` —
+  its rows for sessions 2026-07-31 to 08-17 are still in `briefs` — and its source is still on
+  disk, though no workflow runs it (learning 66). Without this filter a Routine can pick up the old
+  engine's row.
 
 **What changed from the old contract**
 
