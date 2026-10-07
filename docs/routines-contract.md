@@ -159,9 +159,14 @@ reference for the rules; a session does it in SQL because a session has no shell
 
 - **`ledger drives TFSA SPMO.US to -810 shares — the history for this name is incomplete`** — a sell
   of a position bought before this ledger existed. Record the opening balance first, as a `confirm`
-  row with the quantity and cost the book already holds, then re-record the sell.
+  row with the quantity and cost the book already holds, then re-record the sell. **Unless the sell
+  is larger than everything ever bought** — the share count after a split, or a mistyped quantity.
+  Then the sell is the wrong row, and a `confirm` row would invent shares and move the cost basis:
+  check it against the broker and ask Zak.
 - **`NOPE.US is not in universe`** — check the symbol in EODHD form (`NUE.US`, `CNQ.TO`).
-- **anything about `guard_book`** — you tried to write `book`. Write `transactions` instead.
+- **anything about `guard_book` or `book_one_open_row_per_position`** — you tried to write `book`.
+  Write `transactions` instead: a second purchase of a position is a second ledger row, never a
+  second book row (migration 069).
 
 ### The NAV is derived — the chat no longer relays it
 
@@ -250,9 +255,10 @@ select * from v_ledger_vs_book;
 ```
 
 Empty is the goal. A row with `predates_the_ledger = false` is a real break and something wrote one
-side without the other. A row with `predates_the_ledger = true` is a holding older than its own
-history — true of the book today, not a defect, and it heals itself when the export lands. Today
-that is SPMO in the TFSA and the RRSP, bought with the §6.1 proceeds.
+side without the other — a row left open after the ledger sold the name out included, and a
+position held in more than one open book row (`open_rows`), which the ledger refuses to move. A row
+with `predates_the_ledger = true` is a holding with no ledger rows behind it at all — not a defect,
+and it heals itself when the export lands.
 
 ---
 
@@ -262,7 +268,10 @@ that is SPMO in the TFSA and the RRSP, bought with the §6.1 proceeds.
 - **Never write a ticket to `approved`.** That is Zak's word, in chat, and `reconcile` looks for a
   receipt against it afterwards.
 - **Never write `book` directly.** Write the ledger (§4b) and let the position follow. A book poked
-  by hand is a book that agrees with nothing, and `guard_book` refuses it.
+  by hand is a book that agrees with nothing. `guard_book` refuses it for every role but the owner
+  — and the chat connector logs in as the owner, which is how a second VXC.TO row reached the book
+  on 2026-09-28 and the brief showed 418 shares against 279 held for nine days. Since migration 069
+  a second open row for a position is refused for every role.
 - **Never invent a price, a quantity or a date to complete a ledger row.** If the export is
   ambiguous, say which row and which field — a `stated` row with a number Zak did not give is worse
   than no row, because it looks exactly like one he did.

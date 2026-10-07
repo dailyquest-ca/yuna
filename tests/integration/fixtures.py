@@ -3,9 +3,25 @@
 Deliberately hand-built rather than copied from production: a test whose data came from the live
 database stops being a test the moment the market moves.
 """
+import contextlib
 import datetime as dt
 
 SESSIONS = 300
+
+
+@contextlib.contextmanager
+def book_before_069(conn):
+    """The book as it stood before migration 069: no `book_one_open_row_per_position`, so a
+    position can sit in two open rows — as NONREG VXC.TO did from 2026-09-28 until 069 closed the
+    stray one. The index is dropped inside the caller's transaction and the block always ends in a
+    rollback, so it never outlives the block: nothing inside may commit, and any setup the test
+    needs belongs inside it."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("drop index if exists book_one_open_row_per_position")
+        yield
+    finally:
+        conn.rollback()
 
 
 def trading_days(n=SESSIONS, end=None):

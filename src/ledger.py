@@ -231,16 +231,19 @@ def main():
         with conn.cursor() as cur:
             if args.cmd == "check":
                 cur.execute("""select account, ticker, ledger_qty, book_qty, difference,
-                                      stated_rows, predates_the_ledger
+                                      stated_rows, predates_the_ledger, open_rows
                                  from v_ledger_vs_book order by predates_the_ledger, account,
                                       ticker""")
                 rows = cur.fetchall()
                 print("ledger vs book:" + (" they match" if not rows else ""))
                 breaks, older = [], []
-                for acct, tk, lq, bq, diff, stated, predates in rows:
+                for acct, tk, lq, bq, diff, stated, predates, open_rows in rows:
                     (older if predates else breaks).append(f"{acct} {tk}")
+                    # Migration 069: a position split across open book rows is a break even where
+                    # the rows add up — the ledger refuses to move it until one is closed.
                     tail = ("held since before the ledger — the export has not landed yet"
-                            if predates else f"diff {diff:+,.4f}  stated_rows={stated or 0}")
+                            if predates else f"diff {diff:+,.4f}  stated_rows={stated or 0}"
+                            + (f"  in {open_rows} open book rows" if open_rows > 1 else ""))
                     print(f"  {acct:<7} {tk:<10} ledger {lq or 0:>12,.4f}  book "
                           f"{bq or 0:>12,.4f}  {tail}")
                 # Zak's rule, 2026-08-18: a stated trade the export has already reported past
