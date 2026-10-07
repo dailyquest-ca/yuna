@@ -25,7 +25,8 @@ def autopsy(tmp_path, job="probe", rid=RID, attempt="1", tail="Traceback: boom",
     out = tmp_path / "job.out"
     out.write_text(tail)
     env = {**os.environ}
-    for k in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "DRY_RUN"):
+    for k in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "DRY_RUN",
+              "AUTOPSY_RUN_ID", "AUTOPSY_RUN_ATTEMPT", "AUTOPSY_CANCELLED"):
         env.pop(k, None)
     env.update(extra)
     if rid:
