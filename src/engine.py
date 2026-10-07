@@ -20,6 +20,7 @@ These functions return proposals.
 """
 import hashlib
 import json
+import math
 import warnings
 
 import numpy as np
@@ -276,6 +277,37 @@ def position_size(nav, price, *, slots=SLOTS):
     if price is None or price <= 0:
         raise ValueError("cannot size a position on a missing or non-positive price")
     return int(nav / slots // price)
+
+
+def capped_size(nav, price, alloc, *, slots=SLOTS):
+    """§3.5 as amended by v1.1 (2026-10-06) — "Order size = the lesser of slot weight and
+    deployable TFSA cash... When several buys share a session, deployable cash divides equally
+    among them, each capped at slot weight."
+
+    `alloc` is this buy's equal share of the night's deployable cash, in the price's currency.
+    Both legs are whole shares rounded DOWN, `position_size`'s convention, so the order can
+    neither overspend its slot nor the cash it was given. A result below `position_size` is a slot
+    filled below weight, which §3.5 counts as filled and never tops up.
+    """
+    if alloc is None or alloc < 0:
+        raise ValueError(f"cannot size a buy on a missing or negative cash share; got {alloc}")
+    return min(position_size(nav, price, slots=slots), int(alloc // price))
+
+
+def park_draw(shortfall, lot, price):
+    """How much of a park lot one shortfall draws: whole shares, enough to cover it, never more
+    than the lot holds. §3.5 (v1.1): "a shortfall beyond TFSA park and cash is reported as
+    held-below-weight, not funded" — so the park pays the shortfall and only the shortfall.
+
+    Rounded UP, unlike a buy, because a draw that falls a share short leaves the buys it exists
+    for short; the fraction of a share it over-draws stays in the account as cash, which v1.1
+    makes the park.
+    """
+    if price is None or price <= 0:
+        raise ValueError("cannot draw on a park lot with a missing or non-positive price")
+    if shortfall <= 0:
+        return 0
+    return min(lot, math.ceil(shortfall / price))
 
 
 def participation_ok(qty, price, addv, *, cap=MAX_PARTICIPATION):

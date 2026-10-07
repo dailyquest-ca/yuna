@@ -20,6 +20,9 @@ from test_desk import _world                                              # noqa
 
 
 def _score(cur, days, nav=200_000.0, mode="live"):
+    """One pass of `score` without the job around it. Since v1.1 a buy is sized against the TFSA
+    cash the store states as well as against NAV, so a test whose buys must carry quantities builds
+    its world with `_world(cur, cash=...)`; without it every buy is written unsized."""
     s = desk.sheet(cur, days[-1], nav)
     sheet.write_session(cur, s, mode, engine.digest())
     sheet.write_ranks(cur, s, mode)
@@ -33,7 +36,7 @@ def _statuses(gauge_list):
 
 def test_a_clean_night_is_green_on_every_gauge(db, migrated):
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=200_000.0)
         _score(cur, days)
     db.commit()
     verdict, got = gauges.run(db)
@@ -243,7 +246,7 @@ def test_the_sheet_gauge_re_derives_every_quantity_from_the_plan(db, migrated):
     """§3.5's own arithmetic, recomputed. A quantity that does not follow from it is the single
     most expensive defect this repository can produce, because it does not throw."""
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=200_000.0)
         _score(cur, days)
         db.commit()
         assert gauges.sheet_arithmetic(cur, gauges.newest_session(cur))["status"] == "green"
@@ -362,7 +365,7 @@ def test_a_ticket_beyond_the_decision_is_not_a_failure(db, migrated):
     that no longer decides it. That is the record of a real trade, not a missing order — the
     completeness check must compare sets, never counts."""
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=200_000.0)
         _score(cur, days)
         cur.execute("""insert into tickets (session_date, ticker, account, sleeve, action, reason,
                                             clause, order_type, qty, mark, rank, state, note)
@@ -563,7 +566,7 @@ def test_a_withdrawn_ticket_is_not_counted_as_an_order(db, migrated):
     a withdrawn ticket would go RED for failing to match §3.5's arithmetic.
     """
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=200_000.0)
         _score(cur, days)
         cur.execute("""select count(*) from tickets where session_date = %s""", (days[-1],))
         before = cur.fetchone()[0]
@@ -584,7 +587,7 @@ def test_a_stale_quantity_on_a_withdrawn_ticket_does_not_go_red(db, migrated):
     engine has already retracted. Red holds the buys (§4.4), so this would hold a correct sheet on
     the strength of an incorrect one nobody is being asked to execute."""
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=200_000.0)
         _score(cur, days)
         cur.execute("""update tickets set state = 'cancelled', qty = 999999
                         where session_date = %s and ticker = 'N00.US'""", (days[-1],))
@@ -594,32 +597,48 @@ def test_a_stale_quantity_on_a_withdrawn_ticket_does_not_go_red(db, migrated):
     assert sheet_gauge["status"] == "green", sheet_gauge["why"]
 
 
-def test_the_gauge_re_derives_a_seed_sheet_fund_and_topups_included(db, migrated):
-    """The first real seed sheet must not be held by its own arithmetic check. A `fund` sell's
-    quantity is the park position, not NAV/5; a `top_up` buy is the slot LESS the line held. The
-    gauge validates each by its own rule — and still goes red when a top-up quantity is wrong,
-    because a wrong size on the one sheet that deploys everything is the most expensive number
-    this system can produce."""
+def test_the_gauge_re_derives_a_seed_sheet_park_draw_included(db, migrated):
+    """The first real seed sheet must not be held by its own arithmetic check, and a wrong size on
+    the one sheet that deploys everything is the most expensive number this system can produce.
+
+    Since v1.1 a `fund` sell is the park's draw for the buys' shortfall (§3.5) — here 386 of 810
+    SPMO, for four slots of 40,000 against 100,000 of cash — and the partial line at rank 1 is
+    reported, never topped up. The gauge re-derives the draw from the recorded shortfall and each
+    fill from its share of the cash, so the sheet reads green; a fill one share off reads red, and
+    so does a draw of the whole lot — the sell the gauge used to pass at any quantity (QC A6)."""
     from test_desk import _park, _shadow_passed
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=100_000.0)
         _park(cur, days)
         _shadow_passed(cur, days)
         cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
                        values ('N00.US','TFSA','momentum',20,40.0,'open')""")
-        _score(cur, days)
+        s = _score(cur, days)
     db.commit()
+    assert [o["qty"] for o in s["orders"] if o["clause"] == "fund"] == [386]
+    assert not [o for o in s["orders"] if o["clause"] == "top_up"]
     verdict, got = gauges.run(db)
     sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
     assert sheet_gauge["status"] == "green", sheet_gauge
 
-    with db.cursor() as cur:                            # now break the top-up's size
-        cur.execute("""update tickets set qty = qty + 7
-                        where clause = 'top_up' and session_date = %s""", (days[-1],))
+    with db.cursor() as cur:                            # a fill one share off
+        cur.execute("""update tickets set qty = qty + 1
+                        where ticker = 'N01.US' and session_date = %s""", (days[-1],))
     db.commit()
     verdict, got = gauges.run(db)
     sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
-    assert sheet_gauge["status"] == "red", "a mis-sized top-up must hold the buys"
+    assert sheet_gauge["status"] == "red", "a mis-sized fill must hold the buys"
+
+    with db.cursor() as cur:                            # the fill back, and the whole lot drawn
+        cur.execute("""update tickets set qty = qty - 1
+                        where ticker = 'N01.US' and session_date = %s""", (days[-1],))
+        cur.execute("""update tickets set qty = 810
+                        where clause = 'fund' and session_date = %s""", (days[-1],))
+    db.commit()
+    verdict, got = gauges.run(db)
+    sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
+    assert sheet_gauge["status"] == "red", "the whole lot is not the shortfall"
+    assert any("fund sell 810" in f for f in sheet_gauge["failures"])
 
 
 def test_a_tape_that_advanced_past_the_newest_session_is_red(db, migrated):
@@ -640,21 +659,23 @@ def test_a_tape_that_advanced_past_the_newest_session_is_red(db, migrated):
     assert verdict == "red", "a stale sheet holds the buys (§0.4)"
 
 
-def test_a_fractionally_held_name_tops_up_green(db, migrated):
-    """desk.sheet sizes a top-up as int(slot - held), the held line being whatever the broker
-    filled — ASX.US is 512.4837 shares. The gauge truncated the held line first and asked for one
-    share more, so every top-up of a fractional holding read RED and held the night's buys
-    (QC 2026-10-07, A8). Re-derived the desk's way, a correct top-up is green."""
+def test_a_fractionally_held_name_below_weight_reads_green(db, migrated):
+    """QC A8: the desk topped a fractionally held name up as int(slot - held) — ASX.US is 512.4837
+    shares — and the gauge truncated the held line first and asked for one share more, so every
+    top-up of a fractional holding read RED and held the night's buys. v1.1 removes the top-up
+    itself (§3.5: a slot filled below weight "is never topped up"), so the same book is reported
+    below weight, orders nothing for the name, and the sheet reads green."""
     from test_desk import _park, _shadow_passed
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=200_000.0)
         _park(cur, days)
         _shadow_passed(cur, days)
         cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
                        values ('N00.US','TFSA','momentum',20.5,40.0,'open')""")
         s = _score(cur, days)
     db.commit()
-    assert any(o["clause"] == "top_up" and o["ticker"] == "N00.US" for o in s["orders"])
+    assert not [o for o in s["orders"] if o["ticker"] == "N00.US"], "never topped up"
+    assert [u["ticker"] for u in s["underweight"]] == ["N00.US"], "reported instead"
     verdict, got = gauges.run(db)
     sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
     assert sheet_gauge["status"] == "green", sheet_gauge
@@ -666,7 +687,7 @@ def test_an_order_over_the_participation_cap_is_red(db, migrated):
     (QC 2026-10-07, A64). At a NAV large enough that a fifth of it outweighs a day's trading in the
     name, every fill breaks the cap, and the sheet must not read green."""
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=1e12)
         s = _score(cur, days, nav=1e12)
     db.commit()
     assert all(o["participation_ok"] is False for o in s["orders"] if o["action"] == "buy")
@@ -674,3 +695,80 @@ def test_an_order_over_the_participation_cap_is_red(db, migrated):
         g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
     assert g["status"] == "red", g
     assert sum("ADDV" in f for f in g["failures"]) == 5
+
+
+# ---- §3.5 as v1.1 amended it -----------------------------------------------------------------
+
+def test_an_attested_share_its_parts_do_not_give_is_red(db, migrated):
+    """The share every fill is re-derived against is attested by `score`, so the gauge adds it up
+    again: the cash's own legs, tonight's sell tickets at quantity × decision close, the park's
+    draw. An attested share its parts do not give sizes every buy on the sheet wrong at once — and
+    reads red even when each ticket agrees with it, which is the case a per-ticket check alone
+    cannot see."""
+    from test_desk_v11 import _close, _ten_oh_five
+    with db.cursor() as cur:
+        days, deployable = _ten_oh_five(cur)
+        _score(cur, days)
+        db.commit()
+        assert gauges.sheet_arithmetic(cur, gauges.newest_session(cur))["status"] == "green"
+
+        inflated = deployable * 1.05                     # a share the parts do not give
+        px = _close(cur, "N04.US", days[-1])
+        cur.execute("""update engine_sessions
+                          set detail = jsonb_set(jsonb_set(detail, '{sizing,alloc}', %s::jsonb),
+                                                 '{sizing,deployable}', %s::jsonb)
+                        where session_date = %s""",
+                    (json.dumps(inflated), json.dumps(inflated), days[-1]))
+        cur.execute("""update tickets set qty = %s where ticker = 'N04.US' and session_date = %s""",
+                    (min(int(200_000.0 / 5 // px), int(inflated // px)), days[-1]))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red", g
+    assert any("re-add to" in f for f in g["failures"])
+
+
+def test_a_top_up_is_no_longer_a_clause(db, migrated):
+    """v1.1's §3.5: a slot filled below weight "is never topped up". A top-up on tonight's sheet is
+    a clause the plan no longer has, and reads red however its quantity was worked out (QC A6, A8)
+    — even the one the old gauge accepted, the slot less the line held."""
+    from test_desk_v11 import _close
+    with db.cursor() as cur:
+        days = _world(cur, cash=200_000.0)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','momentum',20,40.0,'open')""")
+        _score(cur, days)
+        px = _close(cur, "N00.US", days[-1])
+        cur.execute("""insert into tickets (session_date, ticker, account, sleeve, action, reason,
+                                            clause, order_type, qty, mark, rank, state, note)
+                       values (%s, 'N00.US', 'TFSA', 'momentum', 'buy', 'top_up', 'top_up',
+                               'market', %s, %s, 1, 'proposed', 'a top-up to weight')""",
+                    (days[-1], engine.position_size(200_000.0, px) - 20, px))
+        cur.execute("""update engine_sessions
+                          set detail = jsonb_set(jsonb_set(detail, '{buys}',
+                                                           (detail->'buys') || '["N00.US"]'),
+                                                 '{orders}', to_jsonb((detail->>'orders')::int + 1))
+                        where session_date = %s""", (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red", g
+    assert any("clause 'top_up' is not a recognised clause" in f for f in g["failures"])
+
+
+def test_a_proposal_score_never_decided_is_red(db, migrated):
+    """Item 7's other direction. write_tickets withdraws every proposal its own pass did not make,
+    so a `proposed` line on the sheet the attestation does not carry has nothing behind it — and it
+    is in front of Zak. Red. One he already acted on stays his, and green (see
+    `test_a_ticket_beyond_the_decision_is_not_a_failure`)."""
+    with db.cursor() as cur:
+        days = _world(cur, cash=200_000.0)
+        _score(cur, days)
+        cur.execute("""insert into tickets (session_date, ticker, account, sleeve, action, reason,
+                                            clause, order_type, qty, mark, rank, state, note)
+                       values (%s, 'N09.US', 'TFSA', 'momentum', 'sell', 'rank_exit', 'rank_exit',
+                               'market', 10, 50.0, 15, 'proposed', 'nobody decided this')""",
+                    (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red", g
+    assert any("SELL N09.US: proposed on the sheet and never decided by score" == f
+               for f in g["failures"])

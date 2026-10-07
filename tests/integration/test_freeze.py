@@ -79,6 +79,28 @@ def test_a_freeze_drops_every_buy_and_keeps_every_sell(db, migrated):
         assert cur.fetchall() == [("sell", 1)], "no buy ticket is written at all"
 
 
+def test_a_freeze_drops_the_parks_draw_with_the_buys_it_pays_for(db, migrated):
+    """§5.5 beside v1.1's §3.5. A `fund` sell is the cash leg of tonight's buys — the park's draw
+    for their shortfall — not an exit, so the freeze that halts the buys drops it with them and
+    names it: §5.5 sends proceeds to the park, and does not empty it. Nothing is proposed to buy, so
+    the attestation sizes nothing, and the exit still ships."""
+    from test_desk import _park, _shadow_passed
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",), cash=100_000.0)       # rank 16 — a queued exit
+        _park(cur, days)
+        _shadow_passed(cur, days)
+        _freeze(cur, True)
+        db.commit()
+        s = _score(cur, days)
+        db.commit()
+        cur.execute("select detail from engine_sessions where session_date = %s", (days[-1],))
+        att = cur.fetchone()[0]
+
+    assert [(o["ticker"], o["clause"]) for o in s["orders"]] == [("N15.US", "rank_exit")]
+    assert "SPMO.US" in s["frozen_buys"], "the draw is halted, and named with the buys"
+    assert att.get("sizing") is None and att["sells"] == ["N15.US"] and att["buys"] == []
+
+
 def test_the_halted_buys_are_named_rather_than_silently_absent(db, migrated):
     """A freeze that produced a shorter sheet with no explanation would read as a quiet night."""
     with db.cursor() as cur:

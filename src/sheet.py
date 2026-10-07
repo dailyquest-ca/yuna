@@ -17,13 +17,17 @@ Three tables, one per question the record has to answer later:
 **Nothing here places, modifies or cancels an order** (§0.2). It writes rows in state `proposed`.
 Zak approves and executes; `reconcile.py` closes the loop against the broker's receipt.
 
-On NAV. §3.5 sizes at engine NAV / 5. Since 2026-08-19 the store DOES hold everything the number
-is made of — the ledger-driven book and the cash anchors — so `engine_nav` derives it (TFSA marked
-equity + TFSA cash at the session's USDCAD), with env and `config.engine_nav` as overrides in that
-order. Zak: "You know the NAV." When the derivation fails closed (unpriced position, no cash
+On NAV. §3.5 sizes the slot at engine NAV / 5. Since 2026-08-19 the store DOES hold everything the
+number is made of — the ledger-driven book and the cash anchors — so `engine_nav` derives it (TFSA
+marked equity + TFSA cash at the session's USDCAD), with env and `config.engine_nav` as overrides in
+that order. Zak: "You know the NAV." When the derivation fails closed (unpriced position, no cash
 anchor, no FX) the job still writes the session, the ranks and every SELL, leaves the buy
 quantities null, and goes amber naming the exact gap: §5.4 makes exits unblockable and §4.3
 already forbids new buy tickets under amber.
+
+On cash. Since v1.1 (2026-10-06) a buy is "the lesser of slot weight and deployable TFSA cash", so
+NAV alone sizes nothing: the desk reads the cash from the store whatever the NAV's source, and when
+the store cannot state it the buys are written unsized under the same amber.
 """
 import datetime as dt
 import json
@@ -102,10 +106,20 @@ def write_session(cur, s, mode, digest):
                      # night (decided none) and a failed write (decided some, wrote none or only
                      # part) stop wearing the same amber. `s` has already been through
                      # apply_freeze, so in live mode this is exactly what write_tickets will
-                     # write; shadow mode writes no tickets at all (write_tickets).
+                     # write; shadow mode writes no tickets at all (write_tickets). A buy the cash
+                     # could not reach is no order and no ticket, so it is in neither list — it
+                     # rides in `held_below`.
                      "orders": len(s["orders"]),
                      "sells": [o["ticker"] for o in s["orders"] if o["action"] == "sell"],
-                     "buys": [o["ticker"] for o in s["orders"] if o["action"] == "buy"]})))
+                     "buys": [o["ticker"] for o in s["orders"] if o["action"] == "buy"],
+                     # §3.5's v1.1 sizing and every input it was computed from — deployable cash
+                     # and its parts, the number of buys sharing it, each one's share, the park's
+                     # draw against its shortfall — so the sheet gauge re-derives each quantity
+                     # from what the desk actually used rather than from NAV ÷ 5 alone.
+                     "sizing": s.get("sizing"),
+                     "held_below": [dict(ticker=h["ticker"], rank=h.get("rank"), why=h["why"])
+                                    for h in s.get("held_below") or []]},
+                    default=str)))
     return cur.fetchone()[0]
 
 
@@ -144,16 +158,20 @@ def apply_freeze(s, frozen, words):
     blocked, "not by freeze, not by amber, not by any throttle" — the clause names the freeze first.
 
     The `fund` sell is the exception, and it goes with the buys it belongs to. It is not an exit:
-    §6.5 emits it to turn the Phase-0 bridge into the five slots, so it is the cash leg of a buy
-    rather than a protective action. Left standing on a frozen sheet it would sell the bridge to
-    fund nothing, moving the capital §6.5 is holding into cash on the strength of Zak's instruction
-    to stop buying. §5.5 sends proceeds to the park; it does not empty it.
+    it draws a park lot down to pay the buys' shortfall (§3.5, v1.1), so it is the cash leg of a
+    buy rather than a protective action. Left standing on a frozen sheet it would sell the park to
+    fund nothing, moving engine capital into cash on the strength of Zak's instruction to stop
+    buying. §5.5 sends proceeds to the park; it does not empty it.
+
+    With the buys goes their sizing: nothing is proposed, so nothing was sized, and the attestation
+    must not describe a draw whose ticket was never written.
     """
     if not frozen:
         return s
     kept = [o for o in s["orders"] if o["action"] != "buy" and o["clause"] != "fund"]
     dropped = [o["ticker"] for o in s["orders"] if o["action"] == "buy" or o["clause"] == "fund"]
-    return dict(s, orders=kept, frozen=True, freeze_words=words, frozen_buys=dropped)
+    return dict(s, orders=kept, frozen=True, freeze_words=words, frozen_buys=dropped,
+                sizing=None, held_below=[])
 
 
 def write_tickets(cur, s, mode="live"):
@@ -193,7 +211,11 @@ def write_tickets(cur, s, mode="live"):
             returning id""",
             (s["session"], o["ticker"], ACCOUNT, SLEEVE, o["action"], o["clause"], o["clause"],
              o["qty"], o["mark"], o["rank"],
-             f"§3.5 {o['clause']}; rank {o['rank'] or '—'} on {s['session']}"))
+             # A fill below §3.5's weight, or a gate-off sell with no decision close, says so on
+             # the ticket too: the row is the record of the order, and the quantity on it is not
+             # NAV ÷ 5 or the mark is missing for a reason the reader needs.
+             f"§3.5 {o['clause']}; rank {o['rank'] or '—'} on {s['session']}"
+             + (f" | {o['note']}" if o.get("note") else "")))
         written.append(cur.fetchone()[0])
 
     # §4.3: the sheet is the only source of engine orders, so a proposal this pass did not make is
@@ -227,7 +249,8 @@ def main():
                              ranked=s["ranked"], nav=nav, nav_source=nav_source,
                              param_digest=digest, top=s["top"],
                              sells=[o["ticker"] for o in s["orders"] if o["action"] == "sell"],
-                             buys=[o["ticker"] for o in s["orders"] if o["action"] == "buy"])
+                             buys=[o["ticker"] for o in s["orders"] if o["action"] == "buy"],
+                             sizing=s.get("sizing"))
             if dry():
                 hb.detail["skipped"] = "computed, wrote nothing (DRY_RUN)"
             else:
@@ -253,6 +276,12 @@ def main():
                 hb.amber("engine NAV unknown — buys written unsized and must not be executed. "
                          f"Derivation failed: {nav_source.get('why', 'unknown')}. "
                          "config.engine_nav overrides if set.")
+            elif (s.get("sizing") or {}).get("unsized") and not frozen:
+                # The same amber for the other half of v1.1's size. A NAV — derived, or overridden
+                # in config or the environment — sizes the slot; the cash comes from the store or
+                # not at all, and without it no buy has a quantity.
+                hb.amber("deployable TFSA cash unknown — buys written unsized and must not be "
+                         f"executed: {s['sizing']['unsized']} (§3.5, v1.1)")
 
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
