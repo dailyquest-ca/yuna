@@ -152,9 +152,9 @@ current.
 with no source. So the morning after an NYSE holiday reads *not in yet* though nothing was missed:
 the safe direction. The note says what it sees, never decides the market was shut, and the previous
 session's sheet — the one that still stands — rides as the attachment under its own date. The store
-cannot settle it alone: on Labor Day 2026 the vendor posted a 132-row tape dated 2026-09-07, the
-ingest went green, and the engine's newest session stayed 2026-09-04 because SPY did not print —
-the same shape a real session with a missing SPY bar would leave.
+cannot settle it alone: on Labor Day 2026 the vendor posted a 311-row tape dated 2026-09-07, the
+ingest went green writing 132 of its bars, and the engine's newest session stayed 2026-09-04
+because SPY did not print — the same shape a real session with a missing SPY bar would leave.
 
 Replayed over the 37 weekday mornings from 2026-08-17 to 10-06 (from `runs`, which keeps the time
 each compose finished): the old test passed all 37; this one passes 33, catches 08-27, 08-28 and
