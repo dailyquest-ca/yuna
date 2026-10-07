@@ -678,10 +678,10 @@ def splits_not_carried(conn, hb, names):
                 errors[ticker] = f"{type(e).__name__}: {e}"
                 continue
             for entry in ledger:
-                ratio = sg.split_ratio(entry)
+                ratio = sg.split_ratio(entry) if isinstance(entry, dict) else None
                 try:
                     on = dt.date.fromisoformat(str(entry.get("date")))
-                except ValueError:
+                except (AttributeError, ValueError):
                     on = None
                 if on is None or not ratio or ratio <= 0:
                     errors[ticker] = f"a split it cannot read: {entry!r}"

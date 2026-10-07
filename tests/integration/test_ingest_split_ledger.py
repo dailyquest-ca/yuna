@@ -94,13 +94,14 @@ def test_a_ledger_the_store_cannot_read_or_a_split_the_vendor_never_applied_is_n
     """The two ways the check can come back without an answer, both on held names, both amber."""
     with db.cursor() as cur:
         _spy(cur)
-        for tk in ("ODD.US", "DARK.US"):
+        for tk in ("ODD.US", "DARK.US", "GARBLED.US"):
             night.name(cur, tk)
             night.store(cur, tk, [night.bar(night.day(n), 40.0) for n in range(10, 0, -1)])
             world.position(cur, tk, qty=10, cost=40.0, stop=None)
     vendor = night.Vendor()
     vendor.tape = [night.bar(night.day(0), 602.0, code="SPY"), night.bar(night.day(0), 20.0, code="ODD"),
-                   night.bar(night.day(0), 41.0, code="DARK")]
+                   night.bar(night.day(0), 41.0, code="DARK"), night.bar(night.day(0), 40.5, code="GARBLED")]
+    vendor.ledger["GARBLED.US"] = ["2.000000/1.000000"]           # an entry with no date to read
     # ODD.US: the ledger says 2:1 tonight, but the vendor's own history is still unadjusted
     vendor.ledger["ODD.US"] = [dict(date=night.day(0), split="2.000000/1.000000")]
     vendor.history["ODD.US"] = ([night.bar(night.day(n), 40.0) for n in range(10, 0, -1)]
@@ -111,5 +112,5 @@ def test_a_ledger_the_store_cannot_read_or_a_split_the_vendor_never_applied_is_n
     assert raised is None and run["status"] == "amber"
     ambers = " | ".join(run["detail"]["amber"])
     assert "ODD.US on" in ambers and "does not carry" in ambers
-    assert "DARK.US" in ambers and "cannot be ruled out" in ambers
-    assert "DARK.US" in run["detail"]["split_ledger"]["errors"]
+    assert "DARK.US" in ambers and "GARBLED.US" in ambers and "cannot be ruled out" in ambers
+    assert {"DARK.US", "GARBLED.US"} <= set(run["detail"]["split_ledger"]["errors"])
