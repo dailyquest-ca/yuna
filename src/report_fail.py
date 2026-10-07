@@ -42,9 +42,12 @@ att = os.environ.get("GITHUB_RUN_ATTEMPT")
 # this run's rows, or — with no run id to go on — any row of the job
 MINE = """(%s::text is null or (detail->'actions'->>'run_id' = %s
            and coalesce(detail->'actions'->>'attempt', '') = coalesce(%s::text, '')))"""
+# `clock_timestamp()` rather than `now()` (the transaction's start), as in `db.Heartbeat` (QC
+# 2026-10-07, A37): here each write opens or shares one short transaction, so the two barely
+# differ, but a finish time in `runs` means the clock in every writer or it means nothing.
 with psycopg.connect(url()) as conn, conn.cursor() as cur:
     killed = json.dumps({"fatal": "died mid-run", "output_tail": tail})
-    cur.execute(f"""update runs set finished_at=now(), status='red',
+    cur.execute(f"""update runs set finished_at=clock_timestamp(), status='red',
                       detail = coalesce(detail,'{{}}'::jsonb) || %s::jsonb
                     where job=%s and status='running' and {MINE}""", (killed, job, rid, rid, att))
     if cur.rowcount:
@@ -60,14 +63,14 @@ with psycopg.connect(url()) as conn, conn.cursor() as cur:
                         (json.dumps({"output_tail": tail}), row[0]))
             how = f"appended the output tail to the heartbeat's own red (run {row[0]})"
         elif row:
-            cur.execute("""update runs set status='red', finished_at=now(),
+            cur.execute("""update runs set status='red', finished_at=clock_timestamp(),
                              detail = coalesce(detail,'{}'::jsonb) || %s::jsonb where id=%s""",
                         (json.dumps({"fatal": f"died after the heartbeat closed {row[1]}",
                                      "output_tail": tail}), row[0]))
             how = f"the heartbeat had closed {row[1]} before the job died — run {row[0]} flipped to red"
         else:
             cur.execute("""insert into runs(job,finished_at,status,dry_run,detail)
-                           values (%s,now(),'red',false,%s)""",
+                           values (%s,clock_timestamp(),'red',false,%s)""",
                         (job, json.dumps({"fatal": "job died pre-heartbeat", "output_tail": tail})))
             how = "new row: the job died before its heartbeat opened"
     conn.commit()

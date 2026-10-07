@@ -850,11 +850,16 @@ class Heartbeat:
         self.detail.setdefault("red", []).append(why)
 
     def __exit__(self, et, ev, tb):
+        # `clock_timestamp()`, never `now()`, on both closing writes (QC 2026-10-07, A37). `now()`
+        # is the start of the current TRANSACTION, and a job that reads without committing — check,
+        # compose, notify, backup, a quiet reconcile — is still inside the one its first query
+        # opened: check's 115-second run was recorded as 0.015 seconds, and every duration and
+        # finish time read off this table was the moment the job began.
         if et is None:
             self.detail["dry_run"] = self.dry_run
             with self.conn.cursor() as cur:
-                cur.execute("""update runs set finished_at=now(), status=%s, calls_used=%s,
-                               rows_written=%s, detail=%s where id=%s""",
+                cur.execute("""update runs set finished_at=clock_timestamp(), status=%s,
+                               calls_used=%s, rows_written=%s, detail=%s where id=%s""",
                             (self.status, self.calls[0], 0 if self.dry_run else self.rows,
                              json.dumps(self.detail, default=str), self.id))
             self.conn.commit()
@@ -873,8 +878,8 @@ class Heartbeat:
             try:
                 self.conn.rollback()
                 with self.conn.cursor() as cur:
-                    cur.execute("""update runs set finished_at=now(), status='red', calls_used=%s,
-                                   detail=%s where id=%s""",
+                    cur.execute("""update runs set finished_at=clock_timestamp(), status='red',
+                                   calls_used=%s, detail=%s where id=%s""",
                                 (self.calls[0], json.dumps(self.detail, default=str), self.id))
                 self.conn.commit()
             except Exception as e:

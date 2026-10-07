@@ -8,6 +8,7 @@ if even that cannot be written, say so on stderr without ever replacing the job'
 """
 import pathlib
 import sys
+import time
 
 import psycopg
 import pytest
@@ -81,3 +82,36 @@ def test_a_red_that_cannot_be_written_is_said_and_never_masks_the_jobs_error(db,
     assert f"probe: could not record the red on run {hb.id}" in capsys.readouterr().err
     _, status, finished, _ = _after(migrated, hb.id)
     assert (status, finished) == ("running", False), "the row is the autopsy's to close"
+
+
+# ---- how long a run took (A37) -----------------------------------------------------------------
+
+PAUSE = 0.5          # seconds of work inside the body: measurable, and nothing more than that
+
+
+def _seconds(migrated, run_id):
+    with psycopg.connect(migrated) as conn, conn.cursor() as cur:
+        cur.execute("select extract(epoch from finished_at - started_at) from runs where id = %s",
+                    (run_id,))
+        return float(cur.fetchone()[0])
+
+
+def test_a_run_that_reads_and_never_commits_records_how_long_it_took(db, migrated):
+    """A37. `check` reads the store, commits nothing, and closes its row — so `finished_at=now()`
+    stamped the start of the transaction its first query opened. Production recorded check's
+    115-second run as 0.015 seconds, and every job shaped like it as roughly nothing."""
+    with dbm.Heartbeat(db, "probe", dry_run=False) as hb:
+        with db.cursor() as cur:
+            cur.execute("select 1")                 # the job's first read opens the transaction
+        time.sleep(PAUSE)                           # ...and the work takes time inside it
+    assert _seconds(migrated, hb.id) >= PAUSE
+
+
+def test_a_run_that_dies_records_when_it_died(db, migrated):
+    with pytest.raises(KeyError):
+        with dbm.Heartbeat(db, "probe", dry_run=False) as hb:
+            with db.cursor() as cur:
+                cur.execute("select 1")
+            time.sleep(PAUSE)
+            raise KeyError("late in the run")
+    assert _seconds(migrated, hb.id) >= PAUSE
