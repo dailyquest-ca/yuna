@@ -259,11 +259,12 @@ def main():
             if dry():
                 hb.detail["skipped"] = "computed, wrote nothing (DRY_RUN)"
             elif s.get("stale"):
-                # R1 (Zak, 2026-10-07): an unevaluated gate proposes nothing new, so nothing is
-                # written — no session, no ranks, no ticket — and the sheet in force stays the last
-                # one decided on fresh data, its exits standing. Writing here would do harm either
-                # way: re-scoring the same close (SPY's newest bar) overwrites the record of what
-                # was decided on it, and an empty sheet withdraws the exits it proposed.
+                # R1 (Zak's ruling, 2026-10-07): an unevaluated gate proposes nothing new, so
+                # nothing is written — no session, no ranks, no ticket — and the sheet in force
+                # stays the last one decided on fresh data, its exits standing. Writing here would
+                # do harm either way: re-scoring the same close (SPY's newest bar) overwrites the
+                # record of what was decided on it, and an empty sheet withdraws the exits it
+                # proposed.
                 hb.detail["skipped"] = ("the gate could not be evaluated on fresh data — no "
                                         "session, rank or ticket written; the sheet in force "
                                         "stands")

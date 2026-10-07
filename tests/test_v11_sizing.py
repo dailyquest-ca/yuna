@@ -53,7 +53,7 @@ def test_the_park_pays_the_shortfall_in_whole_shares_and_never_more_than_the_lot
 
 def test_the_four_day_constant_is_one_number():
     """§5.6, 2026-09-13: "bars older than 4 days hold buys". `freshness` holds the buys on it and
-    `desk.gate_unevaluable` holds the gate on it (Zak, 2026-10-07); learning 58's lesson is that a
-    constant written twice is changed once. `freshness`'s default must be the named one."""
+    `desk.gate_unevaluable` holds the gate on it (Zak's ruling, 2026-10-07); learning 58's lesson is
+    that a constant written twice is changed once. `freshness`'s default must be the named one."""
     assert db.STALE_DAYS == 4
     assert inspect.signature(db.freshness).parameters["stale_days"].default == db.STALE_DAYS

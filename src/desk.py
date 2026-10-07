@@ -262,15 +262,17 @@ def sheet(cur, as_of, nav):
     arithmetic and its inputs ride out in `sizing`, which `score` attests and §4.4's sheet gauge
     re-derives.
 
-    Two holds Zak ruled on 2026-10-07, ahead of the plan's text:
+    Two holds from Zak's rulings of 2026-10-07, ahead of the plan's text (drafted as P4 and P6):
 
-      R1  §3.4's gate cannot be evaluated on fresh data (`gate_unevaluable`). Nothing new is
-          proposed — no buy, and no gate-off sell either: "a data outage alone never sells the
-          book".
+      R1  §3.4's gate cannot be evaluated on fresh data (`gate_unevaluable`). He chose "hold buys,
+          sell nothing": nothing new is proposed — no buy, and no gate-off sell either, because a
+          vendor outage alone never liquidates the book.
       R2  A held name has no bar on the decision session — a rename, merger, takeover, halt or
-          vendor omission. It "is never turned into a rank exit or a refill by inference": it keeps
-          its quantity and its slot, the buys are held, and it is named until Zak records what
-          happened. A gate-off still lists it to sell (§5.4), marked unpriced.
+          vendor omission. He ruled that ticker changes and takeovers fail closed until he records
+          them, and on the tape the other two look the same: the name is never turned into a rank
+          exit or a refill by inference, it keeps its quantity and its slot, the buys are held, and
+          it is named until Zak records what happened. A gate-off still lists it to sell (§5.4),
+          marked unpriced.
 
     Each arrives as a sentence in `hold`, and `score` makes a hold its amber: a price-critical
     amber holds the buys (§4.3), and nothing holds the exits.
@@ -302,8 +304,8 @@ def sheet(cur, as_of, nav):
         base = float(adj[i - engine.SKIP, j] / adj[i - engine.FORMATION, j] - 1.0)
         scores[tickers[j]] = base / vol if vol > 0 else None
 
-    # R1, Zak 2026-10-07: a gate read off stale bars is unevaluated, and an unevaluated gate
-    # proposes nothing — see `gate_unevaluable` for what "fresh" is measured against.
+    # R1, Zak's ruling of 2026-10-07: a gate read off stale bars is unevaluated, and an unevaluated
+    # gate proposes nothing — see `gate_unevaluable` for what "fresh" is measured against.
     stale = gate_unevaluable(cur, as_of, sessions[i], [tickers[j] for j in ranked])
     hold = [stale["why"]] if stale else []
 
@@ -365,7 +367,7 @@ def sheet(cur, as_of, nav):
                        " — the gate is OFF, so it is listed to sell at the book's quantity,"
                        " unpriced (§5.4)")
                     + " until Zak records what happened (a rename, merger, takeover, halt or"
-                      " vendor omission). Zak, 2026-10-07")
+                      " vendor omission)")
     # A gate-off still sells it (§5.4), at the book's quantity and with no decision close.
     sell_tk = [tickers[j] for j in sells] + unranked + ([] if gate_on else unbarred)
 
@@ -376,7 +378,7 @@ def sheet(cur, as_of, nav):
                  why="gate off" if not gate_on else "rank")
         if o["mark"] is None:
             o["why"] = f"gate off — unpriced: no bar on {sessions[i]}"
-            o["note"] = f"unpriced: no bar on {sessions[i]} (Zak, 2026-10-07)"
+            o["note"] = f"unpriced: no bar on {sessions[i]}"
         orders.append(o)
 
     # §6.5 gates the park draw on the shadow having passed. `passes` is §6.4's condition verbatim
@@ -505,10 +507,11 @@ def gate_unevaluable(cur, as_of, session, pool):
     whose `why` names the benchmark's bar and the tape's.
 
     §3.4 says a gate that cannot be evaluated on fresh data "reads OFF", and OFF sells the book.
-    Zak ruled how that clause runs on 2026-10-07 (R1): "if the gate cannot be evaluated on fresh
-    data (SPY missing from the newest session's tape, or the tape older than §5.6's 4-day constant)
-    it is unevaluated: the sheet proposes nothing new, buys are held, and the brief names the stale
-    bar; a data outage alone never sells the book." Before it, nothing here asked: `load` takes its
+    Zak ruled how that clause runs on 2026-10-07 (R1), choosing "hold buys, sell nothing": stale
+    data holds the buys, the brief says the gate could not be evaluated, and a vendor outage alone
+    never liquidates the book. What stale means here — SPY missing from the newest session's tape,
+    or the tape older than §5.6's 4 days — is the reading drafted for the plan as P4, not yet
+    ruled. Before it, nothing here asked: `load` takes its
     calendar from SPY's own bars, so a missing SPY bar silently re-scored the session before and a
     dead tape re-scored its last good one, gate and all (QC A39).
 
@@ -548,7 +551,7 @@ def gate_unevaluable(cur, as_of, session, pool):
         return None
     return dict(why="the gate cannot be evaluated on fresh data: " + "; ".join(why)
                     + ". Nothing new is proposed and the buys are held; a data outage alone never"
-                      " sells the book (§3.4; Zak, 2026-10-07)",
+                      " sells the book (§3.4; Zak's ruling, 2026-10-07)",
                 index_bar=str(session), tape_bar=str(tape) if tape else None, age_days=age)
 
 

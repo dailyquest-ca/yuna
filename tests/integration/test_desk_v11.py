@@ -201,9 +201,10 @@ def test_a_gate_off_sheet_proposes_no_park_buy(db, migrated):
 
 
 def test_a_benchmark_missing_from_the_newest_session_proposes_nothing(db, migrated):
-    """Zak, 2026-10-07 (R1): "if the gate cannot be evaluated on fresh data (SPY missing from the
-    newest session's tape, or the tape older than §5.6's 4-day constant) it is unevaluated: the
-    sheet proposes nothing new, buys are held, and the brief names the stale bar".
+    """Zak's ruling, 2026-10-07 (R1), "hold buys, sell nothing": a gate that cannot be evaluated on
+    fresh data proposes nothing new, the buys are held, and the brief says why; a vendor outage
+    alone never liquidates the book. Stale here is SPY missing from the newest session's tape, or
+    the tape older than §5.6's 4 days (drafted for the plan as P4).
 
     Before it, `load` took its calendar from SPY's own bars, so a SPY bar missing from tonight's
     tape quietly re-scored LAST night's session — its orders proposed again as tonight's, the
@@ -275,9 +276,10 @@ def test_a_holiday_print_by_a_name_the_engine_never_ranks_is_not_a_session(db, m
 
 
 def test_a_held_name_with_no_bar_keeps_its_slot_and_holds_the_buys(db, migrated):
-    """Zak, 2026-10-07 (R2): a held name with no bar on the decision session "is never turned into
-    a rank exit or a refill by inference: the name keeps its last recorded quantity and its slot,
-    buys are held, and it is named until Zak records what happened."
+    """Zak's ruling, 2026-10-07 (R2): ticker changes and takeovers fail closed until he records
+    them, and a held name with no bar on the decision session — which a halt or a vendor omission
+    looks like too — is never turned into a rank exit or a refill by inference: it keeps its last
+    recorded quantity and its slot, buys are held, and it is named (drafted for the plan as P6).
 
     QC A70 and A3: it was sold in full as a rank exit — with no mark, unexecutable after a rename —
     and its slot refilled; a halted rank-2 holding went round trip on a decision the rank never
