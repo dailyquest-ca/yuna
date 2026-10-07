@@ -178,6 +178,30 @@ def held_book(cur, account=ENGINE_ACCOUNT):
     return {r[0]: float(r[1]) for r in cur.fetchall()}
 
 
+def holding_mark(cur, ticker, as_of):
+    """One holding's mark: its newest close on or before `as_of`. Returns (close, None), or
+    (None, why) when it has none — and says which none, because each is a different repair.
+
+    A close at or below zero is not a mark. The vendor pads a delisting tail with `0.0000` after an
+    acquisition (learning 33), and production stores those rows as the last bars of AEL, CONN, HIBB
+    and PACW. Read as a price, the padding marked a held name at nothing — a number, so it passed
+    the unpriced fail-closed, and NAV lost a whole slot without a word (A15).
+    """
+    cur.execute("""select d, close from prices where ticker = %s and d <= %s
+                    order by d desc limit 1""", (ticker, as_of))
+    row = cur.fetchone()
+    if row is None:
+        return None, f"no bar on or before {as_of}"
+    d, close = row
+    if close is None:
+        return None, f"no close on {d}"
+    if float(close) <= 0:
+        return None, (f"newest close {float(close):g} on {d} is not a price"
+                      + (" — the vendor's delisting padding (learning 33)"
+                         if float(close) == 0 else ""))
+    return float(close), None
+
+
 def marked_equity(cur, held, as_of):
     """The sleeve marked at the decision close. Returns (value, [names with no mark]).
 
@@ -185,19 +209,53 @@ def marked_equity(cur, held, as_of):
     §3.2's universe — excluded, or delisted — has no column there, and marking it at zero would
     read as a drawdown when it is a data boundary. §5.2's milestones are computed off this number.
 
-    A name with no bar at all is NOT counted and IS named. Understating the sleeve silently would
-    manufacture a drawdown; understating it loudly is a line in the brief.
+    A name with no mark — no bar at all, or a close at or below zero (`holding_mark`) — is NOT
+    counted and IS named. Understating the sleeve silently would manufacture a drawdown;
+    understating it loudly is a line in the brief.
+
+    A name whose newest bar is merely OLD is still counted at it, and that is deliberate: a halted
+    or delisted holding is a data boundary to §5.2's drawdown record, not a loss. Sizing is a
+    different question with a stricter answer — `stale_holdings`.
     """
     total, unpriced = 0.0, []
     for tk, qty in held.items():
-        cur.execute("""select close from prices where ticker = %s and d <= %s
-                        order by d desc limit 1""", (tk, as_of))
-        row = cur.fetchone()
-        if row is None or row[0] is None:
+        px, _ = holding_mark(cur, tk, as_of)
+        if px is None:
             unpriced.append(tk)
             continue
-        total += qty * float(row[0])
+        total += qty * px
     return total, unpriced
+
+
+def stale_holdings(cur, held, as_of, session):
+    """Held names whose newest bar is older than `session` though their own exchange printed it.
+    Returns [(ticker, newest bar date)].
+
+    §3.5 sizes at "engine NAV ÷ 5, marked at the decision close", and a holding with no bar on the
+    decision session has no decision close — only an older one. Marking it there anyway is how a
+    halted name, a vendor omission or a cash-merged line kept a full slot of NAV at a price that no
+    longer existed, every night, with every gauge quiet (A15).
+
+    "Its own exchange printed it" is read off the tape, never off a holiday calendar: did any OTHER
+    name with the same EODHD exchange suffix (`SYMBOL.EXCHANGE`) print that session? The decision
+    calendar is SPY's, and the TSX keeps holidays the NYSE does not — on 2025-10-13 and 2026-08-03
+    SPY.US printed and no `.TO` name in the store did. A `.TO` holding without a bar on such a day
+    is on its own exchange's calendar, not stale. Where the store holds no other name from the
+    exchange it cannot say the exchange printed, and the name keeps its newest close, as before.
+    """
+    out = []
+    for tk in held:
+        cur.execute("select max(d) from prices where ticker = %s and d <= %s", (tk, as_of))
+        newest = cur.fetchone()[0]
+        if newest is None or newest >= session or "." not in tk:
+            continue
+        suffix = tk[tk.rindex("."):]
+        cur.execute("""select exists (select 1 from prices
+                                       where d = %s and ticker <> %s and right(ticker, %s) = %s)""",
+                    (session, tk, len(suffix), suffix))
+        if cur.fetchone()[0]:
+            out.append((tk, newest))
+    return out
 
 
 def derived_engine_nav(cur, as_of):
@@ -217,17 +275,58 @@ def derived_engine_nav(cur, as_of):
     The park counts because it is the capital that funds the slots — at seed, NAV/5 sized off a
     number that excluded the bridge would deploy a fifth of nothing.
 
-    Fails closed, loudly, on the three states where a derived number would be a plausible lie:
-    an unpriced TFSA position (the equity would silently understate), no cash anchor (§2.0 makes
-    balances the truth and there is none), and CAD cash with no FX row to convert it.
+    Fails closed, loudly, on every state where a derived number would be a plausible lie, and the
+    reason names which, because each is a different repair:
+
+      * an unpriced TFSA position — no bar, or no mark (`holding_mark`): equity would understate;
+      * a stale one (`stale_holdings`): it has no decision close to be marked at (§3.5);
+      * no cash anchor: §2.0 makes balances the truth and there is none;
+      * CAD cash with no FX row to convert it;
+      * TFSA cash that derives below zero (A52). A TFSA cannot borrow — §2.3's facility is a
+        separate account whose draws buy VXC.TO in the NONREG — so negative cash is not a state the
+        account can be in. It is a credit the store never heard of (a dividend, a deposit, a
+        conversion) or a row on the wrong side of the anchor, and from here its size is unknown.
+        The test reads the account's TOTAL in USD, not one currency: a USD buy paid out of CAD
+        drives the USD leg negative with NAV still right, because the ledger has no row for the
+        conversion. Cash is held in cents, so it is negative once it rounds below zero to the cent.
+
+    The anchor's date and age ride in the breakdown (`cash_as_of`, `cash_age_days`, days from the
+    anchor's date to `as_of`) so they reach `engine_sessions.detail` and the score run beside the
+    number they underwrite, and so do any same-day fills the anchor is taken to contain
+    (`cash_same_day_assumed_inside`, from `db.cash_by_account`). No age fails: the plan rules no
+    refresh cadence, and a limit would be a constant nobody ruled.
     """
     held = held_book(cur)
     equity, unpriced = marked_equity(cur, held, as_of)
+    why = []
     if unpriced:
-        return None, f"unpriced TFSA position(s): {', '.join(unpriced)} — equity would understate"
+        why.append("unpriced TFSA position(s): "
+                   + "; ".join(f"{tk} ({holding_mark(cur, tk, as_of)[1]})" for tk in unpriced)
+                   + " — equity would understate")
+    priced = [tk for tk in held if tk not in unpriced]
+    if priced:
+        # The decision session is the benchmark's newest bar, the same calendar `load` takes, so
+        # the NAV and the sheet sized off it agree on which close is "the decision close".
+        cur.execute("select max(d) from prices where ticker = %s and d <= %s",
+                    (engine.REGIME_SOURCE, as_of))
+        session = cur.fetchone()[0]
+        if session is None:
+            why.append(f"no {engine.REGIME_SOURCE} bar on or before {as_of} — no decision close "
+                       "to mark the book at")
+        else:
+            stale = stale_holdings(cur, priced, as_of, session)
+            if stale:
+                why.append("stale TFSA position(s): "
+                           + "; ".join(f"{tk} (newest bar {d}; its exchange printed {session})"
+                                       for tk, d in stale)
+                           + " — §3.5 marks NAV at the decision close")
+    if why:
+        return None, " · ".join(why)
     cash = cash_by_account(cur).get(ENGINE_ACCOUNT)
     if cash is None:
         return None, f"no balances anchor for {ENGINE_ACCOUNT} — §2.0 makes balances the truth"
+    anchored = cash.get("as_of")
+    age = (as_of - anchored).days if anchored is not None else None
     cad, usd = float(cash.get("cad") or 0), float(cash.get("usd") or 0)
     cad_in_usd = 0.0
     fx = None
@@ -239,11 +338,27 @@ def derived_engine_nav(cur, as_of):
             return None, f"{cad:,.2f} CAD cash and no USDCAD close on or before {as_of}"
         fx = float(row[0])
         cad_in_usd = cad / fx
-    nav = equity + usd + cad_in_usd
+    in_cash = usd + cad_in_usd
+    if round(in_cash, 2) < 0:
+        moved = ", ".join(f"{v:+,.2f} {k}"
+                          for k, v in sorted((cash.get("moved_since_anchor") or {}).items()))
+        return None, (f"{ENGINE_ACCOUNT} cash derives to {in_cash:,.2f} USD ({usd:,.2f} USD"
+                      + (f" + {cad:,.2f} CAD @ {fx:,.4f}" if cad else "")
+                      + f") from the anchor of {anchored} ({age} day{'' if age == 1 else 's'})"
+                      + (f", moved {moved} by the ledger since" if moved else "")
+                      + " — a TFSA cannot hold negative cash, so a credit is missing or a row is"
+                        " on the wrong side of the anchor")
+    nav = equity + in_cash
     if nav <= 0:
         return None, f"derived NAV {nav:,.2f} is not positive — nothing to size against"
-    return nav, dict(source="derived", marked_equity=round(equity, 2), cash_usd=round(usd, 2),
-                     cash_cad=round(cad, 2), usdcad=fx, cash_as_of=str(cash.get("as_of") or ""))
+    detail = dict(source="derived", marked_equity=round(equity, 2), cash_usd=round(usd, 2),
+                  cash_cad=round(cad, 2), usdcad=fx, cash_as_of=str(anchored or ""),
+                  cash_age_days=age,
+                  cash_recorded_at=(cash["recorded_at"].isoformat()
+                                    if cash.get("recorded_at") is not None else None))
+    if cash.get("same_day_assumed_inside"):
+        detail["cash_same_day_assumed_inside"] = cash["same_day_assumed_inside"]
+    return nav, detail
 
 
 def sheet(cur, as_of, nav):

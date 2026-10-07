@@ -198,8 +198,14 @@ decides whether an account can fund a trade. And do not carry a figure forward: 
 currency, write that one and leave the other null rather than repeating yesterday's number as if it
 were today's reading.
 
-`cash_by_account` carries the newest anchor forward by the ledger, so a fill recorded after the
-reading is already accounted for — do not subtract it by hand.
+`cash_by_account` carries the newest anchor forward by the ledger, so a fill after the reading is
+already accounted for — do not subtract it by hand. **Write the reading when Zak gives it**: the
+row's `recorded_at` is the only clock the store has for it. A reading written before the open is
+known to precede that day's fills, and they count. A reading written after the open is taken to
+include every fill dated that day — right for a screenshot taken after the trades, wrong for a
+figure Zak gave before he traded — and the derived NAV's breakdown names those fills
+(`cash_same_day_assumed_inside`). So if you are writing a pre-open figure after the open, date it to
+the previous session instead: `as_of` is the last session whose fills the reading includes.
 
 ### A statement the export passed over
 
