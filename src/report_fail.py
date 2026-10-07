@@ -21,9 +21,9 @@ Without a run id (a local run, an old row) it falls back to closing any `running
 
 **A cancelled trigger** (2026-10-07, QC A48). `pipeline.yml`'s `slot` job calls this for the
 scheduled ingest that triggered the chain when GitHub reports that run CANCELLED. A run cancelled
-before it started — GitHub drops a pending run when a newer one joins its concurrency group —
-writes no row and runs no autopsy of its own, and the chain behind it used to re-score yesterday's
-tape under a green freshness line. That call names the run with AUTOPSY_RUN_ID/AUTOPSY_RUN_ATTEMPT
+before it started — by hand, or dropped from its concurrency group's queue, as every pending
+writer but one was before the group said `queue: max` — writes no row and runs no autopsy of its
+own, and the chain behind it used to re-score yesterday's tape under a green freshness line. That call names the run with AUTOPSY_RUN_ID/AUTOPSY_RUN_ATTEMPT
 and sets AUTOPSY_CANCELLED, which changes two of the rules above: a row of that run already closed
 green or amber is left alone (the work finished before the cancel reached it), and a run that left
 no row at all is recorded red — unless it is `ingest-daily` and the night is already green by the

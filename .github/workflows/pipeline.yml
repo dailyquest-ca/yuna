@@ -69,10 +69,10 @@ jobs:
           echo "chain slot: $want (triggered by ${trigger:-dispatch})"
       # A cancelled ingest is a red, never a silence (QC 2026-10-07, A48). `workflow_run:
       # completed` fires on EVERY conclusion, so this chain also runs behind a cancelled ingest —
-      # and a firing GitHub cancelled before it started (a pending run is dropped when a newer one
-      # joins the `yuna-writes` group) wrote no row and ran no autopsy: the chain re-scored
-      # yesterday's tape under a green freshness line, with the buys released. That run is
-      # recorded here instead. report_fail.py closes or writes its row red — unless the night is
+      # and a firing cancelled before it started wrote no row and ran no autopsy: the chain
+      # re-scored yesterday's tape under a green freshness line, with the buys released. GitHub
+      # dropped pending writers that way until the `yuna-writes` group said `queue: max`; a hand,
+      # a timeout or a hundred-deep queue can still cancel one. That run is recorded here instead. report_fail.py closes or writes its row red — unless the night is
       # already green by the retry's own test — and the freshness gauge holds the buys on it.
       # Scheduled firings only: whoever cancels a dispatch watched it happen, and a dispatch may
       # have been a rehearsal (learning 67). Every other night these four steps are skipped.
@@ -107,6 +107,7 @@ jobs:
     timeout-minutes: 15
     concurrency:
       group: yuna-writes
+      queue: max
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -147,6 +148,7 @@ jobs:
     timeout-minutes: 45
     concurrency:
       group: yuna-writes
+      queue: max
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -237,6 +239,7 @@ jobs:
     timeout-minutes: 15
     concurrency:
       group: yuna-writes
+      queue: max
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4

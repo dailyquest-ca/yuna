@@ -24,14 +24,19 @@ on:
 # transaction, which is the good outcome, but two writers on one table is a race the schedule
 # should make impossible rather than one the database has to survive.
 #
-# **The group is not a queue** (QC 2026-10-07, A48 — this comment used to say "Actions serialises
-# them"). GitHub runs one member and holds ONE more pending; a run that joins while one is already
-# pending CANCELS that pending run, whatever `cancel-in-progress` says. So two writers never
-# overlap, but a third is dropped, not queued: a long dispatch held through the night can cancel
-# both ingest firings. A run cancelled while pending never starts, writes no `runs` row and runs no
-# autopsy, so `pipeline.yml`'s `slot` job records a cancelled scheduled ingest red instead.
+# **The group is a queue because it says `queue: max`** (QC 2026-10-07, A48 — this comment used to
+# say "Actions serialises them", and without that line it did not). By default GitHub runs one
+# member and holds ONE more pending; a run that joins while one is already pending CANCELS that
+# pending run, whatever `cancel-in-progress` says — so a long dispatch held through the night could
+# drop both ingest firings, and a run dropped while pending never starts, writes no `runs` row and
+# runs no autopsy. `queue: max` (GitHub, 2026-05) keeps up to 100 waiting, first in first out, so a
+# writer behind another waits its turn. Every member of the group must say it, and
+# `cancel-in-progress` must stay false (GitHub refuses the pair). A run can still be cancelled — by
+# hand, by a timeout, past the hundredth — so `pipeline.yml`'s `slot` job still records a cancelled
+# scheduled ingest red.
 concurrency:
   group: yuna-writes
+  queue: max
   cancel-in-progress: false
 
 jobs:

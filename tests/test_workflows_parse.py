@@ -194,6 +194,25 @@ def test_a_cancelled_scheduled_ingest_is_recorded_by_the_chain_behind_it():
             assert s.get("if") == gate, "an ordinary night pays nothing for this"
 
 
+def test_every_writer_waits_its_turn_rather_than_dropping_the_one_waiting():
+    """QC 2026-10-07 (A48). A concurrency group holds one run and ONE pending by default, and a
+    newcomer cancels the pending one — so a writer dispatched at night could drop both ingest
+    firings without a trace. `queue: max` makes the group the queue its comments always said it
+    was; every member must say it (one group, one rule), and GitHub refuses it beside
+    `cancel-in-progress: true`."""
+    members = []
+    for path in WORKFLOWS:
+        doc = yaml.safe_load(path.read_text())
+        blocks = [("the workflow", doc.get("concurrency"))]
+        blocks += [(name, spec.get("concurrency")) for name, spec in (doc.get("jobs") or {}).items()]
+        members += [(path.name, where, c) for where, c in blocks
+                    if isinstance(c, dict) and c.get("group") == "yuna-writes"]
+    assert members, "no workflow writes through yuna-writes — the search is wrong, not the repo"
+    for workflow, where, c in members:
+        assert c.get("queue") == "max", f"{workflow}:{where} drops a writer that is waiting"
+        assert c.get("cancel-in-progress") is False, f"{workflow}:{where} would kill a running writer"
+
+
 def test_the_composed_kind_is_the_kind_notify_expects():
     """The seam with no other guard: `brief` writes a kind and `notify` looks for one. When they
     disagree the chain is green end to end and Zak gets silence — which §4.7 rules is itself the
