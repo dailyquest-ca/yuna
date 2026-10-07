@@ -3,12 +3,49 @@ name: tests
 # throwaway Postgres, which is why one lives in a service container here and not in the plan's
 # five scheduled jobs. Every defect that has actually bitten this build lived at a seam, and a seam
 # is only visible when the job runs over data.
+#
+# **One run per tree, not two** (QC 2026-10-07, A66). A commit pushed to a branch with an open pull
+# request fires `push` AND `pull_request`, and the 7-8 minute suite used to run twice. The push run
+# always runs — on `main`, and on a branch nobody has opened a pull request for yet. The pull
+# request's run tests GitHub's merge of the head onto its base, and it now steps aside only when that
+# merge is the very tree the push already tested (the branch already contains its base); when the
+# base has moved on, the merge is different work and it runs. A pull request from a fork has no
+# push run here, so it always runs. A concurrency group keyed on the commit was the other way, and
+# it ends one of the two runs CANCELLED — sometimes the pull request's own.
 on:
   push:
   pull_request:
   workflow_dispatch: {}
 jobs:
+  scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      duplicate: ${{ steps.tree.outputs.duplicate }}
+    steps:
+      - if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2                  # the test merge and its parents: the base and the head
+      - id: tree
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          # any doubt runs the suite: a duplicate costs minutes, a skipped run costs a defect
+          merged=$(git rev-parse 'HEAD^{tree}') || merged=unknown-merge
+          head=$(git rev-parse "${PR_HEAD}^{tree}" 2>/dev/null) || head=unknown-head
+          if [ "$merged" = "$head" ]; then
+            echo "duplicate=true" >> "$GITHUB_OUTPUT"
+            echo "the merge onto the base is the head's own tree — the push run tests it"
+          else
+            echo "the merge onto the base differs from the head — this is new work"
+          fi
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+
   pytest:
+    needs: scope
+    # `!cancelled()`, not the default success(): if the check above fails, the suite still runs
+    if: ${{ !cancelled() && needs.scope.outputs.duplicate != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:

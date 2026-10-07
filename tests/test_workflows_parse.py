@@ -213,6 +213,24 @@ def test_every_writer_waits_its_turn_rather_than_dropping_the_one_waiting():
         assert c.get("cancel-in-progress") is False, f"{workflow}:{where} would kill a running writer"
 
 
+def test_the_suite_runs_on_every_push_and_skips_only_a_tree_already_tested():
+    """QC 2026-10-07 (A66). A commit pushed to a pull request's branch ran the 7-8 minute suite
+    twice. The dedupe must never cost a run that tests something new: every push runs, a fork's
+    pull request runs, and a pull request's run steps aside only when GitHub's merge onto the base
+    is the head's own tree — the one its push run is testing."""
+    doc = yaml.safe_load((ROOT / ".github" / "workflows" / "tests.yml").read_text())
+    assert doc[True]["push"] is None, "the push trigger is filtered by nothing — every branch runs"
+    assert "pull_request" in doc[True]
+    suite = doc["jobs"]["pytest"]
+    assert suite["needs"] == "scope"
+    assert suite["if"] == "${{ !cancelled() && needs.scope.outputs.duplicate != 'true' }}", \
+        "skipped only on the duplicate verdict, and still run if the check itself fails"
+    tree, = [s for s in doc["jobs"]["scope"]["steps"] if s.get("id") == "tree"]
+    assert "github.event_name == 'pull_request'" in tree["if"]
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in tree["if"], \
+        "a fork's pull request has no push run here, so it is never the duplicate"
+
+
 def test_the_composed_kind_is_the_kind_notify_expects():
     """The seam with no other guard: `brief` writes a kind and `notify` looks for one. When they
     disagree the chain is green end to end and Zak gets silence — which §4.7 rules is itself the
