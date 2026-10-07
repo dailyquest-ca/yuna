@@ -31,6 +31,7 @@ import db as dbm                                                          # noqa
 import desk                                                               # noqa: E402
 import engine                                                             # noqa: E402
 import fixtures as world                                                  # noqa: E402
+import brief                                                              # noqa: E402
 import gauges                                                             # noqa: E402
 import ledger                                                             # noqa: E402
 import sheet                                                              # noqa: E402
@@ -260,6 +261,44 @@ def test_a_forward_split_on_a_held_tfsa_name_doubles_the_book_and_moves_no_nav(d
         note, source, grade = cur.fetchone()
     assert note == detail["splits"]["recorded"][0]
     assert "2.000000/1.000000" in source and "2026-10-07" in source and grade == "stated"
+
+
+def test_the_brief_shows_each_split_recorded_since_the_last_sheet(db, migrated, tmp_path):
+    """"...and the brief shows it." A recorded split was an amber on the freshness line and nothing
+    more: "reconcile amber (that domain only)", with no name, no ratio and no count. The split's own
+    line — the shares before and after, the cost per share, no cash, the tape's evidence — now
+    prints under the book it restated, on the night it was recorded and not on every brief after."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        ex = days[-1]
+        _row(cur, "N01.US", "buy", 100, 40.0, days[-30])
+        _restate(cur, "N01.US", ex, 2.0)
+        _split(cur, "N01.US", ex, "2.000000/1.000000")
+        # last night's sheet, scored before tonight's reconcile ran
+        sheet.write_session(cur, desk.sheet(cur, days[-2], 200_000.0), "live", engine.digest())
+    db.commit()
+
+    out = _reconcile(migrated, tmp_path)
+    assert out.returncode == 0, out.stdout + out.stderr
+    with db.cursor() as cur:
+        sheet.write_session(cur, desk.sheet(cur, ex, 200_000.0), "live", engine.digest())
+    db.commit()
+
+    # the compose job as the chain runs it, and the brief it stores for the Routines to send
+    out = subprocess.run([sys.executable, str(ROOT / "src" / "brief.py")], capture_output=True,
+                         text=True, env={"DATABASE_URL": migrated, "DB_SSLMODE": "disable",
+                                         "PATH": "/usr/bin:/bin"})
+    assert out.returncode == 0, out.stdout + out.stderr
+    with db.cursor() as cur:
+        cur.execute("select body from briefs where kind = 'nightly' and session_date = %s", (ex,))
+        body = cur.fetchone()[0]
+    book = body.split("## Book (§4.2)")[1].split("## NAV")[0]
+    assert "split recorded: TFSA N01.US 2:1 split, ex " in book, body
+    assert "100 -> 200 shares" in book and "no cash moved" in book
+
+    with db.cursor() as cur:
+        nxt = ex + dt.timedelta(days=1)
+        assert brief.recorded_splits(cur, nxt) == [], "tonight's sheet came after it: not again"
 
 
 def test_a_reverse_split_restates_the_book_and_stores_no_fake_peak(db, migrated, tmp_path):

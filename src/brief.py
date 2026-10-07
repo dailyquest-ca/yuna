@@ -598,6 +598,37 @@ def account_cash(cur):
     return cash
 
 
+def recorded_splits(cur, session):
+    """The splits `reconcile` wrote into the ledger since the sheet before `session` was scored.
+
+    Zak's ruling of 2026-10-07 ("Pipeline records splits") has the brief show each one. `reconcile`
+    runs before `score`, so a split recorded tonight was written after the previous session's row
+    and before tonight's: it prints on tonight's brief, and on no brief after the next sheet. Each
+    row's note is the run's own line for it (migration 075) — the shares and the cost per share
+    before and after, no cash moved, and the raw closes that agree with the ratio.
+    """
+    cur.execute("""select t.account, t.ticker, t.qty as ratio, t.trade_date as ex_date, t.note
+                     from transactions t
+                    where t.side = 'split' and t.superseded_by is null
+                      and t.confirmed_at > coalesce(
+                            (select s.created_at from engine_sessions s
+                              where s.mode = 'live' and s.session_date < %s
+                              order by s.session_date desc limit 1), '-infinity')
+                    order by t.trade_date, t.account, t.ticker""", (session,))
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def split_lines(splits):
+    """One line per split recorded since the last sheet, above the book it restated."""
+    out = []
+    for s in splits or []:
+        said = s["note"] or (f"{s['account']} {s['ticker']} split x{float(s['ratio']):g}, "
+                             f"ex {s['ex_date']}")
+        out.append(f"  split recorded: {said}")
+    return out + [""] if out else []
+
+
 def cash_lines(cash, session):
     """§2.4: "Cash that is not awaiting a same-week engine order sits in the account's designated
     holding." Information, never a ticket — §0.2 leaves every order to Zak, and §2.4 names no
@@ -788,9 +819,10 @@ def exclusion_lines(p):
     return out
 
 
-def render(p, frozen=False, words=None, cash=None):
+def render(p, frozen=False, words=None, cash=None, splits=None):
     """The brief. `cash` is `account_cash`'s read, passed in by `main` because the payload does not
-    carry it; without it the cash section is left out rather than printed empty."""
+    carry it; without it the cash section is left out rather than printed empty. `splits` is
+    `recorded_splits`' read, passed in the same way."""
     g = p["gate"] or {}
     out = [f"# Yuna · {g.get('session_date') or 'no session'}", ""]
     if frozen:
@@ -807,7 +839,8 @@ def render(p, frozen=False, words=None, cash=None):
     out.append(freshness_line(p))
     out += ["", gate_line(p), "", "## Order sheet (§4.3)", ""]
     out += sheet_lines(p) + not_order_lines(p)
-    out += ["", "## Book (§4.2)", ""] + book_lines(p) + underweight_lines(p) + sleeve_lines(p)
+    out += ["", "## Book (§4.2)", ""] + split_lines(splits) + book_lines(p)
+    out += underweight_lines(p) + sleeve_lines(p)
     out += ["", "## NAV & drawdown (§5.2)", ""] + dd_lines(p)
     out += ["", "## Levered layer (§2.3) — CAD, as the draw and the purchase both are", ""]
     out += tranche_lines(p, frozen=frozen)
@@ -843,7 +876,8 @@ def main():
         with conn.cursor() as cur:
             p = payload(cur)
             frozen, words, froze_at, _ = freeze_state(cur)
-            report = render(p, frozen=frozen, words=words, cash=account_cash(cur))
+            report = render(p, frozen=frozen, words=words, cash=account_cash(cur),
+                            splits=recorded_splits(cur, (p["gate"] or {}).get("session_date")))
             if slot == "saturday":
                 report += "\n\n## The week (§4.1)\n\n" + "\n".join(saturday_lines(cur, p))
         print(report)
