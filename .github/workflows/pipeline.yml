@@ -72,22 +72,31 @@ jobs:
       # and a firing cancelled before it started wrote no row and ran no autopsy: the chain
       # re-scored yesterday's tape under a green freshness line, with the buys released. GitHub
       # dropped pending writers that way until the `yuna-writes` group said `queue: max`; a hand,
-      # a timeout or a hundred-deep queue can still cancel one. That run is recorded here instead. report_fail.py closes or writes its row red — unless the night is
-      # already green by the retry's own test — and the freshness gauge holds the buys on it.
-      # Scheduled firings only: whoever cancels a dispatch watched it happen, and a dispatch may
-      # have been a rehearsal (learning 67). Every other night these four steps are skipped.
-      - if: github.event.workflow_run.conclusion == 'cancelled' && github.event.workflow_run.event == 'schedule'
+      # a timeout or a hundred-deep queue can still cancel one. That run is recorded here
+      # instead: report_fail.py closes or writes its row red — unless the night is already green
+      # by the retry's own test — and the freshness gauge holds the buys on it. Scheduled firings
+      # only: whoever cancels a dispatch watched it happen, and a dispatch may have been a
+      # rehearsal (learning 67). Every other night these four steps are skipped.
+      - if: >-
+          github.event.workflow_run.conclusion == 'cancelled' &&
+          github.event.workflow_run.event == 'schedule'
         uses: actions/checkout@v4
-      - if: github.event.workflow_run.conclusion == 'cancelled' && github.event.workflow_run.event == 'schedule'
+      - if: >-
+          github.event.workflow_run.conclusion == 'cancelled' &&
+          github.event.workflow_run.event == 'schedule'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
           cache-dependency-path: requirements.txt
-      - if: github.event.workflow_run.conclusion == 'cancelled' && github.event.workflow_run.event == 'schedule'
+      - if: >-
+          github.event.workflow_run.conclusion == 'cancelled' &&
+          github.event.workflow_run.event == 'schedule'
         run: pip install -r requirements.txt
       - name: a cancelled scheduled ingest is recorded red
-        if: github.event.workflow_run.conclusion == 'cancelled' && github.event.workflow_run.event == 'schedule'
+        if: >-
+          github.event.workflow_run.conclusion == 'cancelled' &&
+          github.event.workflow_run.event == 'schedule'
         run: |
           echo "the scheduled $TRIGGER run $AUTOPSY_RUN_ID (attempt $AUTOPSY_RUN_ATTEMPT) ended" \
                "cancelled, so its work never finished; this chain reads whatever the store holds" \

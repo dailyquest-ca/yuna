@@ -570,14 +570,14 @@ def late_minutes(detail):
     return m if m > 0 else None
 
 
-# The newest STOCK bar — what `freshness` and `data_date` both ask — as an ordered probe rather than
-# an aggregate (QC 2026-10-07, A35). `max(p.d)` over the join with `universe` read every price row:
-# Postgres rewrites a bare max() into an index probe but not across a join, so the question cost
-# 9.3 s on average, 30.7 s at worst and ~0.9 GB of reads, growing with the tape. Walking `prices_d_idx`
-# backwards and stopping at the first row whose ticker is a stock gives the same date — `d` is NOT
-# NULL (it is in the primary key) and `universe.ticker` is unique, so the newest qualifying row's
-# date IS the max — in milliseconds (planned cost 1.42 against 271,106 on production). The outer
-# scalar select keeps the empty store's answer NULL, as max() gave, rather than no row at all.
+# The newest STOCK bar — what `freshness` and `data_date` both ask — as an ordered probe rather
+# than an aggregate (QC 2026-10-07, A35). `max(p.d)` over the join with `universe` read every price
+# row: Postgres rewrites a bare max() into an index probe but not across a join, so the question
+# cost 9.3 s on average, 30.7 s at worst and ~0.9 GB of reads, growing with the tape. Walking
+# `prices_d_idx` backwards and stopping at the first row whose ticker is a stock gives the same
+# date — `d` is NOT NULL (it is in the primary key) and `universe.ticker` is unique, so the newest
+# qualifying row's date IS the max — in milliseconds (planned cost 1.42 against 271,106 on
+# production). The outer scalar select keeps an empty store's answer NULL, as max() gave.
 NEWEST_STOCK_BAR = """select (select p.d from prices p
                                where exists (select 1 from universe u
                                               where u.ticker = p.ticker and u.kind = 'stock')

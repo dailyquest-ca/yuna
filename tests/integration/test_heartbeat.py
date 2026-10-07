@@ -40,7 +40,8 @@ def _after(migrated, run_id):
 def test_a_job_that_raises_leaves_nothing_behind_but_its_red(db, migrated, death):
     """A49. The three ways a Python-level death reaches the heartbeat: a bug, a deliberate refusal
     (reconcile's `fold_fill`), and the SIGINT a cancelled Actions job receives. None of them may
-    commit the half the job reached — a partial sheet or a half-folded manifest reads as a result."""
+    commit the half the job reached — a partial sheet or a half-folded manifest reads as a
+    result."""
     with pytest.raises(type(death)):
         with dbm.Heartbeat(db, "probe", dry_run=False) as hb:
             with db.cursor() as cur:

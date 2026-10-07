@@ -204,13 +204,15 @@ def test_every_writer_waits_its_turn_rather_than_dropping_the_one_waiting():
     for path in WORKFLOWS:
         doc = yaml.safe_load(path.read_text())
         blocks = [("the workflow", doc.get("concurrency"))]
-        blocks += [(name, spec.get("concurrency")) for name, spec in (doc.get("jobs") or {}).items()]
+        blocks += [(name, spec.get("concurrency"))
+                   for name, spec in (doc.get("jobs") or {}).items()]
         members += [(path.name, where, c) for where, c in blocks
                     if isinstance(c, dict) and c.get("group") == "yuna-writes"]
     assert members, "no workflow writes through yuna-writes — the search is wrong, not the repo"
     for workflow, where, c in members:
         assert c.get("queue") == "max", f"{workflow}:{where} drops a writer that is waiting"
-        assert c.get("cancel-in-progress") is False, f"{workflow}:{where} would kill a running writer"
+        assert c.get("cancel-in-progress") is False, \
+            f"{workflow}:{where} would kill a running writer"
 
 
 def test_the_suite_runs_on_every_push_and_skips_only_a_tree_already_tested():
