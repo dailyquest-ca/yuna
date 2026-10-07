@@ -9,6 +9,7 @@ pytest catches it in under a second. GitHub catches it after a push, a dispatch,
 reader.
 """
 import pathlib
+import re
 
 import pytest
 import yaml
@@ -148,6 +149,26 @@ def test_an_autopsy_records_a_rehearsal_as_a_rehearsal(path):
         for step in filter(_is_autopsy, steps):
             assert (step.get("env") or {}).get("DRY_RUN") == want, \
                 f"{path.name}:{name}'s autopsy does not get the DRY_RUN its job gets"
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_an_autopsy_also_runs_when_the_job_is_cancelled(path):
+    """QC 2026-10-07 (A45): a cancel — by hand, by `timeout-minutes`, by a lost runner — is not a
+    failure() to GitHub, so an `if: failure()` autopsy never ran on one and the killed job's row
+    read `running` for ever (production's run 905, since 2026-09-14). Every autopsy runs on a
+    cancel as well, judged by its own job's work step: a cancel after a green finish is no death."""
+    for name, spec in (yaml.safe_load(path.read_text()).get("jobs") or {}).items():
+        steps = spec.get("steps") or []
+        work = {s.get("id") for s in steps if _runs_a_job(s)}
+        if not work:
+            continue                        # nothing of its own to autopsy
+        for step in filter(_is_autopsy, steps):
+            cond = str(step.get("if", ""))
+            assert "failure()" in cond and "cancelled()" in cond, \
+                f"{path.name}:{name}'s autopsy never runs on a cancel: {cond!r}"
+            judged_by = set(re.findall(r"steps\.([\w-]+)\.outcome", cond))
+            assert judged_by and judged_by <= work - {None}, \
+                f"{path.name}:{name}'s autopsy must judge a cancel by its own work step's outcome"
 
 
 def test_the_composed_kind_is_the_kind_notify_expects():

@@ -570,7 +570,7 @@ def late_minutes(detail):
     return m if m > 0 else None
 
 
-def freshness(conn, *, stale_days=4):
+def freshness(conn, *, stale_days=4, own_run=None):
     """The one-line answer to "is it safe to speak" (§4.2): `ingest ✓ score ✓ check ✓`.
 
     `stale_days=4` and the 36-hour window below are operating constants of record (§5.6,
@@ -579,12 +579,24 @@ def freshness(conn, *, stale_days=4):
     lets Saturday's rows fall out by Monday night.
 
     Returns (line, tickets_allowed). §5.6, ruled 2026-08-05 — **stale means the bars, not the
-    clock**. Tickets are held on exactly three conditions:
+    clock**. Tickets are held on exactly four conditions:
 
       * the bars are old,
       * a price-critical job failed (red, or the half-failure the 2026-08-05 ruling calls amber),
+      * a price-critical job's newest run has not FINISHED — see below,
       * the chain ran **out of order** — an ingest landed rows after the `score` beside it, so the
         derived numbers ranked yesterday's world.
+
+    **A run still reading `running` is not a result** (QC 2026-10-07, A45). It is an ingest still
+    landing bars or a score still rewriting the sheet, or it is a job that died without closing
+    its row — a cancel, a timeout or a lost runner, none of which ran the `if: failure()` autopsy
+    (production's run 905 has read `running` since 2026-09-14). This line used to print either as
+    ✓ and release the buys. Neither can vouch for the prices, so a price-critical one holds buys
+    the way that job's amber does (§4.3 as amended 2026-09-14), and the line says what is known —
+    "still running or died". No age decides between the two: the question is whether a result
+    exists, and a running row has none. `own_run` is the asking job's own runs id; a run that asks
+    from inside itself is not waiting on itself. Everything else running — `check` asking this
+    very question, compose, the census — prints as it always did.
 
     **Lateness alone holds nothing.** It rides the line as `late: <job> +NNNm` and decides nothing:
     a job queued three hours behind its slot with current bars is a punctuality note, not a data
@@ -599,16 +611,19 @@ def freshness(conn, *, stale_days=4):
         last_bar = cur.fetchone()[0]
         # `not dry_run`, as the timeline query below always had: a DRY_RUN dispatch of the chain
         # that ended red was the newest row for its job and held the live desk (2026-09-13)
-        cur.execute("""select distinct on (job) job, status, detail from runs
+        cur.execute("""select distinct on (job) job, status, detail, id from runs
                        where started_at > now() - interval '36 hours' and not dry_run
                        order by job, id desc""")
-        recent = [(j, s, d) for j, s, d in cur.fetchall()]
+        recent = cur.fetchall()
         # every non-dry run in the window — the ordering question is about runs, not jobs
         cur.execute("""select job, started_at, finished_at, coalesce(rows_written, 0) from runs
                        where started_at > now() - interval '36 hours' and not dry_run""")
         timeline = cur.fetchall()
 
-    status = {j: s for j, s, _ in recent}
+    status = {j: s for j, s, _, _ in recent}
+    # a price-critical run with no result yet (see the docstring): amber-equivalent, never ✓
+    unfinished = sorted(j for j, s, _, i in recent
+                        if s == "running" and j in PRICE_CRITICAL and i != own_run)
     marks = []
     for verb, jobs in VERBS.items():
         seen = [status[j] for j in jobs if j in status]
@@ -616,13 +631,13 @@ def freshness(conn, *, stale_days=4):
             marks.append(f"{verb} —")
         elif any(s == "red" for s in seen):
             marks.append(f"{verb} ✗")
-        elif any(s == "amber" for s in seen):
+        elif any(s == "amber" for s in seen) or any(j in unfinished for j in jobs):
             marks.append(f"{verb} ⚠")
         else:
             marks.append(f"{verb} ✓")
     line = " · ".join(marks)
 
-    late = sorted(f"late: {j} +{m:.0f}m" for j, _, d in recent
+    late = sorted(f"late: {j} +{m:.0f}m" for j, _, d, _ in recent
                   if (m := late_minutes(d)) and m >= LATE_MINUTES_FLOOR)
     if late:
         line += " · " + " · ".join(late)
@@ -641,14 +656,14 @@ def freshness(conn, *, stale_days=4):
     score_start = max((s for j, s, _, _ in timeline if j in VERBS["score"]), default=None)
     out_of_order = bool(ingest_end and score_start and ingest_end > score_start)
 
-    bad = [f"{j} {s}" for j, s, _ in recent if s in ("red", "amber")]
+    bad = [f"{j} {s}" for j, s, _, _ in recent if s in ("red", "amber")]
     price_bad = [x for x in bad if x.split()[0] in PRICE_CRITICAL]
     stale = (dt.date.today() - last_bar).days if last_bar else 999
     if stale > stale_days:
         return f"⚠️ bars stale — last close {last_bar} ({stale}d) · {line}", False
-    if price_bad:
-        return (f"⚠️ {', '.join(sorted(set(price_bad)))} — data {last_bar}, tickets held · {line}",
-                False)
+    if price_bad or unfinished:
+        why = sorted(set(price_bad)) + [f"{j} still running or died" for j in unfinished]
+        return f"⚠️ {', '.join(why)} — data {last_bar}, tickets held · {line}", False
     if out_of_order:
         return (f"⚠️ chain out of order — an ingest landed rows after the score beside it "
                 f"({ingest_end.astimezone(dt.timezone.utc):%H:%M} > "

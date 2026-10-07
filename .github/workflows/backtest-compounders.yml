@@ -30,7 +30,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/backtest_compounders.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/backtest_compounders.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           LABEL: ${{ inputs.label || 'compounders v1' }}
@@ -40,7 +41,7 @@ jobs:
           MAX_NAMES: ${{ inputs.max_names || '5' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py backtest-compounders /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

@@ -38,13 +38,14 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt
       - name: L0 census
+        id: work
         run: set -o pipefail; python src/funnel.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
           FORCE: ${{ inputs.force || 'false' }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py ingest-universe /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

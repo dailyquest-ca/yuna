@@ -33,12 +33,13 @@ jobs:
       # inside its own heartbeat: a refused push is its red, with the server's words in the runs
       # row, and the guard reads the file in the checkout beside the ledger (learning 64).
       - name: dump and commit
+        id: work
         run: set -o pipefail; python src/backup.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FORCE: ${{ inputs.force || 'false' }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py backup /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

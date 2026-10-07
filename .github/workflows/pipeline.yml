@@ -84,14 +84,21 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/reconcile.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/reconcile.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
       # Every autopsy gets the DRY_RUN its job got (QC 2026-10-07, A24): a rehearsal that dies
       # before its heartbeat leaves a rehearsal's row, never a live red that holds the desk.
+      #
+      # And every autopsy runs on a CANCEL as well as a failure (A45). A cancel — by hand, by
+      # `timeout-minutes`, by a runner GitHub lost track of — is not a failure() to GitHub, so
+      # the job's row stayed `running` for ever (production's run 905, since 2026-09-14) and the
+      # freshness line read it as ✓. A cancel that lands after the work finished green is not a
+      # death, so the work step's own outcome decides; a failure() always autopsies, as before.
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py reconcile /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -117,7 +124,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/sheet.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/sheet.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
@@ -126,7 +134,7 @@ jobs:
           # `config.engine_nav`, which is a logged row with a timestamp, so a change to the number
           # the book is sized against is auditable rather than a secret that moved.
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py score /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -149,12 +157,13 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/shadow.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/shadow.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py shadow /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -173,7 +182,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/gauges.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/gauges.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           # Like every job beside it (QC 2026-10-07, A9): a dry dispatch's check is a rehearsal,
@@ -181,7 +191,7 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
           ENGINE_MODE: ${{ inputs.engine_mode || 'live' }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py check /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -204,13 +214,14 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/brief.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/brief.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
           COMPOSE_SLOT: ${{ needs.slot.outputs.slot }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py compose /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -229,14 +240,15 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/notify.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/notify.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
           PUSH_WEBHOOK_URL: ${{ secrets.PUSH_WEBHOOK_URL }}
           NOTIFY_SLOT: ${{ needs.slot.outputs.slot }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py notify /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

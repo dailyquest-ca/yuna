@@ -1,4 +1,6 @@
-"""Last-resort autopsy — the workflow's `if: failure()` step.
+"""Last-resort autopsy — the workflow's step that runs on a failure, and on a cancel that landed
+before the job's work finished (2026-10-07: a cancel or a timeout is not a failure() to GitHub,
+and the rows of the jobs it killed stayed `running` for ever).
 
 Ships the captured output tail into `runs` as a red row when a job dies. Standalone on purpose: it
 imports nothing from `db.py`, because a job that died on an import error is exactly the death this

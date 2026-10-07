@@ -132,7 +132,7 @@ jobs:
           START_NAV: ${{ inputs.start_nav || '200000' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
       - name: autopsy on failure
-        if: failure() && steps.engine.outcome == 'failure'
+        if: (failure() && steps.engine.outcome == 'failure') || (cancelled() && steps.engine.outcome == 'cancelled')
         run: python src/report_fail.py blend /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -160,7 +160,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SCAN_APPLY: ${{ inputs.apply || 'false' }}
       - name: autopsy on failure
-        if: failure() && steps.engine.outcome == 'failure'
+        if: (failure() && steps.engine.outcome == 'failure') || (cancelled() && steps.engine.outcome == 'cancelled')
         run: python src/report_fail.py dedupe /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -273,7 +273,7 @@ jobs:
           END_DATE: ${{ inputs.end_date }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
       - name: autopsy on failure
-        if: failure() && steps.engine.outcome == 'failure'
+        if: (failure() && steps.engine.outcome == 'failure') || (cancelled() && steps.engine.outcome == 'cancelled')
         run: python src/report_fail.py push_study /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -358,7 +358,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: autopsy on failure
-        if: failure() && steps.engine.outcome == 'failure'
+        if: (failure() && steps.engine.outcome == 'failure') || (cancelled() && steps.engine.outcome == 'cancelled')
         run: python src/report_fail.py concentrated /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -441,7 +441,7 @@ jobs:
       # purpose; routing that through the autopsy wrote a `runs` row claiming the job died
       # pre-heartbeat, seconds after the same job had finished and written its own amber.
       - name: autopsy on failure
-        if: failure() && steps.engine.outcome == 'failure'
+        if: (failure() && steps.engine.outcome == 'failure') || (cancelled() && steps.engine.outcome == 'cancelled')
         run: python src/report_fail.py backtest /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

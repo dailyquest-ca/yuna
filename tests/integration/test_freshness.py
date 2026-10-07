@@ -13,6 +13,8 @@ import datetime as dt
 import pathlib
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "src"))
 import db as dbm                                                          # noqa: E402
 import fixtures as world                                                  # noqa: E402
@@ -156,6 +158,11 @@ def test_the_score_asking_the_question_counts_as_the_score(db):
     started at 22:49 and asked whether it was out of order — and the newest *finished* score was
     the previous one, from 21:56. Every chained run would have reported itself late, on a night
     when the order was exactly right.
+
+    Since 2026-10-07 the asking run names itself (`own_run`). A running score that is NOT the
+    asker is either rewriting the sheet or dead without a word, and it holds the tickets (A45 —
+    see the test below); the asker is not waiting on itself, and this test pins that it never
+    holds itself.
     """
     with db.cursor() as cur:
         bars_today(cur)
@@ -164,10 +171,39 @@ def test_the_score_asking_the_question_counts_as_the_score(db):
         run(cur, "ingest-daily", started="now() - interval '20 minutes'",
             finished="now() - interval '2 minutes'")
         cur.execute("""insert into runs (job, status, started_at, dry_run)
-                       values ('score', 'running', now() - interval '1 minute', false)""")
+                       values ('score', 'running', now() - interval '1 minute', false)
+                       returning id""")
+        asking = cur.fetchone()[0]
+    db.commit()
+    line, tickets = dbm.freshness(db, own_run=asking)
+    assert tickets is True and "out of order" not in line, line
+
+
+@pytest.mark.parametrize("job", ["ingest-daily", "score"])
+def test_a_price_critical_run_that_never_finished_is_not_a_result(db, job):
+    """QC 2026-10-07 (A45). A job killed by a cancel, a timeout or a lost runner skips the
+    `if: failure()` autopsy, so its row reads `running` for ever — and this line printed it ✓ and
+    released the buys over a tape whose repairs may never have landed. A price-critical run with no
+    result is either still writing the prices or dead without a word; neither vouches for them, so
+    it holds like that job's amber (§4.3 as amended 2026-09-14) and says only what is known.
+
+    Nothing else running changes: the `check` asking this very question, and a job that writes no
+    price, read exactly as they did."""
+    with db.cursor() as cur:
+        bars_today(cur)
+        run(cur, "ingest-daily", started="now() - interval '60 minutes'",
+            finished="now() - interval '50 minutes'")
+        run(cur, "score", started="now() - interval '45 minutes'",
+            finished="now() - interval '40 minutes'")
+        run(cur, job, "running", started="now() - interval '30 minutes'", finished="null", rows=0)
+        run(cur, "compose", "running", finished="null", rows=0)           # writes no price
+        run(cur, "check", "running", finished="null", rows=0)             # the run asking
     db.commit()
     line, tickets = dbm.freshness(db)
-    assert tickets is True and "out of order" not in line
+    assert tickets is False, line
+    assert f"⚠️ {job} still running or died — data " in line and "tickets held" in line
+    assert "check ✓" in line, "check's own unfinished run is not a reason to hold"
+    assert "compose" not in line
 
 
 def test_an_ingest_that_wrote_nothing_is_not_out_of_order(db):
