@@ -333,12 +333,15 @@ def test_a_reverse_split_restates_the_book_and_stores_no_fake_peak(db, migrated,
         sheet.write_session(cur, dict(desk.sheet(cur, ex, nav), nav_source=src), "live",
                             engine.digest())
         db.commit()
-        cur.execute("""select marked_equity, peak, drawdown from v_engine_drawdown
+        cur.execute("""select marked_equity, nav, peak, drawdown from v_engine_drawdown
                         order by session_date""")
-        (m0, p0, d0), (m1, p1, d1) = cur.fetchall()
+        (m0, n0, p0, d0), (m1, n1, p1, d1) = cur.fetchall()
     assert m0 == pytest.approx(100 * was)
     assert m1 == pytest.approx(m0), "the split moved no equity"
-    assert p1 == pytest.approx(m0) and d1 == pytest.approx(0.0), "no fake peak, no fake drawdown"
+    # §5.2's drawdown is measured on engine NAV since migration 068 — the positions plus the TFSA
+    # cash, which the split leaves alone too — so the peak is the night-before's NAV, not its equity
+    assert n1 == pytest.approx(n0), "nor the NAV the drawdown is measured on"
+    assert p1 == pytest.approx(n0) and d1 == pytest.approx(0.0), "no fake peak, no fake drawdown"
 
 
 def test_the_vendors_awkward_ratios_restate_exactly_in_both_of_its_formats(db, migrated,
