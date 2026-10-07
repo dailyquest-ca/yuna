@@ -1,12 +1,17 @@
 name: backtest
-# The verification instrument, on four doors (docs/backtest-plan-2026-08-10.md, Phase 5):
+# Dispatch-only tooling (CLAUDE.md, README): the retired engine's backtest and the research grid,
+# one job per `research` mode. Nothing here runs on a schedule, a push or a pull request.
 #
-#   1. every logic change — the paths filter below, on pull requests and on main
-#   2. on demand        — workflow_dispatch, for "I am about to suggest a change" and for
-#                         "I just want to see that it still does what I think it does"
-#   3. behaviour git cannot see — 52 config keys live in the database; the run stamps the digest
-#                         it decided under and `check` ambers when the newest run's stamp is stale
-#   4. weekly           — the Saturday chain, so the answer is never more than seven days old
+# It used to run on pull requests and on pushes to main that touched the plan, the migrations or
+# the retired engine's modules — door 1 of the four the 2026-08-10 backtest plan drew (Phase 5),
+# all four drawn for the engine v1.0 retired (QC 2026-10-07, A33). `src/backtest.py` replays law-v0
+# — signals.py, the MCN floor, the stops — so every plan edit and migration spent 10-14
+# runner-minutes and a whole-tape load against PRODUCTION re-measuring an engine that places no
+# orders, while an edit to the live engine (engine.py, desk.py, sheet.py) triggered nothing, and its
+# PR comment step never posted (`hashFiles` cannot see /tmp). Door 3 — `check` ambering on a stale
+# backtest stamp — lives only in the retired check.py; door 4, a weekly run, was never built. The
+# live engine is held by its tests (test_engine_parity.py, test_engine_book.py) and by §6.4's
+# nightly shadow; a cell-of-record run on every logic change would be a new build, and Zak's call.
 #
 # **It reports; it does not gate on performance.** The build fails only when a CONFORMANCE clause
 # fails — an entry below the MCN floor, an exit reason §3.2 does not name, a clause no data covered.
@@ -66,37 +71,12 @@ on:
       dry_run:
         description: 'compute everything, write nothing'
         default: 'false'
-  pull_request:
-    paths:
-      - 'src/signals.py'         # the law itself
-      - 'src/backtest.py'        # the driver
-      - 'src/backtest_report.py'
-      - 'src/arming.py'          # what the differential test is measured against
-      - 'src/score.py'
-      - 'src/rank.py'
-      - 'src/fundamentals.py'
-      - 'migrations/**'          # config seeds move behaviour
-      - 'docs/yuna_plan.md'      # the law's text — a plan edit is a logic change
-      - '.github/workflows/backtest.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'src/signals.py'
-      - 'src/backtest.py'
-      - 'src/backtest_report.py'
-      - 'src/arming.py'
-      - 'src/score.py'
-      - 'src/rank.py'
-      - 'src/fundamentals.py'
-      - 'migrations/**'
-      - 'docs/yuna_plan.md'
 
 permissions:
   contents: read
-  pull-requests: write
 
 # Not `yuna-writes`: this job touches `backtest_*` and nothing else (§4.2), so it cannot race the
-# chain. One run per ref PER JOB is enough — a second push supersedes the first, but a blend
+# chain. One run per ref PER JOB is enough — a second dispatch supersedes the first, but a blend
 # dispatch must not cancel a study dispatch riding the same file (run 64 died exactly that way).
 # `cells` is in the key for the same reason: two concentrated dispatches carrying different
 # halves of the grid are different work, and the second must not kill the first.
@@ -381,7 +361,7 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   backtest:
-    if: github.event_name != 'workflow_dispatch' || inputs.research == ''
+    if: inputs.research == ''
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -447,13 +427,6 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DD_BAR: ${{ inputs.dd_bar }}
-
-      - name: comment on the pull request
-        if: always() && github.event_name == 'pull_request' && hashFiles('/tmp/report.md') != ''
-        run: gh pr comment "$NUMBER" --body-file /tmp/report.md
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NUMBER: ${{ github.event.pull_request.number }}
 
       # Only when the ENGINE died. A conformance failure exits the report step non-zero on
       # purpose; routing that through the autopsy wrote a `runs` row claiming the job died

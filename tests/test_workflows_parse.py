@@ -245,6 +245,16 @@ def test_every_python_setup_caches_its_downloads_keyed_on_the_pins(path):
                     f"{path.name}:{name} keys its cache on something other than the pins"
 
 
+@pytest.mark.parametrize("name", ["backtest.yml", "backtest-compounders.yml"])
+def test_the_backtests_are_dispatch_only_tooling(name):
+    """CLAUDE.md and the README: both backtests are dispatch-only tooling. QC 2026-10-07 (A33):
+    backtest.yml also ran on every push and pull request touching the plan or a migration — the
+    RETIRED law-v0 engine, re-measured against production for 10-14 minutes — while the live
+    engine's own files triggered nothing. Nothing but a person's dispatch runs either."""
+    doc = yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
+    assert set(doc[True]) == {"workflow_dispatch"}, f"{name} runs on {sorted(doc[True])}"
+
+
 def test_the_composed_kind_is_the_kind_notify_expects():
     """The seam with no other guard: `brief` writes a kind and `notify` looks for one. When they
     disagree the chain is green end to end and Zak gets silence — which §4.7 rules is itself the
