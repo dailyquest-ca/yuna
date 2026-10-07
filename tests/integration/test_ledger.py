@@ -682,3 +682,40 @@ def test_a_row_left_open_after_the_ledger_sold_the_name_out_is_a_break(db):
         cur.execute("""select ticker, ledger_qty, book_qty, predates_the_ledger
                          from v_ledger_vs_book""")
         assert cur.fetchall() == [("N00.US", None, 50.0, False)], "a break, not a pre-ledger row"
+
+
+def test_the_sweep_closes_a_row_the_ledger_sold_out(db):
+    """A76. The sweep walked only the names `v_ledger_positions` lists, which leaves out every name
+    the ledger has sold out — so the one stray it most needed to close was the one it never saw,
+    and it reported nothing to do."""
+    with db.cursor() as cur:
+        _sold_out_with_a_row_left_open(cur)
+        assert ledger.rebuild_book(cur) == ["TFSA N00.US: 50 -> closed"]
+        db.commit()
+        assert _open_rows(cur, "N00.US") == []
+        assert desk.held_book(cur) == {}, "and no slot is held by it tonight"
+
+
+def test_the_sweep_never_reports_a_repair_it_did_not_make(db):
+    """A76, where the index is not. Recording anything through `ledger.py` sweeps the whole book,
+    and the sweep printed the ledger's quantity as the book's new state: VXC.TO read "418 -> 279" on
+    every pass while the book stayed at 418, so an operator who ran it to clear the double count
+    would read success and stop. A split position is now refused by name — raised to a caller with
+    nowhere to report it, listed for one that has — the book is left exactly as it was, and the rest
+    of the sweep still runs."""
+    with world.book_before_069(db), db.cursor() as cur:
+        _split(cur)
+        _universe(cur, "MU.US")
+        ledger.record(cur, dict(ticker="MU.US", account="TFSA", side="buy", qty=2, price=954.58,
+                                trade_date="2026-08-14"), "stated", "chat")
+        cur.execute("update book set qty = 1 where ticker = 'MU.US'")   # something to repair
+
+        cur.execute("savepoint sweep")
+        with pytest.raises(psycopg.errors.RaiseException, match=r"TFSA N00\.US in 2 open rows"):
+            ledger.rebuild_book(cur)
+        cur.execute("rollback to savepoint sweep")
+
+        refused = []
+        assert ledger.rebuild_book(cur, refused=refused) == ["TFSA MU.US: 1 -> 2"]
+        assert len(refused) == 1 and refused[0].startswith("TFSA N00.US: book holds")
+        assert sum(q for _, _, q in _open_rows(cur, "N00.US")) == 418.0, "left as it was"

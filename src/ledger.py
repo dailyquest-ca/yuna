@@ -40,6 +40,8 @@ import datetime as dt
 import pathlib
 import sys
 
+import psycopg
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from db import connect, dry, Heartbeat                                     # noqa: E402
 
@@ -166,7 +168,15 @@ def record(cur, f, grade, source):
     return new_id, note
 
 
-def rebuild_book(cur, account=None):
+def _open(cur, account, ticker):
+    """(shares, rows) the book holds open for one position — what every reader of it sums."""
+    cur.execute("""select coalesce(sum(qty), 0), count(*) from book
+                    where account = %s and ticker = %s and status = 'open'""", (account, ticker))
+    qty, rows = cur.fetchone()
+    return float(qty), rows
+
+
+def rebuild_book(cur, account=None, refused=None):
     """Make `book` say what the live ledger says, everywhere. Returns [changes].
 
     The per-position arithmetic is `yuna_book_from_ledger` (migration 059), which is also what the
@@ -181,18 +191,47 @@ def rebuild_book(cur, account=None):
 
     A position with no transactions behind it is left exactly alone and named. It predates the
     ledger, and deleting a real holding because one table cannot explain it is not a repair.
+
+    **A change is what the book holds AFTER the call, read back** (A76). It used to print the
+    function's return — the ledger's quantity — as the book's new state, so a position held in two
+    open rows (VXC.TO: 279 + 139 against a ledger of 279) read "418 -> 279" on every pass while the
+    book stayed at 418: a repair tool claiming a repair it never made. Migration 069's index now
+    keeps a position to one open row, and wherever the index is not the function refuses a split
+    position rather than picking a row; a refusal is reported in `refused` (each position under its
+    own savepoint, so one refusal does not end the sweep), or raised when the caller passes no list
+    to report it in.
+
+    The walk covers every position with live history that EITHER side still carries. The ledger's
+    own view lists only names it holds a non-zero quantity of, so a row left open after the ledger
+    sold the name out (A26's phantom) was never visited, and the sweep could not close the one
+    stray it most needed to.
     """
     changes = []
     where, args = ("where account = %s", (account,)) if account else ("", ())
-    cur.execute(f"select account, ticker, qty from v_ledger_positions {where}", args)
-    for acct, tk, qty in cur.fetchall():
-        cur.execute("""select coalesce(sum(qty), 0) from book
-                        where account = %s and ticker = %s and status = 'open'""", (acct, tk))
-        was = float(cur.fetchone()[0])
-        cur.execute("select yuna_book_from_ledger(%s, %s)", (acct, tk))
-        now = float(cur.fetchone()[0] or 0)
+    also, more = ("and b.account = %s", (account,)) if account else ("", ())
+    cur.execute(f"""select account, ticker from v_ledger_positions {where}
+                    union
+                    select b.account, b.ticker from book b
+                     where b.status = 'open' {also}
+                       and exists (select 1 from transactions t
+                                    where t.account = b.account and t.ticker = b.ticker
+                                      and t.superseded_by is null)
+                    order by 1, 2""", args + more)
+    for acct, tk in cur.fetchall():
+        was, _ = _open(cur, acct, tk)
+        cur.execute("savepoint rebuild_position")
+        try:
+            cur.execute("select yuna_book_from_ledger(%s, %s)", (acct, tk))
+        except psycopg.errors.RaiseException as e:
+            cur.execute("rollback to savepoint rebuild_position")
+            if refused is None:
+                raise
+            refused.append(f"{acct} {tk}: {e.diag.message_primary} — left as it was")
+            continue
+        cur.execute("release savepoint rebuild_position")
+        now, rows = _open(cur, acct, tk)
         if abs(was - now) > 1e-6:
-            changes.append(f"{acct} {tk}: {was:g} -> {'closed' if now <= 1e-9 else f'{now:g}'}")
+            changes.append(f"{acct} {tk}: {was:g} -> {f'{now:g}' if rows else 'closed'}")
 
     # A book position the ledger has no rows for at all. Not touched, and named — see the docstring.
     cur.execute("""select b.account, b.ticker, b.qty from book b
@@ -326,15 +365,24 @@ def main():
                 _, note = record(cur, f, grade, source)
                 noted.append(f"{f['side']} {f['qty']:g} {f['ticker']} @ {f['price']:g} "
                              f"({f['account']}, {f['trade_date']}) — {note}")
-            changes = rebuild_book(cur)
+            refused = []
+            changes = rebuild_book(cur, refused=refused)
             conn.commit()
 
             hb.rows = len(noted)
-            hb.detail.update(grade=grade, recorded=noted, book_changes=changes)
+            hb.detail.update(grade=grade, recorded=noted, book_changes=changes,
+                             book_refused=refused)
+            if refused:
+                # The sweep ran to the end; these positions did not move, and the run says so
+                # rather than leaving a book the ledger contradicts looking repaired.
+                hb.red(f"{len(refused)} position(s) the ledger refused to move: "
+                       + "; ".join(refused))
             print(f"ledger: {len(noted)} row(s) recorded as `{grade}` · "
-                  f"{len(changes)} book change(s)")
+                  f"{len(changes)} book change(s) · {len(refused)} refused")
             for line in noted + changes:
                 print(f"  {line}")
+            for line in refused:
+                print(f"  REFUSED {line}")
     return 0
 
 
