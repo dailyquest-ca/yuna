@@ -392,6 +392,12 @@ def test_tonights_sheet_supersedes_every_earlier_proposal(db, migrated):
     import gauges
     with db.cursor() as cur:
         days = _world(cur)
+        # TFSA cash to size the buys against: once v1.1 lands (§3.5, "the lesser of slot weight
+        # and deployable TFSA cash") a sheet with no cash anchor leaves its buys unsized, and the
+        # sheet gauge below reads amber for that rather than for anything this test is about. A
+        # million covers five slots of NAV / 5 at weight; before v1.1 the cash is not read here.
+        cur.execute("""insert into balances (account, as_of, cash_cad, cash_usd, source)
+                       values ('TFSA', %s, 0, 1000000, 'test')""", (days[-40],))
         earlier = days[-8]
         stale = _proposal(cur, earlier, "N10.US")
         approved = _proposal(cur, earlier, "N11.US", state="approved")
