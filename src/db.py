@@ -772,7 +772,13 @@ def chain_already_current(conn, hb, job, *, must_match=()):
 
 class Heartbeat:
     """with Heartbeat(conn, 'daily') as hb: ...  — opens a running row, closes it green,
-    or red with the traceback if the body raises. hb.detail / hb.calls / hb.rows are yours."""
+    or red with the traceback if the body raises. hb.detail / hb.calls / hb.rows are yours.
+
+    **A body that raises leaves nothing behind but its red.** Whatever it had not committed is
+    rolled back before the red is written, so a job that crashed, refused, or was interrupted
+    half-way through its writes cannot leave the half it reached looking like a result. A job
+    whose earlier work must survive a later failure commits that work itself, at the point it
+    stands on (`ingest` per stage, `reconcile` after the chat route)."""
 
     def __init__(self, conn, job, dry_run=None, scheduled_utc=None):
         self.conn, self.job = conn, job
@@ -856,12 +862,28 @@ class Heartbeat:
         else:
             self.detail["fatal"] = f"{et.__name__}: {ev}"
             self.detail["trace"] = "".join(traceback.format_exception(et, ev, tb))[-1200:]
+            # Roll back FIRST, then write the red on a clean transaction (QC 2026-10-07, A49 and
+            # A75). The red used to ride the job's own transaction, which went wrong both ways:
+            #   * on a Python exception — a SystemExit refusal, an interrupt, a bug — the commit
+            #     that recorded the red also committed every write the job had half-done, so
+            #     reconcile could "refuse" a manifest after folding half of it;
+            #   * on a database error the transaction was already aborted, the red UPDATE failed
+            #     inside it, and `except: pass` hid that, leaving the run `running` with its
+            #     traceback lost.
             try:
+                self.conn.rollback()
                 with self.conn.cursor() as cur:
                     cur.execute("""update runs set finished_at=now(), status='red', calls_used=%s,
                                    detail=%s where id=%s""",
                                 (self.calls[0], json.dumps(self.detail, default=str), self.id))
                 self.conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                # Never raised: the job's own exception is the one the autopsy and the reader need,
+                # and an exception from here would replace it. Never silent either — this line
+                # lands in the output tail the workflow's autopsy step (report_fail.py) writes
+                # into the row it closes. A dead connection ends here, and only a fresh one could
+                # do better.
+                print(f"{self.job}: could not record the red on run {self.id} — "
+                      f"{type(e).__name__}: {e}. The job's own error follows; the autopsy step "
+                      f"closes the row.", file=sys.stderr)
         return False
