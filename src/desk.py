@@ -322,40 +322,18 @@ def derived_engine_nav(cur, as_of):
                            + " — §3.5 marks NAV at the decision close")
     if why:
         return None, " · ".join(why)
-    cash = cash_by_account(cur).get(ENGINE_ACCOUNT)
-    if cash is None:
-        return None, f"no balances anchor for {ENGINE_ACCOUNT} — §2.0 makes balances the truth"
-    anchored = cash.get("as_of")
-    age = (as_of - anchored).days if anchored is not None else None
-    cad, usd = float(cash.get("cad") or 0), float(cash.get("usd") or 0)
-    cad_in_usd = 0.0
-    fx = None
-    if cad:
-        cur.execute("""select close from prices where ticker = 'USDCAD.FOREX' and d <= %s
-                        order by d desc limit 1""", (as_of,))
-        row = cur.fetchone()
-        if not row or not row[0]:
-            return None, f"{cad:,.2f} CAD cash and no USDCAD close on or before {as_of}"
-        fx = float(row[0])
-        cad_in_usd = cad / fx
-    in_cash = usd + cad_in_usd
-    if round(in_cash, 2) < 0:
-        moved = ", ".join(f"{v:+,.2f} {k}"
-                          for k, v in sorted((cash.get("moved_since_anchor") or {}).items()))
-        return None, (f"{ENGINE_ACCOUNT} cash derives to {in_cash:,.2f} USD ({usd:,.2f} USD"
-                      + (f" + {cad:,.2f} CAD @ {fx:,.4f}" if cad else "")
-                      + f") from the anchor of {anchored} ({age} day{'' if age == 1 else 's'})"
-                      + (f", moved {moved} by the ledger since" if moved else "")
-                      + " — a TFSA cannot hold negative cash, so a credit is missing or a row is"
-                        " on the wrong side of the anchor")
+    # The cash leg is `engine_cash`, the same number §3.5 (v1.1) sizes the buys to: the slot weight
+    # and the cash that fills it are read from one definition, so they cannot disagree about the
+    # money in the account.
+    in_cash, cash = engine_cash(cur, as_of)
+    if in_cash is None:
+        return None, cash
     nav = equity + in_cash
     if nav <= 0:
         return None, f"derived NAV {nav:,.2f} is not positive — nothing to size against"
-    detail = dict(source="derived", marked_equity=round(equity, 2), cash_usd=round(usd, 2),
-                  cash_cad=round(cad, 2), usdcad=fx, cash_as_of=str(anchored or ""),
-                  cash_age_days=age,
-                  cash_recorded_at=(cash["recorded_at"].isoformat()
-                                    if cash.get("recorded_at") is not None else None))
+    detail = dict(source="derived", marked_equity=round(equity, 2), cash_usd=round(cash["usd"], 2),
+                  cash_cad=round(cash["cad"], 2), usdcad=cash["usdcad"], cash_as_of=cash["as_of"],
+                  cash_age_days=cash["age_days"], cash_recorded_at=cash["recorded_at"])
     if cash.get("same_day_assumed_inside"):
         detail["cash_same_day_assumed_inside"] = cash["same_day_assumed_inside"]
     return nav, detail
@@ -673,11 +651,14 @@ def gate_unevaluable(cur, as_of, session, pool):
 def engine_cash(cur, as_of):
     """§3.5's "TFSA cash on the book" (v1.1), in USD. Returns (usd, breakdown) or (None, why).
 
-    The number `derived_engine_nav` adds to the marked equity, by the same arithmetic: the newest
-    `balances` anchor carried forward by the ledger (`db.cash_by_account`, §2.0's "balances are
-    truth"), CAD converted at the latest USDCAD close on or before `as_of`. Where NAV came from does
-    not move where this comes from — a NAV overridden in `config` or the environment is a ruling
-    about the slot, not about the money in the account, so the cash is the store's or nothing.
+    The number `derived_engine_nav` adds to the marked equity — it calls this, so the two are one
+    definition: the newest `balances` anchor carried forward by the ledger (`db.cash_by_account`,
+    the retired plan's §2.0, "balances are truth"), CAD converted at the latest USDCAD close on or
+    before `as_of`. The breakdown carries the anchor's date and age, when it was written, and any
+    same-day fills taken to be inside it, for the NAV's attestation as for the sizing's. Where NAV
+    came from does not move where this comes from — a NAV overridden in `config` or the environment
+    is a ruling about the slot, not about the money in the account, so the cash is the store's or
+    nothing.
 
     None, and the buys go unsized with the reason, on the states where the store cannot state it:
     no anchor; CAD with no USDCAD row to convert it; and a total below zero, which a TFSA cannot
@@ -685,13 +666,16 @@ def engine_cash(cur, as_of):
     credit the ledger never heard of or a row on the wrong side of the anchor, and its size is
     unknown from here. The test reads the account's total in USD, not one currency: a USD buy paid
     out of CAD drives the USD leg negative with the total right, because the ledger has no row for
-    the conversion. Failing closed matters more here than it does for NAV, because v1.1 never tops
-    a slot up: a buy sized to an understated cash stays short for as long as the name is held.
+    the conversion. Failing closed matters more for the sizing than for the NAV, because v1.1 never
+    tops a slot up: a buy sized to an understated cash stays short for as long as the name is held.
     """
     cash = cash_by_account(cur).get(ENGINE_ACCOUNT)
     if cash is None:
-        return None, (f"no balances anchor for {ENGINE_ACCOUNT} — §3.5 (v1.1) sizes a buy to"
-                      f" deployable {ENGINE_ACCOUNT} cash, and the store cannot state it")
+        return None, (f"no balances anchor for {ENGINE_ACCOUNT} — balances are the truth, and §3.5"
+                      f" (v1.1) sizes a buy to deployable {ENGINE_ACCOUNT} cash, which the store"
+                      f" cannot state")
+    anchored = cash.get("as_of")
+    age = (as_of - anchored).days if anchored is not None else None
     cad, usd = float(cash.get("cad") or 0), float(cash.get("usd") or 0)
     fx, cad_in_usd = None, 0.0
     if cad:
@@ -704,15 +688,22 @@ def engine_cash(cur, as_of):
         cad_in_usd = cad / fx
     total = usd + cad_in_usd
     if round(total, 2) < 0:
+        moved = ", ".join(f"{v:+,.2f} {k}"
+                          for k, v in sorted((cash.get("moved_since_anchor") or {}).items()))
         return None, (f"{ENGINE_ACCOUNT} cash derives to {total:,.2f} USD ({usd:,.2f} USD"
                       + (f" + {cad:,.2f} CAD @ {fx:,.4f}" if cad else "")
-                      + f") from the anchor of {cash.get('as_of')} — a TFSA cannot hold negative"
-                        " cash, so a credit is missing or a row is on the wrong side of the anchor")
+                      + f") from the anchor of {anchored} ({age} day{'' if age == 1 else 's'})"
+                      + (f", moved {moved} by the ledger since" if moved else "")
+                      + " — a TFSA cannot hold negative cash, so a credit is missing or a row is"
+                        " on the wrong side of the anchor")
     # Money is counted in cents, so a total that rounds to 0.00 from below IS zero — and a share of
     # cash a fraction of a cent below zero is not a quantity anything can be sized against.
     total = max(total, 0.0)
-    return total, dict(usd=usd, cad=cad, usdcad=fx, in_usd=total,
-                       as_of=str(cash.get("as_of") or ""))
+    return total, dict(usd=usd, cad=cad, usdcad=fx, in_usd=total, as_of=str(anchored or ""),
+                       age_days=age,
+                       recorded_at=(cash["recorded_at"].isoformat()
+                                    if cash.get("recorded_at") is not None else None),
+                       same_day_assumed_inside=cash.get("same_day_assumed_inside"))
 
 
 def size_buys(cur, as_of, session, nav, wants, sold, parked, *, may_draw):

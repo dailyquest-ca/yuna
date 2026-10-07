@@ -331,3 +331,28 @@ def test_a_holding_that_left_the_universe_sells_at_its_decision_close(db, migrat
     sell = next(o for o in s["orders"] if o["action"] == "sell")
     assert (sell["ticker"], sell["mark"]) == ("N00.US", px)
     assert s["sizing"]["proceeds"] == pytest.approx(100 * px), "its proceeds fund tonight's buys"
+
+
+# ---- one definition of the cash ---------------------------------------------------------------
+
+def test_engine_nav_and_the_sizing_read_one_cash(db, migrated, monkeypatch):
+    """Engine NAV sets the slot weight and `engine_cash` sets the money that fills it (v1.1), and
+    they were two copies of the same arithmetic — anchor, ledger, USDCAD, the negative-cash refusal
+    — that could drift apart without a test noticing. NAV now takes its cash leg from
+    `engine_cash`: whatever that reports, the NAV moves with it, and when it cannot state the cash
+    the NAV says so in its words."""
+    with db.cursor() as cur:
+        days, _ = _ten_oh_five(cur)
+        db.commit()
+        nav, src = desk.derived_engine_nav(cur, days[-1])
+        cash, how = desk.engine_cash(cur, days[-1])
+        assert nav == pytest.approx(src["marked_equity"] + cash)
+        assert (src["cash_usd"], src["cash_cad"], src["usdcad"]) == (
+            round(how["usd"], 2), round(how["cad"], 2), how["usdcad"])
+
+        monkeypatch.setattr(desk, "engine_cash", lambda c, d: (cash + 1_000.0, dict(how)))
+        moved, _ = desk.derived_engine_nav(cur, days[-1])
+        assert moved == pytest.approx(nav + 1_000.0), "NAV's cash is engine_cash's"
+
+        monkeypatch.setattr(desk, "engine_cash", lambda c, d: (None, "the store cannot say"))
+        assert desk.derived_engine_nav(cur, days[-1]) == (None, "the store cannot say")
