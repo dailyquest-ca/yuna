@@ -46,11 +46,14 @@ TAPE = """
 # Every name with a column on the tape: any bar at all on or before the session, inside the window
 # or not. A name that stopped printing before the window keeps its (empty) column, so the column
 # set — and `engine_sessions.universe_count`, "names with a column on the tape after §3.2's
-# exclusions" (migration 051) — is what the whole-history read always gave. One index probe a name.
+# exclusions" (migration 051) — is what the whole-history read always gave. Each name's NEWEST bar
+# is probed, backward from the session: the pages TAPE has just read, not the name's first bar
+# from 2003. Production, 2026-10-06: 97 ms, against 1.5 s for the same question asked forward.
 NAMES = """
     select u.ticker from universe u
+     cross join lateral (select 1 from prices p where p.ticker = u.ticker and p.d <= %s
+                          order by p.d desc limit 1) newest
      where """ + UNIVERSE + """
-       and exists (select 1 from prices p where p.ticker = u.ticker and p.d <= %s)
 """
 
 
@@ -120,12 +123,12 @@ def tape(cur, as_of, *, also=None):
     lo = max(0, i - max(need.values()))
     covered(need, i, lo)
 
-    cur.execute(NAMES, (as_of,))
-    names = {r[0] for r in cur.fetchall()}
     cur.execute(TAPE, (sessions[lo], as_of))
     rows = cur.fetchall()
-    # The union, not NAMES alone: the two reads are two statements, and a name whose first bar
-    # lands between them still belongs on the tape it was read into.
+    cur.execute(NAMES, (as_of,))
+    names = {r[0] for r in cur.fetchall()}
+    # The union, not NAMES alone: the two reads are two statements, and a name excluded or delisted
+    # between them keeps the column for the bars this tape did read.
     tickers = sorted(names | {r[0] for r in rows})
     return sessions, index_px, tickers, rows
 
