@@ -570,6 +570,20 @@ def late_minutes(detail):
     return m if m > 0 else None
 
 
+# The newest STOCK bar — what `freshness` and `data_date` both ask — as an ordered probe rather than
+# an aggregate (QC 2026-10-07, A35). `max(p.d)` over the join with `universe` read every price row:
+# Postgres rewrites a bare max() into an index probe but not across a join, so the question cost
+# 9.3 s on average, 30.7 s at worst and ~0.9 GB of reads, growing with the tape. Walking `prices_d_idx`
+# backwards and stopping at the first row whose ticker is a stock gives the same date — `d` is NOT
+# NULL (it is in the primary key) and `universe.ticker` is unique, so the newest qualifying row's
+# date IS the max — in milliseconds (planned cost 1.42 against 271,106 on production). The outer
+# scalar select keeps the empty store's answer NULL, as max() gave, rather than no row at all.
+NEWEST_STOCK_BAR = """select (select p.d from prices p
+                               where exists (select 1 from universe u
+                                              where u.ticker = p.ticker and u.kind = 'stock')
+                               order by p.d desc limit 1)"""
+
+
 def freshness(conn, *, stale_days=4, own_run=None):
     """The one-line answer to "is it safe to speak" (§4.2): `ingest ✓ score ✓ check ✓`.
 
@@ -606,8 +620,7 @@ def freshness(conn, *, stale_days=4, own_run=None):
         # stock bars only. FX and the index come from the same nightly pull, so in a clean run this
         # is the same date — but a half-failed ingest that landed USDCAD and no equities would
         # otherwise read as fresh, and "stale data ⇒ no new tickets" would quietly not apply.
-        cur.execute("""select max(p.d) from prices p join universe u on u.ticker = p.ticker
-                       where u.kind = 'stock'""")
+        cur.execute(NEWEST_STOCK_BAR)
         last_bar = cur.fetchone()[0]
         # `not dry_run`, as the timeline query below always had: a DRY_RUN dispatch of the chain
         # that ended red was the newest row for its job and held the live desk (2026-09-13)
@@ -682,8 +695,7 @@ def data_date(cur):
     nightly pull, so a half-failed ingest that landed USDCAD and no equities would otherwise report
     a date the equities never reached.
     """
-    cur.execute("""select max(p.d) from prices p join universe u on u.ticker = p.ticker
-                   where u.kind = 'stock'""")
+    cur.execute(NEWEST_STOCK_BAR)
     return cur.fetchone()[0]
 
 
