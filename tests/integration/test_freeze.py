@@ -150,16 +150,22 @@ def test_the_brief_leads_with_the_freeze_and_quotes_it(db, migrated):
 
 
 def test_a_freeze_holds_the_levered_tranches_too(db, migrated):
-    """§5.5 names them explicitly: "entries, refills, displacement buys, levered tranches"."""
+    """§5.5 names them explicitly: "entries, refills, displacement buys, levered tranches".
+
+    The tranche is planned in the session's own week, the one week §2.3 lets the gate open it;
+    until 2026-10-07 (A71) the open half asserted "gate ON this week" against a tranche planned
+    for 2026 and a session in 2024."""
     with db.cursor() as cur:
         days = _world(cur)                            # gate ON — so only the freeze can hold them
         _score(cur, days)
+        cur.execute("update levered_tranches set planned_on = %s where seq = 3", (days[-1],))
         db.commit()
         p = brief.payload(cur)
     frozen_text = "\n".join(brief.tranche_lines(p, frozen=True))
     open_text = "\n".join(brief.tranche_lines(p, frozen=False))
     assert "FROZEN — §5.5 halts levered tranches" in frozen_text
-    assert "gate ON this week" in open_text
+    assert "this is its planned week and the gate is ON" in open_text
+    assert "FROZEN" not in open_text
 
 
 def test_the_brief_warns_when_the_ramp_would_breach_the_cap(db, migrated):
