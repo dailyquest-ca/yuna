@@ -296,6 +296,36 @@ def test_a_row_that_keeps_the_dead_line_is_flagged_and_no_other_row_is(db, monke
     assert detail["stage"] == "census" and detail["rebuilt"] is True, "the rebuild still ran"
 
 
+def test_a_group_out_on_its_instruments_own_account_has_nothing_to_keep(db, monkeypatch):
+    """§3.2 excludes preferreds, warrants and thin share-class lines as instruments, so a spelling
+    twin of a preferred is out with it, and which of the two prints decides nothing. Measured:
+    HPE-P-C.US skipped five sessions its twin printed in the year to 2026-10-06, one a Friday — a
+    literal reading would have asked Zak to rule on a preferred share.
+
+    A quarantine is different: it condemns one line's DATA, not the instrument, so a group whose
+    kept line is quarantined and dead while the other line prints is losing a company — flagged.
+    """
+    days = world.trading_days(10)
+    with db.cursor() as cur:
+        _line(cur, "SPY.US", days, kind="index")
+        _line(cur, "HPE-PC.US", days)
+        _line(cur, "HPE-P-C.US", days[:-1])                # the kept preferred skips the session
+        _exclude(cur, "HPE-PC.US", "duplicate_listing", "share-class spelling of HPE-P-C.US")
+        _exclude(cur, "HPE-P-C.US", "not_common_equity", "preferred share")
+        _line(cur, "NEW.US", days)
+        _line(cur, "OLD.US", days[:4])
+        _exclude(cur, "NEW.US", "duplicate_listing", "same series as OLD.US; keep OLD")
+        _exclude(cur, "OLD.US", "quarantine", "planted by the test")
+    db.commit()
+    stub_vendor(monkeypatch, listed=["NEW"], priced=["NEW"])
+    assert funnel.main() == 0
+
+    status, detail, _ = _censuses(db)[-1]
+    assert status == "amber"
+    assert len(detail["amber"]) == 1, detail["amber"]
+    assert "NEW.US" in detail["amber"][0] and "OLD.US" in detail["amber"][0]
+
+
 def test_a_printing_line_whose_row_names_no_keeper_is_flagged(db, monkeypatch):
     """A row the census cannot read is not a row it may pass: if its line prints, §3.2's question
     cannot be asked of it, and that is said. A dead line with the same row stays quiet — a line

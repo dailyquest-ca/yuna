@@ -95,6 +95,15 @@ def kept_line(detail):
     return m.group(1) if m else None
 
 
+# §3.2's exclusion categories that describe the INSTRUMENT rather than one line's data: "non-common
+# equity (preferreds, warrants, thin share-class lines)" and "exchange test symbols". A spelling
+# twin of a preferred is a preferred, so when the kept line is out on one of these the whole group
+# is outside §3.2's universe on its own account, and which of its lines prints decides nothing.
+# A quarantine or a vendor gap is a defect of one line's data and is NOT here: a group whose kept
+# line is out on one of those can still be losing a company whose other line prints.
+INSTRUMENT_OUT = ("not_common_equity", "not_a_security")
+
+
 def reverify_exclusions(cur):
     """§3.2, asked again of every duplicate-listing row: "keep the line still printing" (A51).
 
@@ -111,12 +120,22 @@ def reverify_exclusions(cur):
     line prints the clause does not reach the pair (056 says so of the `Q` continuations), and the
     both-dead rows (BBBY/BYON, CWEN-A/CWENA) stay quiet. Spelling twins that print side by side
     (GEFB/GEF-B) pass, because their keeper prints too.
+
+    A group whose kept line is out on the instrument's own account (`INSTRUMENT_OUT`) is passed
+    over, because the rule has nothing to keep. That is measured, not tidiness: HPE-P-C.US and
+    FOUR-P-A.US, both preferreds, skipped seven sessions their spelling twins printed in the year
+    to 2026-10-06 — one a Friday, 2026-10-02 — and the census would have told Zak a preferred
+    share's exclusion needed his ruling.
     """
     cur.execute("select max(d) from prices where ticker = %s", (engine.REGIME_SOURCE,))
     session = cur.fetchone()[0]
-    cur.execute("""select ticker, detail from universe_excluded
-                    where reason = 'duplicate_listing' order by ticker""")
-    rows = [(t, kept_line(detail)) for t, detail in cur.fetchall()]
+    cur.execute("select ticker, reason, detail from universe_excluded order by ticker")
+    excluded_for = {}
+    rows = []
+    for t, reason, detail in cur.fetchall():
+        excluded_for[t] = reason
+        if reason == "duplicate_listing":
+            rows.append((t, kept_line(detail)))
     if not rows or session is None:
         return session, rows, []
     names = sorted({t for t, _ in rows} | {k for _, k in rows if k})
@@ -132,7 +151,7 @@ def reverify_exclusions(cur):
             printed.add(t)
     flags = []
     for excluded, kept in rows:
-        if excluded not in printed:
+        if excluded not in printed or excluded_for.get(kept) in INSTRUMENT_OUT:
             continue
         if kept is None:
             flags.append(f"{excluded} printed on {session} and is excluded as a duplicate listing, "
