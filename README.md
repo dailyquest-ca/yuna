@@ -66,7 +66,7 @@ src/          ingest + compute jobs (Python); db.py holds the shared heartbeat c
 | `shadow.py` | the tape, `concentrated.py` | `shadow_attestations` — §6.4's written record |
 | `brief.py` | `v_session_payload`, one read | a composed `briefs` row: §5.1's morning brief, or §4.1's Saturday letter |
 | `notify.py` | composed `briefs`, `config.push_channel` | nothing but its runs row — proves the words exist before the Routines deliver them |
-| `funnel.py` (`ingest-universe`, Saturdays) | the US exchange listing and the bulk last-day tape — two calls, no screener | `universe` membership: who is listed, who is liquid, who has gone |
+| `funnel.py` (`ingest-universe`, Saturdays) | the US exchange listing and the bulk last-day tape — two calls, no screener; `universe_excluded` against the tape | `universe` membership: who is listed, who is liquid, who has gone — and an amber naming any duplicate-listing exclusion whose excluded line prints while its kept line does not (§3.2) |
 | `backup.py` | the decisions — everything but the bars, the research grid and `fundamentals` | a compressed dump, committed from inside the job's own heartbeat |
 
 **Dispatch-only.** `desk.py` (tonight's sheet, read-only) · `closeout.py` (§6.2, once) ·
