@@ -673,3 +673,99 @@ def test_the_witness_sums_a_position_the_way_the_engine_does(db, migrated):
 
         agreeing = reconcile.compare_positions(cur, "TFSA", [dict(ticker="N00.US", qty=418)])
         assert [(b["ticker"], b["open_rows"]) for b in agreeing] == [("N00.US", 2)]
+
+
+# ---- a receipt settles the order it executed (A57) --------------------------------------------
+
+def test_a_receipt_settles_the_sheet_in_force_not_a_stale_proposal(db, migrated):
+    """QC 2026-10-07, A57. A receipt used to link to the OLDEST ticket still awaiting one for its
+    (ticker, action) — and 27 August proposals were never withdrawn, so a future WDC buy would have
+    settled a sheet weeks stale while the one Zak executed stayed `proposed`. §3.5 decides at a
+    close and fills at the next open, and §4.3 makes the nightly sheet the only source of orders:
+    a trade on the 28th executed the newest sheet decided BEFORE it — not an older one, and not the
+    sheet decided at the 28th's own close, which did not exist when he traded."""
+    with db.cursor() as cur:
+        _universe(cur, "WDC.US")
+        stale = _ticket(cur, "WDC.US", "buy", None, session="2026-08-14", state="proposed")
+        in_force = _ticket(cur, "WDC.US", "buy", 53, session="2026-08-27", state="proposed")
+        after = _ticket(cur, "WDC.US", "buy", 52, session="2026-08-28", state="proposed")
+        f = _fill("ws-wdc", "WDC.US", "buy", 53, 120.0, date="2026-08-28")
+        reconcile.fold_fill(cur, "m.json", "TFSA", f)
+        settled, orphans = reconcile.settle_tickets(cur, "TFSA", [f])
+        db.commit()
+
+        assert orphans == [] and len(settled) == 1
+        cur.execute("select ticket_id from transactions where broker_ref = 'ws-wdc'")
+        assert cur.fetchone()[0] == in_force
+        cur.execute("select id, state from tickets order by id")
+        assert cur.fetchall() == [(stale, "proposed"), (in_force, "executed"), (after, "proposed")]
+
+
+def test_two_partial_fills_of_one_order_settle_that_order_once(db, migrated):
+    """A57, the QC's own reproduction: two receipts (30 + 23) for one WDC buy, beside a stale
+    proposal. Both linked to the stale ticket while the settle advanced two different tickets, so
+    the record said two orders filled where one did."""
+    with db.cursor() as cur:
+        _universe(cur, "WDC.US")
+        stale = _ticket(cur, "WDC.US", "buy", 53, session="2026-08-20", state="proposed")
+        order = _ticket(cur, "WDC.US", "buy", 53, session="2026-08-27", state="proposed")
+        fills = [_fill("ws-a", "WDC.US", "buy", 30, 120.0, date="2026-08-28"),
+                 _fill("ws-b", "WDC.US", "buy", 23, 120.1, date="2026-08-28")]
+        for f in fills:
+            reconcile.fold_fill(cur, "m.json", "TFSA", f)
+        settled, orphans = reconcile.settle_tickets(cur, "TFSA", fills)
+        db.commit()
+
+        cur.execute("select broker_ref, ticket_id from transactions order by broker_ref")
+        assert cur.fetchall() == [("ws-a", order), ("ws-b", order)]
+        assert len(settled) == 1 and orphans == []
+        cur.execute("select id, state from tickets order by id")
+        assert cur.fetchall() == [(stale, "proposed"), (order, "executed")]
+
+
+def test_a_manifest_read_again_settles_nothing_it_already_settled(db, migrated):
+    """A57. Every manifest under `data/reconcile/` is read on every run, and the settle used to
+    match afresh each time: once the night's own ticket was executed, the next night's read
+    advanced the next ticket awaiting a receipt for that name — a WDC buy proposed weeks later, on
+    a sheet Zak had not executed. The settle now follows the link the fold recorded."""
+    with db.cursor() as cur:
+        _universe(cur, "WDC.US")
+        order = _ticket(cur, "WDC.US", "buy", 53, session="2026-08-27", state="proposed")
+        f = _fill("ws-wdc", "WDC.US", "buy", 53, 120.0, date="2026-08-28")
+        reconcile.fold_fill(cur, "m.json", "TFSA", f)
+        assert len(reconcile.settle_tickets(cur, "TFSA", [f])[0]) == 1
+        db.commit()
+
+        # weeks later WDC re-enters the top five, and the same manifest is read again that night
+        later = _ticket(cur, "WDC.US", "buy", 50, session="2026-09-21", state="proposed")
+        _, what = reconcile.fold_fill(cur, "m.json", "TFSA", f)
+        settled, orphans = reconcile.settle_tickets(cur, "TFSA", [f])
+        db.commit()
+
+        assert what == "already folded" and settled == [] and orphans == []
+        cur.execute("select id, state from tickets order by id")
+        assert cur.fetchall() == [(order, "executed"), (later, "proposed")]
+
+
+def test_a_receipt_naming_its_ticket_settles_that_ticket(db, migrated):
+    """A57's explicit reference: a fill that carries `ticket_id` names the order it executed, and
+    that outranks any match — here a sheet Zak executed a day late. A ticket that is not this
+    receipt's order (another name) stops the fold rather than settling the wrong row."""
+    with db.cursor() as cur:
+        _universe(cur, "WDC.US", "MU.US")
+        stale = _ticket(cur, "WDC.US", "buy", 53, session="2026-08-14", state="proposed")
+        late = _ticket(cur, "WDC.US", "buy", 53, session="2026-08-26", state="proposed")
+        in_force = _ticket(cur, "WDC.US", "buy", 52, session="2026-08-27", state="proposed")
+        f = dict(_fill("ws-late", "WDC.US", "buy", 53, 120.0, date="2026-08-28"), ticket_id=late)
+        reconcile.fold_fill(cur, "m.json", "TFSA", f)
+        reconcile.settle_tickets(cur, "TFSA", [f])
+        db.commit()
+        cur.execute("select id, state from tickets order by id")
+        assert cur.fetchall() == [(stale, "proposed"), (late, "executed"), (in_force, "proposed")]
+
+        mu = _ticket(cur, "MU.US", "buy", 24, session="2026-08-27", state="proposed")
+        wrong = dict(_fill("ws-wrong", "WDC.US", "buy", 1, 120.0, date="2026-08-28"),
+                     ticket_id=mu)
+        with pytest.raises(SystemExit, match="refusing to link a receipt to an order"):
+            reconcile.fold_fill(cur, "m.json", "TFSA", wrong)
+    db.rollback()

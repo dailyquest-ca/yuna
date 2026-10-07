@@ -32,6 +32,9 @@ Manifest shape — the same fill record `data/fills/` already uses, plus a posit
                     "price": 1650.10, "trade_date": "2026-08-17", "fees": 0}],
      "positions": [{"ticker": "SNDK.US", "qty": 24}]}
 
+A fill may also carry `"ticket_id"`: the receipt naming the order it executed, which outranks the
+match `ticket_for` would otherwise make.
+
 **Nothing here places, modifies or cancels an order** (§0.2). Every row it writes describes
 something that has already happened.
 """
@@ -55,6 +58,12 @@ DEFAULT_GLOB = str(pathlib.Path(__file__).resolve().parent.parent / "data" / "re
 # genuine disagreement rather than a representation artefact.
 QTY_TOL = 1e-3
 
+# The ticket states that come BEFORE a receipt: §4.3's first two, and the two ways a proposal stops
+# being an order. A receipt is the event (§4.3: "Zak's execution is the event"), so a receipt that
+# names one of these advances it to `executed` — a proposal a later sheet superseded included,
+# because Zak may have executed it in its own window and only told the system afterwards (A57).
+AWAITING = ("proposed", "approved", "cancelled", "expired")
+
 
 def refusal(e):
     """The ledger's own words for a refused receipt: what it refused, and the repair it names."""
@@ -68,6 +77,54 @@ def manifests(pattern=None):
     for path in sorted(glob.glob(pattern or os.environ.get("RECONCILE_GLOB") or DEFAULT_GLOB)):
         out.append((pathlib.Path(path).name, json.loads(pathlib.Path(path).read_text())))
     return out
+
+
+def ticket_for(cur, account, f, source):
+    """The engine ticket a manifest receipt executed, or None (A57).
+
+    A `ticket_id` on the fill is the receipt naming its own order, and it wins — checked, not
+    trusted: a ticket for another name, side or account is not this receipt's order, and linking it
+    would settle the wrong row, so the fold stops.
+
+    Otherwise the order is on the sheet that was in force when the trade printed. §3.5 decides at a
+    close and fills "at the next open", so a trade on day T executed the newest sheet decided BEFORE
+    T — never one decided at T's own close or later, which did not exist yet when Zak traded, and
+    never an older one: §4.3 makes the nightly sheet "the only source of engine orders", so a sheet
+    a later one replaced was no longer an order on T. This used to take the OLDEST ticket still
+    awaiting a receipt for the (ticker, action), and with August's never-withdrawn proposals in the
+    table that was a receipt linked to a sheet three weeks stale.
+
+    "The newest sheet" counts every close the engine decided, including the quiet ones that wrote
+    no ticket (`engine_sessions`), and every close a ticket names, so a ticket is never orphaned by
+    a missing session row. The sheet holds at most one ticket per (ticker, action) — the
+    `tickets_engine_key` index — so the match is unambiguous. It accepts every state that comes
+    before a receipt, a superseded proposal included: the session restriction is what keeps a stale
+    sheet out, and a receipt that arrives a night late still belongs to the order it executed.
+    """
+    action = "buy" if f["side"] == "buy" else "sell"
+    if f.get("ticket_id") is not None:
+        cur.execute("""select id from tickets
+                        where id = %s and ticker = %s and action = %s and account = %s""",
+                    (f["ticket_id"], f["ticker"], action, account))
+        row = cur.fetchone()
+        if row is None:
+            raise SystemExit(f"a fill in {source} names ticket {f['ticket_id']}, which is not a "
+                             f"{action} of {f['ticker']} in {account} — refusing to link a receipt "
+                             f"to an order it does not describe")
+        return row[0]
+    cur.execute("""select id from tickets
+                    where ticker = %s and action = %s and account = %s
+                      and state = any(%s)
+                      and session_date = (select max(d) from (
+                                            select session_date as d from engine_sessions
+                                             where mode = 'live'
+                                            union all
+                                            select session_date from tickets
+                                             where session_date is not null) closes
+                                           where d < %s::date)""",
+                (f["ticker"], action, account, list(AWAITING), f["trade_date"]))
+    row = cur.fetchone()
+    return row[0] if row else None
 
 
 def fold_fill(cur, source, account, f):
@@ -91,16 +148,10 @@ def fold_fill(cur, source, account, f):
     # Link the transaction to the ticket it settles. Nothing did this before, and it is the door a
     # second receipt route walks straight through: `derive_ticket_fills` skips a ticket that
     # already has a transaction, so an unlinked manifest row would let the SAME fill be derived a
-    # second time from the ticket's own `fill_*` fields and folded into the book twice. Same match
-    # as `settle_tickets` — oldest ticket awaiting a receipt for this (ticker, action).
-    action = "buy" if f["side"] == "buy" else "sell"
-    cur.execute("""select id from tickets
-                    where ticker = %s and action = %s and account = %s and session_date is not null
-                      and state in ('proposed','approved')
-                    order by session_date, id limit 1""",
-                (f["ticker"], action, f.get("account", account)))
-    row = cur.fetchone()
-    ticket_id = row[0] if row else None
+    # second time from the ticket's own `fill_*` fields and folded into the book twice.
+    # `settle_tickets` then advances exactly the ticket this row links, so the two can never name
+    # different orders.
+    ticket_id = ticket_for(cur, f.get("account", account), f, source)
 
     cur.execute("""insert into transactions (ticket_id, ticker, account, side, qty, price,
                                              currency, fx_rate, fees, trade_date, confirmed,
@@ -276,41 +327,51 @@ def apply_unapplied(cur, refused=None):
         if ticket is not None:
             # `-> executed` is a fact about the broker and this receipt states it. The advance to
             # `reconciled` stays with the position block — only the outside witness attests.
+            # A receipt that NAMES its ticket advances it from any state before a receipt: a
+            # proposal the next sheet superseded (`sheet.write_tickets`, A57) was still the order
+            # Zak executed, when the report of it arrives after that sheet was scored.
             cur.execute("""update tickets set state = 'executed',
                                   executed_at = coalesce(executed_at, now()), updated_at = now()
-                            where id = %s and state in ('proposed','approved')""", (ticket,))
+                            where id = %s and state = any(%s)""", (ticket, list(AWAITING)))
         applied.append(f"{side} {float(qty):g} {tk} @ {float(price):g} ({acct}, {when}) "
                        f"— in the book, ticket advanced")
     return applied
 
 
 def settle_tickets(cur, account, fills):
-    """Advance the ticket a receipt settles: `approved` -> `executed` (§4.3).
+    """Advance the ticket each receipt settles: -> `executed` (§4.3).
 
-    Matched on (ticker, action) against the oldest ticket still awaiting a receipt, because that is
-    the order they were proposed in and a two-day-old approval settles before today's. A receipt
-    with no ticket behind it is not an error — Zak may act outside the sheet, and §0.2 makes that
-    his prerogative — but it IS reported, because an engine position nobody proposed is a position
-    the engine will not manage.
+    The ticket is the one `fold_fill` linked the receipt's own transaction to — the fill's explicit
+    `ticket_id`, or the sheet in force on the trade date (`ticket_for`). It used to re-match on its
+    own, against the OLDEST ticket still awaiting a receipt for the (ticker, action), and that is
+    three defects in one query (A57): two partial fills of one order advanced two different
+    tickets; a manifest left in `data/reconcile/` advanced another, unrelated ticket every night it
+    was re-read, because its own was no longer awaiting; and with August's never-withdrawn
+    proposals in the table, the ticket advanced was weeks stale while the one Zak executed stayed
+    `proposed`. Following the link makes the settle say what the fold recorded, and a re-read
+    manifest settles nothing twice.
+
+    A receipt with no ticket behind it is not an error — Zak may act outside the sheet, and §0.2
+    makes that his prerogative — but it IS reported, because an engine position nobody proposed is
+    a position the engine will not manage.
     """
     settled, orphans = [], []
     for f in fills:
         action = "buy" if f["side"] == "buy" else "sell"
-        cur.execute("""update tickets set state = 'executed', executed_at = now(),
-                              updated_at = now()
-                        where id = (select id from tickets
-                                     where ticker = %s and action = %s and account = %s
-                                       and session_date is not null
-                                       and state in ('proposed','approved')
-                                     order by session_date, id limit 1)
-                        returning id, session_date, state""",
-                    (f["ticker"], action, f.get("account", account)))
+        cur.execute("""select k.id, k.session_date, k.state
+                         from transactions t join tickets k on k.id = t.ticket_id
+                        where t.broker_ref = %s""", (f["ref"],))
         row = cur.fetchone()
-        if row:
-            settled.append(f"{action} {f['ticker']} -> ticket {row[0]} ({row[1]})")
-        else:
-            orphans.append(f"{action} {f['qty']:g} {f['ticker']} @ {f['price']:g} "
+        if row is None:
+            orphans.append(f"{action} {float(f['qty']):g} {f['ticker']} @ {float(f['price']):g} "
                            f"({f['trade_date']}) — no engine ticket proposed it")
+            continue
+        tid, session, state = row
+        if state in AWAITING:
+            cur.execute("""update tickets set state = 'executed',
+                                  executed_at = coalesce(executed_at, now()), updated_at = now()
+                            where id = %s""", (tid,))
+            settled.append(f"{action} {f['ticker']} -> ticket {tid} ({session})")
     return settled, orphans
 
 
