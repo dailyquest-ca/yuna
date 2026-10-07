@@ -39,8 +39,15 @@ law is `yuna_plan.md`. The build order is `roadmap-2026-08-16.md`.
 8. **`%s is false` inside a batch statement failed silently**, the flush fell back to row-by-row,
    and the fallback skipped a per-row step — so a whole column came back null and a bad name
    sailed through. **Anything that degrades must reach the heartbeat, never just stdout.**
-9. Storage discipline is real: 2.2M price rows ≈ 285 MB. Backups exclude bars by design (they are
-   a vendor-re-pullable cache); the 3-year prune is not optional.
+9. **Backups exclude the bars by design — they are the vendor's, re-pullable under §4.5 — and that
+   is exactly why nothing may prune them.** This line used to call a 3-year prune "not optional",
+   at 2.2M rows. No prune was ever built, and Zak raised `bars_retention_years` from 3 to 10 on
+   2026-08-03; `ingest.py` is its only reader, and it reads it as a backfill horizon, never a cap.
+   *Corrected 2026-10-07:* `prices` holds 13.09M rows in 2.45 GB, back to 2003-08-18, and 4.98M of
+   them are older than ten years — the 2007-onward tape every §3.1 window is measured on, and the
+   delisted census back to 2005 (learning 35). No backup holds them and the delisted census alone
+   is 32,611 names to re-pull one call at a time (`backfill.yml`), so cutting the table is a plan
+   ruling, never housekeeping.
 10. Guard triggers keyed on `current_user` carry no session state, so a pooler cannot silently drop
     them. That is why the "jobs compute, sessions judge" boundary is role-based.
 
