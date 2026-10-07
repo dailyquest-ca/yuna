@@ -82,6 +82,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - if: github.event.workflow_run.conclusion == 'cancelled' && github.event.workflow_run.event == 'schedule'
         run: pip install -r requirements.txt
       - name: a cancelled scheduled ingest is recorded red
@@ -114,6 +116,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
       - id: work
         run: set -o pipefail; python src/reconcile.py 2>&1 | tee /tmp/job.out
@@ -155,6 +159,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
       - id: work
         run: set -o pipefail; python src/sheet.py 2>&1 | tee /tmp/job.out
@@ -188,6 +194,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
       - id: work
         run: set -o pipefail; python src/shadow.py 2>&1 | tee /tmp/job.out
@@ -213,6 +221,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
       - id: work
         run: set -o pipefail; python src/gauges.py 2>&1 | tee /tmp/job.out
@@ -246,6 +256,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
       - id: work
         run: set -o pipefail; python src/brief.py 2>&1 | tee /tmp/job.out
@@ -272,6 +284,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
       - id: work
         run: set -o pipefail; python src/notify.py 2>&1 | tee /tmp/job.out

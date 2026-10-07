@@ -231,6 +231,20 @@ def test_the_suite_runs_on_every_push_and_skips_only_a_tree_already_tested():
         "a fork's pull request has no push run here, so it is never the duplicate"
 
 
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_every_python_setup_caches_its_downloads_keyed_on_the_pins(path):
+    """QC 2026-10-07 (A67): every job fetched the pinned set from PyPI cold, five of them in series
+    on the brief's path. The cache is keyed on requirements.txt, so moving a pin is a new cache,
+    never a stale wheel — and the pins themselves are untouched."""
+    for name, spec in (yaml.safe_load(path.read_text()).get("jobs") or {}).items():
+        for step in spec.get("steps") or []:
+            if str(step.get("uses", "")).startswith("actions/setup-python"):
+                given = step.get("with") or {}
+                assert given.get("cache") == "pip", f"{path.name}:{name} installs cold"
+                assert given.get("cache-dependency-path") == "requirements.txt", \
+                    f"{path.name}:{name} keys its cache on something other than the pins"
+
+
 def test_the_composed_kind_is_the_kind_notify_expects():
     """The seam with no other guard: `brief` writes a kind and `notify` looks for one. When they
     disagree the chain is green end to end and Zak gets silence — which §4.7 rules is itself the

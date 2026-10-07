@@ -20,6 +20,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
       # The guard moved INTO the job (ruled 2026-08-05): monthly work is guarded by whether
       # it has run, never by the date. As a shell step it ran before the heartbeat opened, so a
