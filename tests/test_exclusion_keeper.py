@@ -63,6 +63,15 @@ def test_the_scans_own_writer_is_read_back():
     assert funnel.kept_line(detail) == "BALL.US"
 
 
+def test_070s_row_names_the_line_it_keeps():
+    """Migration 070's TPX.US row is checked every Saturday from the day it lands, so the census
+    must read SGI.US out of it — a row the re-check cannot read is one it flags."""
+    sql = (ROOT / "migrations" / "070_the_line_still_printing.sql").read_text()
+    # the row itself, not the header — which quotes 041's row, keeper and all
+    row = sql.split("('TPX.US', 'duplicate_listing',", 1)[1]
+    assert funnel.kept_line(row) == "SGI.US"
+
+
 @pytest.mark.parametrize("detail", [None, "", "planted by hand, no keeper named",
                                     "keep the line that is still printing"])
 def test_a_row_that_names_no_keeper_reads_as_none(detail):
