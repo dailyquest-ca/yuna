@@ -22,6 +22,7 @@ import datetime as dt
 import json
 import os
 import pathlib
+import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -78,6 +79,12 @@ def payload(cur):
         if row and row[0]:
             p["nav"] = dict(nav, engine_nav=float(row[0]),
                             engine_nav_source=f"session {row[1]}")
+    # §3.5 (R2): held names the newest live sheet found with no bar on its session. Each keeps its
+    # slot and its quantity, so its missing rank is not "outside §3.2's universe" (`book_lines`).
+    cur.execute("""select detail->'unbarred' from engine_sessions where mode = 'live'
+                    order by session_date desc limit 1""")
+    row = cur.fetchone()
+    p["unbarred"] = list((row[0] if row else None) or [])
     return p
 
 
@@ -170,6 +177,9 @@ def gate_line(p):
             f"    latch: {latch} (§3.4)")
 
 
+BELOW_WEIGHT = re.compile(r"below §3\.5 weight: [\d,]+ of [\d,]+ shares")
+
+
 def sheet_lines(p):
     """§4.3's sheet. Sells first — §3.5 executes them first, and the order on the page is the
     order at the open.
@@ -189,7 +199,10 @@ def sheet_lines(p):
         else:
             qty = f"{float(r['qty']):>10,.0f}" if r["qty"] is not None else "         —"
             mark = f"{float(r['mark']):,.2f}" if r["mark"] is not None else "—"
-            tag = "   (top-up to weight)" if r.get("clause") == "top_up" else ""
+            # §3.5 (v1.1): a fill below slot weight counts as filled and is never topped up, so the
+            # page says which buys are short of their slot. The desk writes it into the note.
+            below = BELOW_WEIGHT.search(r.get("note") or "")
+            tag = f"   ({below.group(0)}; never topped up)" if below else ""
             out.append(f"  BUY  {r['ticker']:<10} qty {qty}   "
                        f"rank {r['rank']}   mark {mark}   [{r['state']}]{tag}")
     out.append("")
@@ -286,6 +299,11 @@ def book_lines(p):
         elif b["ticker"] in desk.PARKED:
             out.append("      park — engine capital, never a slot and never sold for failing to "
                        "rank (§3.4, §6.1(3))")
+        elif b["ticker"] in (p.get("unbarred") or []):
+            # R2 (Zak's ruling of 2026-10-07): no bar on the decision session is not a bad rank.
+            out.append("      ** no bar on the decision session: it keeps its slot and its"
+                       " quantity, not a rank exit, and buys are held until Zak records what"
+                       " happened **")
         else:
             out.append("      ** no rank: this holding is outside §3.2's universe, which §3.5 "
                        "treats as below 12 **")
@@ -326,9 +344,9 @@ def underweight_lines(p):
     """§3.5's slot is a WEIGHT, and a slot held at a fraction of it is not equal weight.
 
     `engine.orders` KEEPS a held name in the top 12 rather than re-buying it, so a partial line
-    occupies a whole slot and the capital that slot was meant to carry stays parked. §3.5 has no
-    top-up rule — a name is bought once, at weight, and never bought again — so nothing here is
-    ordered and §0.3 leaves the ruling with Zak.
+    occupies a whole slot and the capital that slot was meant to carry stays parked. §3.5, as v1.1
+    amended it: "A slot filled below weight counts as filled and is reported; it is never topped
+    up." So nothing here is ordered, and nothing waits on a ruling: this is the report.
 
     It belongs in the BRIEF and not only on the sheet, because the sheet says what to execute and
     this is the thing there is nothing to execute about: at the seed it decides how much of the
@@ -359,7 +377,8 @@ def underweight_lines(p):
                 "  These occupy §3.5 slots. Whether each is AT its weight cannot be computed until",
                 "  `config.engine_nav` is set — the slot is NAV/5. §3.5 fills FREE slots and keeps a",
                 "  held name rather than re-buying it, so a partial line holds a whole slot and the",
-                "  rest of that capital stays parked. **The ruling is Zak's (§0.3).**"]
+                "  rest of that capital stays parked. §3.5 (v1.1): counted as filled, reported,",
+                "  never topped up."]
     slot, short = float(nav) / engine.SLOTS, []
     for b in ranked:
         value = float(b["qty"]) * float(b["last_close"])
@@ -373,9 +392,9 @@ def underweight_lines(p):
                    f"({pct:.0%}) — short {gap:,.2f}")
     out.append(f"  {len(short)} slot(s) count as filled while holding {sum(s[3] for s in short):,.2f}"
                f" USD less than their weight, so that much capital stays parked.")
-    out.append("  §3.5 fills FREE slots and keeps a held name rather than re-buying it; it carries")
-    out.append("  no top-up rule. Topping one up is a rebalance, which on a momentum book means")
-    out.append("  trimming winners. **This one is Zak's (§0.3).**")
+    out.append("  §3.5 (v1.1): a slot filled below weight counts as filled and is reported; it is")
+    out.append("  never topped up. Topping one up would be a rebalance, which on a momentum book")
+    out.append("  means trimming winners.")
     return out
 
 
