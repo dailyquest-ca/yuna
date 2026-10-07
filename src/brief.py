@@ -23,6 +23,12 @@ import desk                                                                # noq
 import engine                                                              # noqa: E402
 from db import connect, dry, freeze_state, Heartbeat                       # noqa: E402
 
+# §4.3's ticket states. The payload's `order_sheet` carries only the two a ticket can be acted on
+# in — proposed, approved — and everything else on the session arrives as `not_orders` (migration
+# 068). Of those, these two are WITHDRAWN: the engine or Zak took the proposal back, so its side of
+# the sheet never happens. `executed` and `reconciled` are done, which is a different thing.
+WITHDRAWN = ("cancelled", "expired")
+
 # §5.2, verbatim: "Pager at −10% engine DD; informational lines at −20 / −30 / −40 / −50. **No
 # mechanical intervention exists at any level.**" The pager threshold and the informational ladder
 # are the plan's, and the absence of any action at any of them is also the plan's — chosen, in the
@@ -54,13 +60,18 @@ def payload(cur):
     # number the engine actually used is stored on the session row, so it is read from there.
     # This is the pipeline reading its own stored output, not chat-side arithmetic (§0.4); folding
     # it into v_session_payload proper is a later migration.
+    #
+    # The session it came from rides with it: when tonight's NAV is unknown this is an EARLIER
+    # session's number, and the brief says so rather than printing it as tonight's.
     nav = p.get("nav") or {}
     if not nav.get("engine_nav"):
-        cur.execute("""select nav from engine_sessions where mode = 'live' and nav is not null
+        cur.execute("""select nav, session_date from engine_sessions
+                        where mode = 'live' and nav is not null
                         order by session_date desc limit 1""")
         row = cur.fetchone()
         if row and row[0]:
-            p["nav"] = dict(nav, engine_nav=float(row[0]), engine_nav_source="session (derived)")
+            p["nav"] = dict(nav, engine_nav=float(row[0]),
+                            engine_nav_source=f"session {row[1]}")
     return p
 
 
@@ -68,19 +79,72 @@ def _pct(x, places=1):
     return "—" if x is None else f"{100.0 * float(x):+.{places}f}%"
 
 
+def check_hold(p):
+    """Does tonight's check hold the buys? Returns (holds, why); `why` is None when it does not.
+
+    §4.4: "Any red holds buys; nothing holds exits." §4.3: "Red pipeline: no new buy tickets." The
+    check is the one job that PROVES tonight's numbers, so only a completed verdict on tonight's
+    session can let a buy through, and anything short of one holds the buys the way a red does:
+    no check for this session at all, a check still `running`, or a check that crashed (Heartbeat's
+    red) or died before its heartbeat (report_fail's row) and so never wrote a verdict. Keyed on
+    `blocks_buys` alone, those last three printed a bare "check RED" over sized buys and compose
+    closed green (A20) — `blocks_buys` is written only by a check that finished.
+
+    `check_report` arrives anchored to tonight's live session (migration 068: live, not dry, begun
+    after the session row was written). The session is compared here as well, so a payload that is
+    not anchored can only ever hold the buys, never release them.
+    """
+    session = (p.get("gate") or {}).get("session_date")
+    c = p.get("check_report")
+    if not c:
+        if session is None:
+            return True, "no engine session has been scored, so no check can have proved one"
+        return True, f"no check for session {session}"
+    status = str(c.get("status") or "").lower()
+    verdict = str(c.get("verdict") or "").lower()
+    if status == "running":
+        return True, "the check is still running, so it has proved nothing yet"
+    if verdict not in ("green", "amber", "red"):
+        return True, "the check did not complete, so it proved nothing" + (
+            f" ({c['fatal']})" if c.get("fatal") else "")
+    if c.get("session") and session and str(c["session"]) != str(session):
+        return True, f"the newest check proved session {c['session']}, not {session}"
+    if verdict == "red":
+        return True, "check is red"
+    if status == "red":
+        return True, f"the check job ended red after a {verdict} verdict" + (
+            f" ({c['fatal']})" if c.get("fatal") else "")
+    if c.get("blocks_buys"):
+        return True, "the check says its verdict blocks buys"
+    return False, None
+
+
 def freshness_line(p):
     """§5.1's first line. A red check holds BUYS; §5.4 makes exits unblockable, so the sheet still
-    ships and the banner says which half of it may be acted on."""
-    c = p["check_report"]
+    ships and the banner says which half of it may be acted on. A check that did not deliver a
+    verdict on this session holds them the same way, and says why (`check_hold`)."""
+    c = p.get("check_report")
+    holds, why = check_hold(p)
     if not c:
-        return "⚠️ no check has run — nothing has been proved about tonight's numbers"
-    verdict = (c.get("verdict") or c.get("status") or "?").upper()
-    mark = {"GREEN": "✓", "AMBER": "⚠", "RED": "✗"}.get(verdict, "?")
-    line = f"{mark} check {verdict}"
-    if c.get("blocks_buys"):
+        return (f"✗ {why} — **buys held; exits stand** (§0.4, §4.4, §5.4)\n"
+                f"    · nothing has proved tonight's numbers")
+    status = str(c.get("status") or "").lower()
+    if "red" in (status, str(c.get("verdict") or "").lower()):
+        word = "RED"
+    else:
+        word = str(c.get("verdict") or c.get("status") or "?").upper()
+    if holds:
+        # A green mark over held buys would contradict its own banner, so a hold is never ✓/⚠.
+        mark = "?" if status == "running" else "✗"
+    else:
+        mark = {"GREEN": "✓", "AMBER": "⚠", "RED": "✗"}.get(word, "?")
+    line = f"{mark} check {word}"
+    if holds:
         line += " — **buys held; exits stand** (§4.4, §5.4)"
-    for why in (c.get("red") or []) + (c.get("amber") or []):
-        line += f"\n    · {why}"
+        if why != "check is red":
+            line += f"\n    · {why}"
+    for reason in (c.get("red") or []) + (c.get("amber") or []):
+        line += f"\n    · {reason}"
     return line
 
 
@@ -102,7 +166,12 @@ def gate_line(p):
 
 def sheet_lines(p):
     """§4.3's sheet. Sells first — §3.5 executes them first, and the order on the page is the
-    order at the open."""
+    order at the open.
+
+    Only tickets that can still be acted on reach this function: the payload's `order_sheet` is
+    proposed and approved, nothing else (migration 068). A withdrawn proposal is not an order
+    (learning 57) and an executed one is not one any more; both print in `not_order_lines`, below
+    the sheet and never on it."""
     rows = p["order_sheet"] or []
     if not rows:
         return ["**no orders** — the book already matches the rank"]
@@ -123,6 +192,43 @@ def sheet_lines(p):
     return out
 
 
+def not_order_lines(p):
+    """Tonight's tickets that are NOT orders, in a block of their own (A10).
+
+    §4.3: "The nightly sheet is the only source of engine orders." A re-score withdraws what it no
+    longer stands behind (`sheet.write_tickets` cancels, never deletes), Zak can cancel one in
+    chat, and a ticket he has executed is done. On 2026-08-17 all of them printed as SELL and BUY
+    lines under the sheet, one of them a sell whose own note said "already executed ... do not
+    execute", under a banner that told him the exits stand.
+
+    They still print — the brief is refreshed in place, so a buy the first chain proposed and the
+    retry withdrew is one Zak may already have read — but ticker first, never in the order line's
+    shape, under a heading that says what they are.
+    """
+    rows = p.get("not_orders") or []
+    if not rows:
+        return []
+    out = ["", "## Not orders — withdrawn or already done; do not execute (§4.3)", ""]
+    for r in rows:
+        qty = _qty(r["qty"]) if r.get("qty") is not None else "—"
+        what = "withdrawn" if r["state"] in WITHDRAWN else "already done"
+        out.append(f"  {r['ticker']:<10} {r['action']} {qty} — {what} [{r['state']}]")
+    return out
+
+
+def _qty(q):
+    """A share count as the ledger holds it: whole shares plain, fractional ones to four places."""
+    q = float(q)
+    return f"{q:,.0f}" if q == int(q) else f"{q:,.4f}".rstrip("0").rstrip(".")
+
+
+def tonight_sells(p):
+    """Every ticker tonight's sheet sells: the live sells, and any already executed. A withdrawn
+    sell is not one — the engine took it back, so the name stays."""
+    rows = (p.get("order_sheet") or []) + (p.get("not_orders") or [])
+    return {r["ticker"] for r in rows if r["action"] == "sell" and r["state"] not in WITHDRAWN}
+
+
 def book_lines(p):
     """The book, and what the engine intends to do about each line.
 
@@ -134,6 +240,12 @@ def book_lines(p):
 
     Printing the first note against the park is not a cosmetic slip. It reads as "this 810-share
     position is queued to sell", which is the opposite of what §6.5 is holding it for.
+
+    The ACCOUNT is read before the instrument (A69). `desk.PARKED` names SPMO.US because §6.1(3)
+    parked the engine's capital in it inside the TFSA; the same instrument in the RRSP is §2.2's
+    Reserve — "SPMO in the RRSP" — and §8 defines the park as SPY.US, where ENGINE capital sits.
+    Checked instrument-first, every brief since the bridge was sold told Zak his RRSP reserve was
+    engine capital.
     """
     rows = p["book"] or []
     if not rows:
@@ -148,7 +260,7 @@ def book_lines(p):
         last = f"{float(b['last_close']):>10,.2f}" if b.get("last_close") is not None else "         —"
         pnl = f"{float(b['pnl_pct']):>+6.1f}%" if b.get("pnl_pct") is not None else "      —"
         out.append(f"  {b['ticker']:<10} {float(b['qty']):>8,.0f} @ {float(b['avg_cost']):>10,.2f}"
-                   f"   last {last}   P/L {pnl}   rank {rank}"
+                   f"   last {last} {b.get('currency') or '?'}   P/L {pnl}   rank {rank}"
                    f"   {b.get('account') or '?'}/{b['sleeve']}")
         if b.get("last_close") is None:
             out.append("      ** no mark: this position is not priced in this store, so it is NOT "
@@ -158,13 +270,16 @@ def book_lines(p):
         # Three reasons a holding has no rank, and they mean three different things. Printing one
         # note for all of them told Zak the engine was about to sell 810 shares of the Phase-0
         # bridge and 140 of the levered layer, neither of which it has any authority over.
-        if b["ticker"] in desk.PARKED:
+        account = b.get("account") or desk.ENGINE_ACCOUNT
+        if account != desk.ENGINE_ACCOUNT:
+            # §2.1's table names the wrapper's purpose; `desk.SLEEVES_BY_ACCOUNT` is that table.
+            role = " + ".join(desk.SLEEVES_BY_ACCOUNT.get(account, ())) or "outside §2.1's table"
+            out.append(f"      {account} — {role} per §2.1's table, not engine capital. §2.1 puts "
+                       f"the engine in the {desk.ENGINE_ACCOUNT} and nowhere else; the engine "
+                       f"neither ranks nor trades this")
+        elif b["ticker"] in desk.PARKED:
             out.append("      park — engine capital, never a slot and never sold for failing to "
                        "rank (§3.4, §6.1(3))")
-        elif (b.get("account") or desk.ENGINE_ACCOUNT) != desk.ENGINE_ACCOUNT:
-            out.append(f"      {b.get('account')} — §2.1 puts the engine in the "
-                       f"{desk.ENGINE_ACCOUNT} and nowhere else; the engine neither ranks nor "
-                       f"trades this")
         else:
             out.append("      ** no rank: this holding is outside §3.2's universe, which §3.5 "
                        "treats as below 12 **")
@@ -212,9 +327,16 @@ def underweight_lines(p):
     It belongs in the BRIEF and not only on the sheet, because the sheet says what to execute and
     this is the thing there is nothing to execute about: at the seed it decides how much of the
     account actually gets deployed, and a line nobody sees is a decision nobody makes.
+
+    A name tonight's sheet SELLS is not kept, so it occupies no slot after the open and is left
+    out (A25): a rank exit, the displaced name, the whole book on a gate-off. Counted, it asked Zak
+    to rule on topping up a position the same page told him to sell — 2026-10-05, WDC.US at rank
+    14 — and overstated the parked shortfall by 108%.
     """
+    selling = tonight_sells(p)
     ranked = [b for b in p["book"] or []
               if b.get("rank") is not None and b["ticker"] not in desk.PARKED
+              and b["ticker"] not in selling
               and b.get("last_close") is not None
               and (b.get("account") or desk.ENGINE_ACCOUNT) == desk.ENGINE_ACCOUNT]
     nav = (p.get("nav") or {}).get("engine_nav")
@@ -241,30 +363,53 @@ def underweight_lines(p):
         return []
     out = ["", "## Held below §3.5's equal weight — reported, NOT ordered"]
     for tk, rank, value, gap, pct in short:
-        out.append(f"  {tk:<10} rank {rank:<3} {value:>12,.2f} of a {slot:,.2f} slot "
+        out.append(f"  {tk:<10} rank {rank:<3} {value:>12,.2f} of a {slot:,.2f} USD slot "
                    f"({pct:.0%}) — short {gap:,.2f}")
     out.append(f"  {len(short)} slot(s) count as filled while holding {sum(s[3] for s in short):,.2f}"
-               f" less than their weight, so that much capital stays parked.")
+               f" USD less than their weight, so that much capital stays parked.")
     out.append("  §3.5 fills FREE slots and keeps a held name rather than re-buying it; it carries")
     out.append("  no top-up rule. Topping one up is a rebalance, which on a momentum book means")
     out.append("  trimming winners. **This one is Zak's (§0.3).**")
     return out
 
 
+def nav_source_note(n):
+    """Where tonight's engine NAV came from, in words. §3.5 sizes USD orders off it whatever its
+    source, so an override is named as one: a CAD figure typed into `config.engine_nav` would size
+    every buy too large by the whole USDCAD rate, and the brief is where Zak would see it (A55)."""
+    if n.get("engine_nav_source"):           # brief.payload's fallback: an earlier session's NAV
+        return f" — from {n['engine_nav_source']}; tonight's is unknown"
+    source = (n.get("nav_source") or {}).get("source")
+    return {"derived": " (derived: positions + TFSA cash)",
+            "config": " (config.engine_nav — Zak's override, sized as USD)",
+            "env": " (ENGINE_NAV — a dispatch override, sized as USD)"}.get(source, "")
+
+
 def dd_lines(p):
     """§5.2 — information, never action. The milestones are printed as milestones, and the sentence
-    that says nothing happens at them is printed with them, every time."""
+    that says nothing happens at them is printed with them, every time.
+
+    "Pager at −10% engine DD": the drawdown is measured on engine NAV — positions plus TFSA cash,
+    the number §3.5 sizes against — and not on the positions alone (migration 068, A28). Cash
+    between a sell and its buy is not a loss. On the positions-only series an exit whose buy is
+    held reads about −18% for a night and a gate-off whose proceeds sit in cash reads −100%; on
+    2026-09-16 US$1,459 of residue cash fired the pager at an engine-NAV drawdown of −9.89%.
+
+    Every figure here is USD, and says so (A55). Engine NAV is the TFSA sleeve priced in USD
+    (`desk.derived_engine_nav`); the household, in CAD, is the Saturday letter's.
+    """
     n = p["nav"] or {}
     dd = n.get("drawdown")
-    nav = f"{float(n['engine_nav']):,.2f}" if n.get("engine_nav") is not None else "**unknown**"
-    marked = (f" · marked {float(n['marked_equity']):,.2f}"
+    nav = (f"{float(n['engine_nav']):,.2f} USD{nav_source_note(n)}"
+           if n.get("engine_nav") is not None else "**unknown**")
+    marked = (f" · positions marked {float(n['marked_equity']):,.2f} USD"
               if n.get("marked_equity") is not None else "")
     out = [f"  engine NAV {nav}{marked}"]
     if dd is None:
-        out.append("  drawdown — not yet measurable (no marked equity recorded)")
+        out.append("  drawdown — not measurable: this session has no engine NAV to measure it on")
         return out + record_lines(None)
     hit = [m for m in DD_MILESTONES if dd <= m]
-    out.append(f"  drawdown {_pct(dd)} from a peak of {float(n['peak']):,.2f}")
+    out.append(f"  drawdown {_pct(dd)} from an engine-NAV peak of {float(n['peak']):,.2f} USD")
     if dd <= DD_PAGER:
         out.append("  ** −10% pager reached (§5.2) **")
     if hit:
@@ -357,10 +502,10 @@ def tranche_lines(p, frozen=False):
 
 
 # §1, Zak's words: "Get to $5M as fast as possible, so I can retire and do whatever work I want —
-# with no risk." §1 names the number and not the currency. NAV is reported in CAD everywhere in
-# this system (`nav_snapshots.nav_cad`, §4.1's FX row), so the comparison is made in CAD and the
-# assumption is PRINTED beside it rather than buried — at today's rates the two readings differ by
-# about a third of the distance.
+# with no risk." §1 names the number and not the currency. The household is measured in CAD (every
+# account is Canadian, and so is the facility), so the comparison is made in CAD and the assumption
+# is PRINTED beside it rather than buried — at today's rates the two readings differ by about a
+# third of the distance. Engine NAV is the other measure, and it is USD (`dd_lines`).
 DESTINATION = 5_000_000.0
 DESTINATION_CURRENCY = "CAD"
 
@@ -420,8 +565,9 @@ def saturday_lines(cur, p):
         pct = 100.0 * float(household) / DESTINATION
         out.append(f"  NAV vs the §1 destination: {float(household):,.0f} of "
                    f"{DESTINATION:,.0f} {DESTINATION_CURRENCY} ({pct:.1f}%)")
-        out.append(f"    §1 names the number and not the currency; NAV is reported in "
-                   f"{DESTINATION_CURRENCY} throughout this system, so the comparison is made there.")
+        out.append(f"    §1 names the number and not the currency; the household is measured in "
+                   f"{DESTINATION_CURRENCY}, so the comparison is made there. Engine NAV above is "
+                   f"the TFSA alone, in USD.")
     else:
         out.append("  NAV vs the §1 destination: no NAV snapshot recorded")
     return out
@@ -443,10 +589,11 @@ def render(p, frozen=False, words=None):
         out.append("")
     out.append(freshness_line(p))
     out += ["", gate_line(p), "", "## Order sheet (§4.3)", ""]
-    out += sheet_lines(p)
+    out += sheet_lines(p) + not_order_lines(p)
     out += ["", "## Book (§4.2)", ""] + book_lines(p) + underweight_lines(p) + sleeve_lines(p)
     out += ["", "## NAV & drawdown (§5.2)", ""] + dd_lines(p)
-    out += ["", "## Levered layer (§2.3)", ""] + tranche_lines(p, frozen=frozen)
+    out += ["", "## Levered layer (§2.3) — CAD, as the draw and the purchase both are", ""]
+    out += tranche_lines(p, frozen=frozen)
 
     top = p["top12"] or []
     if top:
@@ -484,10 +631,13 @@ def main():
 
         g = p["gate"] or {}
         session = g.get("session_date")
+        # The count is of ORDERS: the payload's sheet is proposed and approved tickets only, so a
+        # withdrawn or executed ticket is no longer "an order" in the summary notify sends (A10).
+        orders = len(p["order_sheet"] or [])
         hb.detail.update(session=str(session) if session else None, slot=slot,
                          gate="ON" if g.get("gate_on") else "OFF", frozen=frozen,
                          freeze_words=words, frozen_at=str(froze_at) if froze_at else None,
-                         orders=len(p["order_sheet"] or []),
+                         orders=orders, not_orders=len(p.get("not_orders") or []),
                          held=len(p["book"] or []))
         if session is None:
             # `briefs.session_date` is NOT NULL and there is no honest value for it here. A brief
@@ -518,17 +668,18 @@ def main():
                                    body = excluded.body, detail = excluded.detail, at = now()
                                returning id""",
                             (slot, session, freshness_line(p).splitlines()[0],
-                             f"gate {'ON' if g.get('gate_on') else 'OFF'} · "
-                             f"{len(p['order_sheet'] or [])} order(s)",
+                             f"gate {'ON' if g.get('gate_on') else 'OFF'} · {orders} order(s)",
                              report, json.dumps({"composed": True, "engine": "v1"})))
                 wrote = cur.fetchone()
             conn.commit()
             hb.rows = 1 if wrote else 0
 
-        if not p["check_report"]:
-            hb.amber("no check has run — the brief carries no proof that tonight's numbers hold")
-        elif p["check_report"].get("blocks_buys"):
-            hb.amber("check is red: the brief ships the sheet with its buys held (§4.4, §5.4)")
+        # Amber on every hold, not only on a verdict that says red: a check that crashed, died
+        # before its heartbeat, is still running or never ran for this session holds the buys
+        # too, and compose closing green over it was the half of A20 nobody reads in the brief.
+        holds, why = check_hold(p)
+        if holds:
+            hb.amber(f"{why}: the brief ships the sheet with its buys held (§4.4, §5.4)")
 
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
