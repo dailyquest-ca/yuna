@@ -71,7 +71,7 @@ src/          ingest + compute jobs (Python); db.py holds the shared heartbeat c
 
 **Dispatch-only.** `desk.py` (tonight's sheet, read-only) · `closeout.py` (§6.2, once) ·
 `migrate.py` · `backfill.py` · `verify_run.py` · `concentrated.py` and the rest of the research
-grid. The retired legacy machine (`score.py`, `check.py`, `compose.py`, `fills.py`, `signals.py`,
+grid · `restore.py` (a `backup` dump into a freshly migrated database — run by hand, no workflow). The retired legacy machine (`score.py`, `check.py`, `compose.py`, `fills.py`, `signals.py`,
 `arming.py`, `rank.py`, `fundamentals.py`, `phase0.py`) keeps its source for history and has no
 workflow at all — its buttons were deleted 2026-09-13 (learning 66).
 
