@@ -95,20 +95,53 @@ def test_the_guard_fires_on_each_edit_learning_58_warns_about(old, new):
     assert coupling_breaks(workflow.replace(old, new), (SRC / "ingest.py").read_text())
 
 
-# ---- the night already green (QC 2026-10-07, A48) -----------------------------------------------
+# ---- the night already green (QC 2026-10-07, A48, A53) ------------------------------------------
 
-# "the night is already green": a green, non-dry ingest-daily run inside the retry's lookback
-NIGHT_GREEN = re.compile(r"status\s*=\s*'green'\s+and\s+dry_run\s*=\s*false\s+and\s+started_at\s*>"
-                         r"\s*now\(\)\s*-\s*interval\s*'(\d+) hours'\s+and\s+not\s*\(detail\s*\?\s*"
-                         r"'awaiting_vendor'\)")
+# The predicate from `status = 'green'` to its `order by`: in `report_fail.py` the NIGHT_GREEN
+# string, in `ingest.py` the query inside `night_already_green` — scoped to that function, because
+# the module has other queries over `runs`.
+PREDICATE = re.compile(r"status\s*=\s*'green'(.*?)order\s+by", re.S)
+RETRY = re.compile(r"\ndef night_already_green\(.*?(?=\ndef )", re.S)
+AUTOPSY = re.compile(r'NIGHT_GREEN = """(.*?)"""', re.S)
 
 
-def test_a_cancelled_trigger_judges_the_night_by_the_retrys_own_window():
+def clauses(sql):
+    """One copy of the predicate as a set of clauses, whitespace normalised. The retry's
+    `id <> %s` is left out on purpose: it keeps the retry from counting its own row, and a cancelled
+    firing that never opened a heartbeat has no row to count."""
+    match = PREDICATE.search(sql)
+    assert match, "no `status = 'green' … order by` predicate here"
+    parts = (" ".join(c.split()) for c in re.split(r"\s+and\s+", match.group(1)))
+    return {c for c in parts if c and c != "id <> %s"}
+
+
+def retry_and_autopsy():
+    retry = RETRY.findall((SRC / "ingest.py").read_text())
+    autopsy = AUTOPSY.findall((SRC / "report_fail.py").read_text())
+    assert len(retry) == 1 and len(autopsy) == 1, "each copy is where it was"
+    return retry[0], autopsy[0]
+
+
+def test_a_cancelled_trigger_judges_the_night_by_the_retrys_own_test():
     """`report_fail.py` decides whether a cancelled ingest firing lost anything by asking the
-    question the retry asks before it skips — the same predicate and the same four hours (§5.6,
-    2026-09-13). If the retry's window moves and this copy does not, a cancelled firing is judged
-    by a night the retry no longer recognises."""
-    retry = NIGHT_GREEN.findall((SRC / "ingest.py").read_text())
-    autopsy = NIGHT_GREEN.findall((SRC / "report_fail.py").read_text())
-    assert len(retry) == 1, "the retry's own test is where it was"
-    assert autopsy == retry, f"report_fail's window {autopsy} is not the retry's {retry}"
+    question the retry asks before it skips — every clause of it, the four hours included (§5.6,
+    2026-09-13). The window was once the only clause compared; then the retry learned that only a
+    scheduled firing landing tonight's tape counts (A53), the copy did not, and a hand dispatch's
+    green repair of an older session would have told the autopsy a cancelled firing lost nothing
+    while the retry, asked the same night, refetched."""
+    retry, autopsy = retry_and_autopsy()
+    assert "started_at > now() - interval '4 hours'" in clauses(retry)
+    assert clauses(autopsy) == clauses(retry), (
+        f"the autopsy's test differs from the retry's: "
+        f"only the retry asks {sorted(clauses(retry) - clauses(autopsy))}, "
+        f"only the autopsy asks {sorted(clauses(autopsy) - clauses(retry))}")
+
+
+@pytest.mark.parametrize("drop", ["detail ? 'schedule'", "coalesce(rows_written, 0) > 0",
+                                  "interval '4 hours'"])
+def test_the_guard_fires_when_the_retry_moves_and_the_copy_does_not(drop):
+    retry, autopsy = retry_and_autopsy()
+    moved = (retry.replace(drop, "interval '6 hours'") if "hours" in drop
+             else retry.replace(f"and {drop}", ""))
+    assert moved != retry, f"the edit under test reached the retry's query: {drop}"
+    assert clauses(moved) != clauses(autopsy)

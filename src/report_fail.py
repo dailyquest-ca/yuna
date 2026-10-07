@@ -55,13 +55,17 @@ def url():
 rid = os.environ.get("AUTOPSY_RUN_ID") or os.environ.get("GITHUB_RUN_ID")
 att = os.environ.get("AUTOPSY_RUN_ATTEMPT") or os.environ.get("GITHUB_RUN_ATTEMPT")
 cancelled = os.environ.get("AUTOPSY_CANCELLED", "false").lower() in ("1", "true", "yes")
-# The retry's own test for "the night is already green" (`src/ingest.py`, SECOND_RUN): a green,
-# non-dry ingest-daily run inside four hours that did more than find the vendor unpublished. Four
-# hours is the operating constant of record (§5.6, 2026-09-13), and tests/test_retry_coupling.py
-# keeps this copy equal to the retry's.
+# The retry's own test for "the night is already green" (`src/ingest.py`, `night_already_green`):
+# a green, non-dry, SCHEDULED ingest-daily firing inside four hours that fetched the vendor's newest
+# day and landed rows (A53) — not a hand dispatch, and not a firing that found the vendor
+# unpublished. Four hours is the operating constant of record (§5.6, 2026-09-13), and
+# tests/test_retry_coupling.py keeps every clause of this copy equal to the retry's.
 NIGHT_GREEN = """select id from runs where job = 'ingest-daily' and status = 'green'
-                   and dry_run = false and started_at > now() - interval '4 hours'
+                   and not dry_run and started_at > now() - interval '4 hours'
+                   and detail ? 'schedule'
+                   and detail->'tape'->>'requested' is null
                    and not (detail ? 'awaiting_vendor')
+                   and coalesce(rows_written, 0) > 0
                  order by id desc limit 1"""
 # A rehearsal's death is a rehearsal's row (QC 2026-10-07, A24; learning 67). The new-row path
 # below wrote `dry_run=false` whatever the dispatch said, so a DRY_RUN dispatch that died before

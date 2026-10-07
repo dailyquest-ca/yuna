@@ -193,12 +193,17 @@ def test_a_scheduled_ingest_cancelled_before_it_started_is_recorded_red(db, tmp_
     assert tickets is False and "ingest-daily red" in line, line
 
 
+# What the heartbeat records for the scheduled first firing that fetched the vendor's newest day
+LANDED = {"schedule": {"due_utc": "earlier", "drift_minutes": 12.0},
+          "tape": {"as_of": "2026-10-06", "rows": 11000, "requested": None}}
+
+
 def test_a_firing_cancelled_on_a_night_already_green_records_nothing(db, tmp_path):
     """The retry cancelled after the first firing landed the tape lost nothing: the retry would
     have exited "already green" by its own test (§5.6's four hours). A red here would hold a good
     night's buys on a cancellation that changed nothing."""
     bars_today(db)
-    green = ingest_row(db, ago=50, detail={"tape": {"as_of": "2026-10-06", "rows": 11000}})
+    green = ingest_row(db, ago=50, detail=LANDED)
     out = trigger(tmp_path)
     assert f"the night is already green (run {green})" in out
     with db.cursor() as cur:
@@ -206,6 +211,23 @@ def test_a_firing_cancelled_on_a_night_already_green_records_nothing(db, tmp_pat
         assert cur.fetchone()[0] == 1, "nothing written"
     _, tickets = dbm.freshness(db)
     assert tickets is True
+
+
+def test_a_hand_dispatchs_green_does_not_excuse_a_cancelled_firing(db, tmp_path):
+    """A53 reaches the autopsy. The retry stopped counting a hand dispatch as tonight's landing —
+    a named-date repair of an older session goes green inside the window and says nothing about
+    tonight — and the autopsy asks the retry's own question. With only that green behind it, the
+    cancelled firing is a night with no tape: red, as the retry itself would have refetched."""
+    bars_today(db)
+    ingest_row(db, ago=50, detail={"tape": {"as_of": "2026-09-08", "rows": 9000,
+                                            "requested": "2026-09-08"}})
+    out = trigger(tmp_path)
+    assert "already green" not in out
+    with db.cursor() as cur:
+        cur.execute("""select status, detail->>'fatal' from runs where job = 'ingest-daily'
+                        order by id desc limit 1""")
+        status, fatal = cur.fetchone()
+    assert status == "red" and fatal.startswith("cancelled before its heartbeat opened")
 
 
 def test_a_first_firing_that_found_the_vendor_unpublished_is_not_a_green_night(db, tmp_path):
