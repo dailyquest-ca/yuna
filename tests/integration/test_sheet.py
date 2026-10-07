@@ -379,6 +379,26 @@ def test_the_anchors_date_and_age_ride_with_the_derived_nav(db, migrated):
         assert source["cash_as_of"] == str(days[-31]) and source["cash_age_days"] == 30
 
 
+def test_same_day_fills_the_anchor_is_taken_to_contain_ride_with_the_nav(db, migrated):
+    """A30 at the derivation. The anchor here is dated the session and written long after its open,
+    so a round trip that day cannot be ordered against the reading: it is taken as inside it, as
+    before, and named beside the NAV whose size rests on that reading of the date."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _engine_world(cur, days)
+        cur.execute("""insert into transactions (ticker, account, side, qty, price, currency,
+                                                 trade_date, confirmed)
+                       values ('N05.US','TFSA','buy',1,30.0,'USD',%s,true),
+                              ('N05.US','TFSA','sell',1,31.0,'USD',%s,true)""",
+                    (days[-1], days[-1]))
+        db.commit()
+        nav, source = sheet.engine_nav(cur, days[-1])
+        assert nav is not None
+        assert source["cash_usd"] == pytest.approx(16.0), "inside the reading: not counted again"
+        assert source["cash_same_day_assumed_inside"] == {"fills": 2,
+                                                          "net": {"USD": pytest.approx(1.0)}}
+
+
 def test_shadow_and_live_are_separate_records_of_the_same_close(db, migrated):
     """§6.4 runs the pipeline live producing sheets nobody trades. The shadow's answer for a close
     must not overwrite the live answer for that close, or the comparison compares nothing."""

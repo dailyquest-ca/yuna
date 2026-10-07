@@ -292,8 +292,9 @@ def derived_engine_nav(cur, as_of):
 
     The anchor's date and age ride in the breakdown (`cash_as_of`, `cash_age_days`, days from the
     anchor's date to `as_of`) so they reach `engine_sessions.detail` and the score run beside the
-    number they underwrite. No age fails: the plan rules no refresh cadence, and a limit would be a
-    constant nobody ruled.
+    number they underwrite, and so do any same-day fills the anchor is taken to contain
+    (`cash_same_day_assumed_inside`, from `db.cash_by_account`). No age fails: the plan rules no
+    refresh cadence, and a limit would be a constant nobody ruled.
     """
     held = held_book(cur)
     equity, unpriced = marked_equity(cur, held, as_of)
@@ -350,9 +351,14 @@ def derived_engine_nav(cur, as_of):
     nav = equity + in_cash
     if nav <= 0:
         return None, f"derived NAV {nav:,.2f} is not positive — nothing to size against"
-    return nav, dict(source="derived", marked_equity=round(equity, 2), cash_usd=round(usd, 2),
-                     cash_cad=round(cad, 2), usdcad=fx, cash_as_of=str(anchored or ""),
-                     cash_age_days=age)
+    detail = dict(source="derived", marked_equity=round(equity, 2), cash_usd=round(usd, 2),
+                  cash_cad=round(cad, 2), usdcad=fx, cash_as_of=str(anchored or ""),
+                  cash_age_days=age,
+                  cash_recorded_at=(cash["recorded_at"].isoformat()
+                                    if cash.get("recorded_at") is not None else None))
+    if cash.get("same_day_assumed_inside"):
+        detail["cash_same_day_assumed_inside"] = cash["same_day_assumed_inside"]
+    return nav, detail
 
 
 def sheet(cur, as_of, nav):
