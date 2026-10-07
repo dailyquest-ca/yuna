@@ -620,3 +620,57 @@ def test_the_gauge_re_derives_a_seed_sheet_fund_and_topups_included(db, migrated
     verdict, got = gauges.run(db)
     sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
     assert sheet_gauge["status"] == "red", "a mis-sized top-up must hold the buys"
+
+
+def test_a_tape_that_advanced_past_the_newest_session_is_red(db, migrated):
+    """The suite's currency check (QC 2026-10-07, A46). Tonight's bars landed and no session was
+    scored on them — score never ran, ran dry, or was cancelled — so every recomputation gauge would
+    re-prove yesterday's sheet against itself, and on a quiet night all six read green. The gate
+    gauge already reddened a decision stamped AFTER the newest bar; this is the other direction."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days[:-1])                      # the tape runs to days[-1]; the desk stopped a day short
+        db.commit()
+        stored = gauges.newest_session(cur)
+        assert stored["session_date"] == days[-2]
+        g = gauges.gate_reproduces(cur, stored)
+    assert g["status"] == "red", g
+    assert "no session was scored on it" in g["why"] and g["newest_bar"] == str(days[-1])
+    verdict, _ = gauges.run(db)
+    assert verdict == "red", "a stale sheet holds the buys (§0.4)"
+
+
+def test_a_fractionally_held_name_tops_up_green(db, migrated):
+    """desk.sheet sizes a top-up as int(slot - held), the held line being whatever the broker
+    filled — ASX.US is 512.4837 shares. The gauge truncated the held line first and asked for one
+    share more, so every top-up of a fractional holding read RED and held the night's buys
+    (QC 2026-10-07, A8). Re-derived the desk's way, a correct top-up is green."""
+    from test_desk import _park, _shadow_passed
+    with db.cursor() as cur:
+        days = _world(cur)
+        _park(cur, days)
+        _shadow_passed(cur, days)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','momentum',20.5,40.0,'open')""")
+        s = _score(cur, days)
+    db.commit()
+    assert any(o["clause"] == "top_up" and o["ticker"] == "N00.US" for o in s["orders"])
+    verdict, got = gauges.run(db)
+    sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
+    assert sheet_gauge["status"] == "green", sheet_gauge
+
+
+def test_an_order_over_the_participation_cap_is_red(db, migrated):
+    """§3.5: "an order may not exceed 0.98 of the name's ADDV — a correctness check, not a live
+    constraint at current size". The docstring always claimed this gauge checked it; nothing did
+    (QC 2026-10-07, A64). At a NAV large enough that a fifth of it outweighs a day's trading in the
+    name, every fill breaks the cap, and the sheet must not read green."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        s = _score(cur, days, nav=1e12)
+    db.commit()
+    assert all(o["participation_ok"] is False for o in s["orders"] if o["action"] == "buy")
+    with db.cursor() as cur:
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red", g
+    assert sum("ADDV" in f for f in g["failures"]) == 5
