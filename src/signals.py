@@ -1,13 +1,18 @@
-"""signals — every formula in the plan, as pure functions over arrays.
+"""signals — every formula in the retired engine's plan, as pure functions over arrays.
 
-No database, no vendor, no clock. The nightly job, the weekly rank and both backtests import
-from here, so there is exactly one base detector, one stop ratchet and one hurdle solver in the
-system. Before this module the base detector existed twice and the two copies disagreed with
-each other and with §3.2.
+No database, no vendor, no clock. The retired engine's nightly job and its weekly rank imported
+from here, as both backtests still do, so there was exactly one base detector, one stop ratchet
+and one hurdle solver in the system. Before this module the base detector existed twice and the
+two copies disagreed with each other and with §3.2.
 
-Section references are to `docs/yuna_plan.md`. Where a number appears here it is the plan's
-number; anything a caller may reasonably tune arrives as a keyword argument with the plan's
-value as its default.
+**Still live, in part.** The nightly `ingest.py` calls `suspicious_move`, `sources_agree` and
+`split_ratio` for its quarantine and split handling, and `backtest.py` imports the whole module —
+which the scheduled `shadow` reaches through `concentrated.py`. v1.0's engine is `engine.py`.
+
+Section references are to the plan this module was written under, which v1.0 replaced on
+2026-08-15 — not to the current `docs/yuna_plan.md`. Where a number appears here it is that
+plan's number; anything a caller may reasonably tune arrives as a keyword argument with that
+plan's value as its default.
 """
 import math
 import datetime as dt

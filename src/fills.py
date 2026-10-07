@@ -1,19 +1,24 @@
-"""fills — dispatch-only tooling: fold a broker export into the ledger (§4.2, §4.5, R4 step 2).
+"""fills — retired with the engine it served: folded a broker export into the ledger.
 
-Sunday's reconciliation is the routine path for this: Zak reads his settled activity out, and the
-session writes each fill onto a ticket. This job exists for the case that path missed — a fill
-nobody wrote down, discovered later, whose absence the book has been reasoning from ever since.
+**No workflow has run this since 2026-09-13** (learning 66). It describes the retired engine and
+cites the plan that engine was written under (§4.2, §4.5, R4 step 2), not v1.0. Under v1.0 a
+session writes the ledger and `yuna_book_from_ledger` moves the book (routines-contract §4b).
+
+Sunday's reconciliation was the routine path for this: Zak read his settled activity out, and the
+session wrote each fill onto a ticket. This job existed for the case that path missed — a fill
+nobody wrote down, discovered later, whose absence the book had been reasoning from ever since.
 On 2026-08-04 four of them went unrecorded, and the next four briefs armed RS.US as a new
 momentum entry at the very price Zak had already paid for it.
 
-It takes the same route a session would, and nothing more:
+It took the same route a session would, and nothing more:
 
     manifest -> tickets (settled, reason 'discretionary') -> transactions -> book
 
-`tickets` is where a fill lives (§4.5), `transactions` is derived from it by
-`arming.sync_fills_from_tickets`, and the book is folded by `arming.apply_fills` — the same two
-functions the nightly `score` calls, so this repairs the book through the machinery rather than
-around it. §4.3 keeps `book` and `transactions` job-written, which is why this is a job.
+`tickets` was where a fill lived (§4.5), `transactions` was derived from it by
+`arming.sync_fills_from_tickets`, and the book was folded by `arming.apply_fills` — the same two
+functions the retired nightly `score` called, so this repaired the book through that machinery
+rather than around it. That plan's §4.3 kept `book` and `transactions` job-written, which is why
+this was a job.
 
 Every fill carries a `ref`, and a ref already on a ticket is skipped, so re-running applies
 nothing twice. DRY_RUN=true reads the manifests, reports exactly what it would write, and writes
