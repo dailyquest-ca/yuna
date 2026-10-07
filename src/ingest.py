@@ -90,6 +90,22 @@ def awaiting_vendor(as_of, store_date):
             f"today's session is not published yet — nothing written")
 
 
+def last_bars(cur):
+    """{ticker: newest bar date} for every active name that has a bar — one index probe each.
+
+    The per-ticker pass below only ever looks up the active names, and the old form,
+    `select ticker, max(d) from prices group by ticker`, read the whole table to answer them: 13M
+    rows and ~10.5 s a night in production (A35). Walking each active name's primary key backwards
+    to its first row returns the same date, and a name with no bars is absent from both forms
+    (`test_ingest_last_bars.py` pins the two together).
+    """
+    cur.execute("""select u.ticker, p.d from universe u
+                     cross join lateral (select d from prices where ticker = u.ticker
+                                          order by d desc limit 1) p
+                    where u.status = 'active'""")
+    return dict(cur.fetchall())
+
+
 def tape_already_landed(cur, as_of, hours=12):
     """The run that put the vendor's newest tape in the store this night, or None.
 
@@ -417,8 +433,7 @@ def main():
                 earn_calls = int(config(cur, "earnings_refresh_max_calls", 12))
                 cur.execute("select ticker, kind from universe where status='active'")
                 names = {r[0]: r[1] for r in cur.fetchall()}
-                cur.execute("select ticker, max(d) from prices group by ticker")
-                last_bar = dict(cur.fetchall())
+                last_bar = last_bars(cur)
                 store_date = data_date(cur)
             backfill_from = dt.date.today() - dt.timedelta(days=365 * years)
 
