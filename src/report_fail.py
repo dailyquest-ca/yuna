@@ -18,6 +18,16 @@ second attempt that dies before its heartbeat must not rewrite the first attempt
   * no row of this run at all — the job really did die before its heartbeat opened: a new row,
     a rehearsal's row when the dispatch was a DRY_RUN (2026-10-07).
 Without a run id (a local run, an old row) it falls back to closing any `running` row of the job.
+
+**A cancelled trigger** (2026-10-07, QC A48). `pipeline.yml`'s `slot` job calls this for the
+scheduled ingest that triggered the chain when GitHub reports that run CANCELLED. A run cancelled
+before it started — GitHub drops a pending run when a newer one joins its concurrency group —
+writes no row and runs no autopsy of its own, and the chain behind it used to re-score yesterday's
+tape under a green freshness line. That call names the run with AUTOPSY_RUN_ID/AUTOPSY_RUN_ATTEMPT
+and sets AUTOPSY_CANCELLED, which changes two of the rules above: a row of that run already closed
+green or amber is left alone (the work finished before the cancel reached it), and a run that left
+no row at all is recorded red — unless it is `ingest-daily` and the night is already green by the
+retry's own test, so a redundant firing cancelled after a good one cannot hold a good night's buys.
 """
 import sys, os, json, psycopg
 
@@ -40,8 +50,18 @@ def url():
     return f"{u} sslmode={mode}"
 
 
-rid = os.environ.get("GITHUB_RUN_ID")
-att = os.environ.get("GITHUB_RUN_ATTEMPT")
+# the run being autopsied: this job's own, or the cancelled trigger the `slot` job names
+rid = os.environ.get("AUTOPSY_RUN_ID") or os.environ.get("GITHUB_RUN_ID")
+att = os.environ.get("AUTOPSY_RUN_ATTEMPT") or os.environ.get("GITHUB_RUN_ATTEMPT")
+cancelled = os.environ.get("AUTOPSY_CANCELLED", "false").lower() in ("1", "true", "yes")
+# The retry's own test for "the night is already green" (`src/ingest.py`, SECOND_RUN): a green,
+# non-dry ingest-daily run inside four hours that did more than find the vendor unpublished. Four
+# hours is the operating constant of record (§5.6, 2026-09-13), and tests/test_retry_coupling.py
+# keeps this copy equal to the retry's.
+NIGHT_GREEN = """select id from runs where job = 'ingest-daily' and status = 'green'
+                   and dry_run = false and started_at > now() - interval '4 hours'
+                   and not (detail ? 'awaiting_vendor')
+                 order by id desc limit 1"""
 # A rehearsal's death is a rehearsal's row (QC 2026-10-07, A24; learning 67). The new-row path
 # below wrote `dry_run=false` whatever the dispatch said, so a DRY_RUN dispatch that died before
 # its heartbeat opened left a live red under a price-critical name — and `freshness()` held the
@@ -55,7 +75,9 @@ MINE = """(%s::text is null or (detail->'actions'->>'run_id' = %s
 # 2026-10-07, A37): here each write opens or shares one short transaction, so the two barely
 # differ, but a finish time in `runs` means the clock in every writer or it means nothing.
 with psycopg.connect(url()) as conn, conn.cursor() as cur:
-    killed = json.dumps({"fatal": "died mid-run", "output_tail": tail})
+    wrote = True
+    killed = json.dumps({"fatal": "cancelled mid-run" if cancelled else "died mid-run",
+                         "output_tail": tail})
     cur.execute(f"""update runs set finished_at=clock_timestamp(), status='red',
                       detail = coalesce(detail,'{{}}'::jsonb) || %s::jsonb
                     where job=%s and status='running' and {MINE}""", (killed, job, rid, rid, att))
@@ -71,6 +93,9 @@ with psycopg.connect(url()) as conn, conn.cursor() as cur:
             cur.execute("update runs set detail = coalesce(detail,'{}'::jsonb) || %s::jsonb where id=%s",
                         (json.dumps({"output_tail": tail}), row[0]))
             how = f"appended the output tail to the heartbeat's own red (run {row[0]})"
+        elif row and cancelled:
+            wrote = False
+            how = f"run {row[0]} closed {row[1]} before the cancel reached it — left as it is"
         elif row:
             cur.execute("""update runs set status='red', finished_at=clock_timestamp(),
                              detail = coalesce(detail,'{}'::jsonb) || %s::jsonb where id=%s""",
@@ -78,10 +103,23 @@ with psycopg.connect(url()) as conn, conn.cursor() as cur:
                                      "output_tail": tail}), row[0]))
             how = f"the heartbeat had closed {row[1]} before the job died — run {row[0]} flipped to red"
         else:
-            cur.execute("""insert into runs(job,finished_at,status,dry_run,detail)
-                           values (%s,clock_timestamp(),'red',%s,%s)""",
-                        (job, dry,
-                         json.dumps({"fatal": "job died pre-heartbeat", "output_tail": tail})))
-            how = "new row: the job died before its heartbeat opened"
+            green = None
+            if cancelled and job == "ingest-daily":
+                cur.execute(NIGHT_GREEN)
+                green = cur.fetchone()
+            if green:
+                wrote = False
+                how = (f"nothing written: the night is already green (run {green[0]}), so the "
+                       f"cancelled firing lost nothing the retry would not have skipped")
+            else:
+                # stamped like a heartbeat's row, so a re-run of this step finds it, not a twin
+                stamp = {"actions": {"run_id": rid, "attempt": att}} if rid else {}
+                fatal = ("cancelled before its heartbeat opened — its work never ran" if cancelled
+                         else "job died pre-heartbeat")
+                cur.execute("""insert into runs(job,finished_at,status,dry_run,detail)
+                               values (%s,clock_timestamp(),'red',%s,%s)""",
+                            (job, dry, json.dumps({**stamp, "fatal": fatal, "output_tail": tail})))
+                how = ("new row: the run was cancelled before its heartbeat opened" if cancelled
+                       else "new row: the job died before its heartbeat opened")
     conn.commit()
-print(f"red autopsy written for {job} ({how})")
+print(f"red autopsy written for {job} ({how})" if wrote else f"autopsy for {job}: {how}")

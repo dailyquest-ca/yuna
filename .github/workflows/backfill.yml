@@ -40,10 +40,17 @@ on:
         description: 'redo names that already hold the full window (default skips them)'
         default: 'false'
 
-# §4.2, added 2026-08-03: every job that writes shares ONE concurrency group, so Actions serialises
-# them. `ingest-daily` and `backfill` overlapped once and deadlocked on the prices index — Postgres
-# caught it and killed a transaction, which is the good outcome, but two writers on one table is a
-# race the schedule should make impossible rather than one the database has to survive.
+# Every job that writes shares ONE concurrency group (added 2026-08-03). `ingest-daily` and
+# `backfill` overlapped once and deadlocked on the prices index — Postgres caught it and killed a
+# transaction, which is the good outcome, but two writers on one table is a race the schedule
+# should make impossible rather than one the database has to survive.
+#
+# **The group is not a queue** (QC 2026-10-07, A48 — this comment used to say "Actions serialises
+# them"). GitHub runs one member and holds ONE more pending; a run that joins while one is already
+# pending CANCELS that pending run, whatever `cancel-in-progress` says. So two writers never
+# overlap, but a third is dropped, not queued: a long dispatch held through the night can cancel
+# both ingest firings. A run cancelled while pending never starts, writes no `runs` row and runs no
+# autopsy, so `pipeline.yml`'s `slot` job records a cancelled scheduled ingest red instead.
 concurrency:
   group: yuna-writes
   cancel-in-progress: false

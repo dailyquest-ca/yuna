@@ -67,6 +67,36 @@ jobs:
           fi
           echo "slot=$want" >> "$GITHUB_OUTPUT"
           echo "chain slot: $want (triggered by ${trigger:-dispatch})"
+      # A cancelled ingest is a red, never a silence (QC 2026-10-07, A48). `workflow_run:
+      # completed` fires on EVERY conclusion, so this chain also runs behind a cancelled ingest —
+      # and a firing GitHub cancelled before it started (a pending run is dropped when a newer one
+      # joins the `yuna-writes` group) wrote no row and ran no autopsy: the chain re-scored
+      # yesterday's tape under a green freshness line, with the buys released. That run is
+      # recorded here instead. report_fail.py closes or writes its row red — unless the night is
+      # already green by the retry's own test — and the freshness gauge holds the buys on it.
+      # Scheduled firings only: whoever cancels a dispatch watched it happen, and a dispatch may
+      # have been a rehearsal (learning 67). Every other night these four steps are skipped.
+      - if: github.event.workflow_run.conclusion == 'cancelled' && github.event.workflow_run.event == 'schedule'
+        uses: actions/checkout@v4
+      - if: github.event.workflow_run.conclusion == 'cancelled' && github.event.workflow_run.event == 'schedule'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - if: github.event.workflow_run.conclusion == 'cancelled' && github.event.workflow_run.event == 'schedule'
+        run: pip install -r requirements.txt
+      - name: a cancelled scheduled ingest is recorded red
+        if: github.event.workflow_run.conclusion == 'cancelled' && github.event.workflow_run.event == 'schedule'
+        run: |
+          echo "the scheduled $TRIGGER run $AUTOPSY_RUN_ID (attempt $AUTOPSY_RUN_ATTEMPT) ended" \
+               "cancelled, so its work never finished; this chain reads whatever the store holds" \
+               > /tmp/trigger.out
+          python src/report_fail.py "$TRIGGER" /tmp/trigger.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TRIGGER: ${{ github.event.workflow_run.name }}
+          AUTOPSY_RUN_ID: ${{ github.event.workflow_run.id }}
+          AUTOPSY_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          AUTOPSY_CANCELLED: 'true'
 
   reconcile:
     needs: slot

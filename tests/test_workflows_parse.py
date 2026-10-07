@@ -171,6 +171,29 @@ def test_an_autopsy_also_runs_when_the_job_is_cancelled(path):
                 f"{path.name}:{name}'s autopsy must judge a cancel by its own work step's outcome"
 
 
+def test_a_cancelled_scheduled_ingest_is_recorded_by_the_chain_behind_it():
+    """QC 2026-10-07 (A48). `workflow_run: completed` fires on a cancelled ingest too, and a run
+    GitHub cancelled while it waited in `yuna-writes` never started: no row, no autopsy, and the
+    chain re-scored yesterday's tape under a green line. The `slot` job — in no concurrency group,
+    so nothing can drop it — records that run, naming IT rather than itself, and on every other
+    night skips the steps that would."""
+    slot = _pipeline()["jobs"]["slot"]
+    assert "concurrency" not in slot, "the job that records a dropped run must not be droppable"
+    recorders = [s for s in slot["steps"] if _is_autopsy(s)]
+    assert len(recorders) == 1, "exactly one step records the cancelled trigger"
+    step, = recorders
+    gate = step["if"]
+    assert "github.event.workflow_run.conclusion == 'cancelled'" in gate
+    assert "github.event.workflow_run.event == 'schedule'" in gate, "a dispatch may be a rehearsal"
+    env = step["env"]
+    assert env["AUTOPSY_RUN_ID"] == "${{ github.event.workflow_run.id }}"
+    assert env["AUTOPSY_RUN_ATTEMPT"] == "${{ github.event.workflow_run.run_attempt }}"
+    assert env["AUTOPSY_CANCELLED"] == "true"
+    for s in slot["steps"]:
+        if s.get("id") != "pick":
+            assert s.get("if") == gate, "an ordinary night pays nothing for this"
+
+
 def test_the_composed_kind_is_the_kind_notify_expects():
     """The seam with no other guard: `brief` writes a kind and `notify` looks for one. When they
     disagree the chain is green end to end and Zak gets silence — which §4.7 rules is itself the
