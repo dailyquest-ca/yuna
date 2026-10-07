@@ -31,6 +31,7 @@ import sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 from db import (connect, config, data_date, dry, fx_pair, get, jsonb, load_bars, observe,
                 scheduled_run, stops_breached, Heartbeat)
+import engine
 import signals as sg
 
 JOB = "ingest-daily"
@@ -78,16 +79,71 @@ def tape_advanced(as_of, store_date):
     return dt.date.fromisoformat(str(as_of)) > store_date
 
 
-def awaiting_vendor(as_of, store_date):
+def missing_regime(tape, as_of):
+    """Why this tape is not a session the engine can use, or None (A47).
+
+    A date is not a session. The engine's calendar is the regime source's own bars (§3.6;
+    `desk.load` drops every print on a day SPY.US did not trade), so a file without that bar is a
+    holiday's junk listings or an early partial post — and landing it is not harmless: the 311-row
+    Labor Day file (run 809, 2026-09-07) went green and moved `data_date` to a day no market
+    printed, and a partial file for a real session would have stood for good, because the retry
+    then exits on "already green" and nothing repairs a bar the newest tape lacked (learning 59).
+    """
+    code = engine.REGIME_SOURCE.removesuffix(".US")
+    if code in tape:
+        return None
+    return (f"the vendor's tape for {as_of!r} carries no {engine.REGIME_SOURCE} bar "
+            f"({len(tape)} rows) — the engine's calendar is {engine.REGIME_SOURCE}'s own bars "
+            f"(§3.6), so this is not a session it can use")
+
+
+def awaiting_vendor(as_of, store_date, tape=None):
     """The scheduled run's first question, answered as text: None to proceed, else why to wait.
 
     Only a scheduled run is guarded (`scheduled_run`), and only one asking for the vendor's newest
-    day — a hand dispatch means fetch, and a named date is checked against the tape it lands.
+    day — a hand dispatch means fetch, and a named date is checked against the tape it lands. A
+    newer tape that carries no regime-source bar is waited on the same way: it is not tonight's
+    session yet (`missing_regime`).
     """
-    if not scheduled_run() or TAPE_DATE or tape_advanced(as_of, store_date):
+    if not scheduled_run() or TAPE_DATE:
         return None
-    return (f"the vendor's newest tape is {as_of!r} and the store already holds {store_date}; "
-            f"today's session is not published yet — nothing written")
+    if not tape_advanced(as_of, store_date):
+        return (f"the vendor's newest tape is {as_of!r} and the store already holds {store_date}; "
+                f"today's session is not published yet — nothing written")
+    if tape is not None and (gap := missing_regime(tape, as_of)):
+        return f"{gap} — nothing written"
+    return None
+
+
+def night_already_green(cur, run_id):
+    """The scheduled firing that already landed tonight's tape, or None — the retry's exit (§4.2).
+
+    Only a SCHEDULED firing that fetched the vendor's newest day and landed it counts (A53). A hand
+    dispatch answers a person's question, not this one: a named-date repair of an older session
+    (learning 59's tool) lands rows green inside the window and says nothing about tonight, and a
+    blank-date press before the vendor posts re-upserts yesterday's tape green. Either used to
+    satisfy the retry, so after a first firing that found the vendor unpublished, neither firing
+    landed tonight's session and nothing went red — and the next night's tape then sealed it as a
+    permanent hole (learning 59). `schedule` is what the heartbeat records for a scheduled firing
+    and nothing else; `tape.requested` is null on every fetch of the newest day; and a firing that
+    waited on the vendor wrote no rows and says so in `awaiting_vendor`. A hand dispatch that DID
+    land tonight's tape is still honoured, one step later, by `tape_already_landed`.
+
+    A rolling window rather than `::date = current_date`: the two firings sit either side of 23:00
+    UTC and drift, so a calendar-day test would let a retry that crossed midnight forget the run
+    an hour before it. Four hours is an operating constant of record (§5.6, 2026-09-13): past it
+    the retry simply re-fetches, which is idempotent.
+    """
+    cur.execute("""select id from runs
+                    where job = %s and status = 'green' and not dry_run and id <> %s
+                      and started_at > now() - interval '4 hours'
+                      and detail ? 'schedule'
+                      and detail->'tape'->>'requested' is null
+                      and not (detail ? 'awaiting_vendor')
+                      and coalesce(rows_written, 0) > 0
+                    order by id desc limit 1""", (JOB, run_id))
+    row = cur.fetchone()
+    return row[0] if row else None
 
 
 def last_bars(cur):
@@ -117,12 +173,21 @@ def tape_already_landed(cur, as_of, hours=12):
     and narrower than the gap to the previous night's landing, which is the case that must stay
     red. A US market holiday reads as a late vendor to this rule and the retry goes red for it;
     the honest fix is the vendor's own exchange calendar, not one invented here.
+
+    Only the FIRST run to land that tape date counts (A53). A hand dispatch pressed before the
+    vendor posts re-upserts yesterday's tape inside the night, and read as "landed this night" it
+    turned the late-vendor red into a green exit — the same hole `night_already_green` closes. A
+    tape first landed on an earlier night is that night's, however often it is re-upserted since.
     """
-    cur.execute("""select id from runs
-                    where job = %s and not dry_run and coalesce(rows_written, 0) > 0
-                      and detail->'tape'->>'as_of' = %s
-                      and started_at > now() - (%s * interval '1 hour')
-                    order by id desc limit 1""", (JOB, str(as_of), hours))
+    cur.execute("""select r.id from runs r
+                    where r.job = %s and not r.dry_run and coalesce(r.rows_written, 0) > 0
+                      and r.detail->'tape'->>'as_of' = %s
+                      and r.started_at > now() - (%s * interval '1 hour')
+                      and not exists (select 1 from runs e
+                                       where e.job = r.job and not e.dry_run and e.id < r.id
+                                         and coalesce(e.rows_written, 0) > 0
+                                         and e.detail->'tape'->>'as_of' = r.detail->'tape'->>'as_of')
+                    order by r.id desc limit 1""", (JOB, str(as_of), hours))
     row = cur.fetchone()
     return row[0] if row else None
 
@@ -406,20 +471,11 @@ def main():
         with Heartbeat(conn, JOB, scheduled_utc=SCHEDULE_UTC) as hb:
             if SECOND_RUN:                        # §4.2: exit if the night is already green
                 with conn.cursor() as cur:
-                    # A rolling window rather than `::date = current_date`: the two firings sit
-                    # either side of 23:00 UTC and drift, so a calendar-day test would let a retry
-                    # that crossed midnight forget the run an hour before it. And a run that found
-                    # the vendor not yet published is not a green night — see `tape_advanced`.
-                    # four hours is an operating constant of record (§5.6, 2026-09-13): past it
-                    # the retry simply re-ingests the same tape, which is idempotent
-                    cur.execute("""select 1 from runs where job=%s and status='green'
-                                   and dry_run=false and started_at > now() - interval '4 hours'
-                                   and not (detail ? 'awaiting_vendor')
-                                   and id <> %s limit 1""", (JOB, hb.id))
-                    if cur.fetchone():
-                        hb.detail["skipped"] = "the night is already green"
-                        print(f"ingest-daily ({SCHEDULE_UTC}): already green — nothing to redo")
-                        return 0
+                    green = night_already_green(cur, hb.id)
+                if green:
+                    hb.detail["skipped"] = f"the night is already green — run {green} landed it"
+                    print(f"ingest-daily ({SCHEDULE_UTC}): already green — nothing to redo")
+                    return 0
 
             # before the name list is read: a currency the funnel must convert out of is a name on
             # the feed, and it backfills its history through the per-ticker pass below (§4.1)
@@ -447,7 +503,7 @@ def main():
             if TAPE_DATE and as_of != TAPE_DATE.isoformat():
                 raise RuntimeError(f"asked the vendor for {TAPE_DATE} and it answered {as_of!r} — "
                                    f"refusing to write a tape under a date it does not carry")
-            if why := awaiting_vendor(as_of, store_date):
+            if why := awaiting_vendor(as_of, store_date, tape):
                 hb.detail["tape"] = dict(rows=len(tape), as_of=as_of, requested=None)
                 if SECOND_RUN:
                     with conn.cursor() as cur:
@@ -463,12 +519,18 @@ def main():
                     # result, not a crash: the night has no tape, and the named-date dispatch
                     # (learning 59) is the repair once the vendor posts it.
                     hb.detail["awaiting_vendor"] = why
-                    raise RuntimeError(f"the retry found the vendor still unpublished — {why}. The "
-                                       f"night has no tape; repair it by hand with the `date` input "
-                                       f"once the vendor posts the session")
+                    raise RuntimeError(f"the retry found no tape to land — {why}. The night has no "
+                                       f"tape; repair it by hand with the `date` input once the "
+                                       f"vendor posts the session")
                 hb.detail["awaiting_vendor"] = why
                 print(f"ingest-daily: awaiting vendor — {why}; the retry re-fetches")
                 return 0
+            # A hand dispatch is never left waiting, but it may not land a file that is not a
+            # session either: written, it would move `data_date` to that day (A47).
+            if tape and (gap := missing_regime(tape, as_of)):
+                hb.detail["tape"] = dict(rows=len(tape), as_of=as_of,
+                                         requested=TAPE_DATE.isoformat() if TAPE_DATE else None)
+                raise RuntimeError(f"{gap} — refusing to land it")
 
             written = 0
             if not dry():
