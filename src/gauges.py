@@ -211,27 +211,50 @@ def rank_reproduces(cur, stored, mode="live"):
 
 # ---- 4. order sheet completeness & sizing arithmetic --------------------------------------------
 
+def _attested(stored):
+    """The decision `score` attested for this session, as {(ticker, action)} — or None when the
+    session carries no attestation (stored before 2026-10-06) or was scored outside live mode.
+
+    A shadow session is never compared with tickets: tickets carry no mode, so the rows for its
+    close belong to the live sheet, not to it (sheet.write_tickets).
+    """
+    detail = stored.get("detail") or {}
+    if detail.get("orders") is None or stored.get("mode") not in (None, "live"):
+        return None
+    return ({(t, "sell") for t in detail.get("sells") or ()}
+            | {(t, "buy") for t in detail.get("buys") or ()})
+
+
+def _named(pairs):
+    """Orders as Zak reads them, sells first — §3.5 executes them first."""
+    return ", ".join(f"{a.upper()} {t}"
+                     for t, a in sorted(pairs, key=lambda p: (p[1] != "sell", p[0])))
+
+
 def _sheet_without_tickets(stored):
     """No ticket on the newest sheet. Three different facts produce that row count, and until
-    2026-10-06 this gauge could not tell them apart — so it read amber on 59 of the live era's
-    first 67 nights, every one of them a quiet session with a full book, and the colour stopped
-    carrying information. §4.4's amber has to be rare enough to be read.
+    2026-10-06 this gauge could not tell them apart — so it read amber on 25 of the first 36 live
+    sessions (2026-08-14 to 10-06; 64 of 93 check runs), every one of them gate-ON with a full
+    five-name book, and the colour stopped carrying information. An amber that fires on most nights
+    is one everyone learns to read past (learning 68).
 
-    `score` now attests its decision in `engine_sessions.detail.orders` (sheet.write_session,
-    counted after apply_freeze, so it is the number of tickets write_tickets will write). Then:
+    `score` now attests its decision in `engine_sessions.detail` (sheet.write_session, counted
+    after apply_freeze, so in live mode it is what write_tickets will write). Then:
 
       decided none      green — a full book that matches the rank is the ordinary night
       decided some      red   — the sheet was decided and never written. This is the failure the
-                               old amber existed to catch, and it deserves its own colour.
-      shadow mode       green — §6.4's shadow writes no tickets by design (sheet.write_tickets)
+                               old amber existed to catch, and it deserves its own colour. The
+                               reason names the orders, because the sheet that should carry them
+                               is empty and the brief has nothing else to show.
+      shadow mode       green — sheet.write_tickets writes no tickets outside live mode, by design
       no attestation    amber — a session stored before the attestation existed; the old wording
                                stands, because the gauge still cannot tell.
     """
     detail = stored.get("detail") or {}
     decided = detail.get("orders")
     if stored.get("mode") not in (None, "live"):
-        return _gauge("sheet", "green", f"{stored.get('mode')} mode writes no tickets (§6.4); "
-                                        f"score decided "
+        return _gauge("sheet", "green", f"{stored.get('mode')} mode writes no tickets "
+                                        f"(sheet.write_tickets); score decided "
                                         f"{'?' if decided is None else decided} order(s)",
                       tickets=0, decided=decided)
     if decided is None:
@@ -244,8 +267,9 @@ def _sheet_without_tickets(stored):
                                         f"{stored.get('ranked_count')} name(s) and decided none — "
                                         f"by rule", tickets=0, decided=0)
     return _gauge("sheet", "red", f"score decided {decided} order(s) for {stored['session_date']} "
-                                  f"but no ticket exists for any of them — the sheet was decided "
-                                  f"and never written", tickets=0, decided=decided,
+                                  f"— {_named(_attested(stored))} — but no ticket exists for any "
+                                  f"of them: the sheet was decided and never written",
+                  tickets=0, decided=decided,
                   sells=detail.get("sells"), buys=detail.get("buys"))
 
 
@@ -254,7 +278,8 @@ def sheet_arithmetic(cur, stored):
 
     Three separate claims, and they fail in different ways:
 
-      completeness  a sell whose ticket is missing is a position that never leaves
+      completeness  a sell whose ticket is missing is a position that never leaves — checked
+                    against what `score` attested it decided (detail.sells / detail.buys)
       sizing        `int(nav / 5 // price)` — §3.5's own arithmetic, §3.7(4)'s rounding
       participation §3.5's 0.98 ADDV cap, "a correctness check, not a live constraint at
                     current size", which is exactly why it needs a gauge: a check that never
@@ -263,20 +288,39 @@ def sheet_arithmetic(cur, stored):
     A sizing error is RED. A quantity that does not follow from the plan's arithmetic is the single
     most expensive class of defect this repository can produce, because it does not throw.
     """
-    # Withdrawn tickets are excluded, and that is §4.3's own definition rather than a convenience.
-    # "The nightly sheet is the only source of engine orders", and a re-score that no longer stands
-    # behind a proposal cancels it — so a `cancelled` row is a record of an order that is NOT one.
-    # Counting them inflated this gauge the day the account filter landed (5 unsized buys reported
-    # against 3 real ones), and the sizing check below is worse: a stale quantity on a withdrawn
-    # ticket would go RED for failing to match §3.5's arithmetic for a sheet nobody is executing.
     cur.execute("""select ticker, action, qty, mark, rank, state, clause from tickets
-                    where session_date = %s and state not in ('cancelled', 'void')
-                    order by action, ticker""", (stored["session_date"],))
-    rows = cur.fetchall()
-    if not rows:
+                    where session_date = %s order by action, ticker""", (stored["session_date"],))
+    written = cur.fetchall()
+    if not written:
         return _sheet_without_tickets(stored)
 
-    bad, unsized = [], 0
+    # Withdrawn tickets are excluded from the ARITHMETIC, and that is §4.3's own definition rather
+    # than a convenience. "The nightly sheet is the only source of engine orders", and a re-score
+    # that no longer stands behind a proposal cancels it — so a `cancelled` row is a record of an
+    # order that is NOT one. Counting them inflated this gauge the day the account filter landed (5
+    # unsized buys reported against 3 real ones), and the sizing check below is worse: a stale
+    # quantity on a withdrawn ticket would go RED for failing to match §3.5's arithmetic for a
+    # sheet nobody is executing.
+    rows = [r for r in written if r[5] not in ("cancelled", "void")]
+
+    # Completeness, against the decision itself rather than a count: every (ticker, action) score
+    # attested must have been WRITTEN. A ticket in any state counts — a withdrawn one was written,
+    # and Zak's own sessions have cancelled tickets by hand (2026-08-17), which is his call and not
+    # a missing order. One with no row at all was decided and never written; on the sell side that
+    # is a position that never leaves. Tickets BEYOND the attestation are not failures either:
+    # write_tickets withdraws only `proposed` rows, so a ticket Zak already acted on keeps its
+    # state through a re-score that no longer proposes it.
+    attested = _attested(stored)
+    missing = attested - {(r[0], r[1]) for r in written} if attested else set()
+    if not rows and not missing:
+        if attested is None:
+            return _sheet_without_tickets(stored)
+        return _gauge("sheet", "green", f"no live tickets for {stored['session_date']}: all "
+                                        f"{len(written)} written and since withdrawn",
+                      tickets=0, withdrawn=len(written))
+    bad = [f"{_named([pair])}: decided by score and never written"
+           for pair in sorted(missing, key=lambda p: (p[1] != "sell", p[0]))]
+    unsized = 0
     nav = stored["nav"]
     for tk, action, qty, mark, rank, state, clause in rows:
         if clause not in ("fill", "rank_exit", "displaced", "gate_off", "phase0",
@@ -321,7 +365,11 @@ def sheet_arithmetic(cur, stored):
             bad.append(f"{tk}: qty {qty:g} but §3.5 gives {want} for clause {clause}")
 
     if bad:
-        return _gauge("sheet", "red", f"{len(bad)} arithmetic or completeness failure(s)",
+        # The reason carries the first failures, not just their count: the brief renders this
+        # string and nothing else from the gauge, so a count alone tells Zak something is wrong
+        # with the sheet without saying which line.
+        return _gauge("sheet", "red", f"{len(bad)} arithmetic or completeness failure(s): "
+                                      + "; ".join(bad[:3]) + ("; …" if len(bad) > 3 else ""),
                       failures=bad[:20], tickets=len(rows))
     if unsized:
         return _gauge("sheet", "amber", f"{unsized} buy ticket(s) carry no quantity — the session "

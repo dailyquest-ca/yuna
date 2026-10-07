@@ -98,10 +98,11 @@ def write_session(cur, s, mode, digest):
          json.dumps({"top": s["top"], "held": s["held"], "unranked": s["unranked"],
                      "unpriced": s["unpriced"], "nav_source": s.get("nav_source"),
                      # The decision, attested: how many orders this pass decided, and which.
-                     # `gauges.sheet_arithmetic` reads this when the sheet carries no tickets, so a
-                     # quiet night (decided none) and a failed write (decided some, wrote none)
-                     # stop wearing the same amber. `s` has already been through apply_freeze, so
-                     # this is exactly the number of tickets write_tickets will write.
+                     # `gauges.sheet_arithmetic` checks every one of them was written, so a quiet
+                     # night (decided none) and a failed write (decided some, wrote none or only
+                     # part) stop wearing the same amber. `s` has already been through
+                     # apply_freeze, so in live mode this is exactly what write_tickets will
+                     # write; shadow mode writes no tickets at all (write_tickets).
                      "orders": len(s["orders"]),
                      "sells": [o["ticker"] for o in s["orders"] if o["action"] == "sell"],
                      "buys": [o["ticker"] for o in s["orders"] if o["action"] == "buy"]})))
