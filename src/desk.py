@@ -281,7 +281,19 @@ def derived_engine_nav(cur, as_of):
       * an unpriced TFSA position — no bar, or no mark (`holding_mark`): equity would understate;
       * a stale one (`stale_holdings`): it has no decision close to be marked at (§3.5);
       * no cash anchor: §2.0 makes balances the truth and there is none;
-      * CAD cash with no FX row to convert it.
+      * CAD cash with no FX row to convert it;
+      * TFSA cash that derives below zero (A52). A TFSA cannot borrow — §2.3's facility is a
+        separate account whose draws buy VXC.TO in the NONREG — so negative cash is not a state the
+        account can be in. It is a credit the store never heard of (a dividend, a deposit, a
+        conversion) or a row on the wrong side of the anchor, and from here its size is unknown.
+        The test reads the account's TOTAL in USD, not one currency: a USD buy paid out of CAD
+        drives the USD leg negative with NAV still right, because the ledger has no row for the
+        conversion. Cash is held in cents, so it is negative once it rounds below zero to the cent.
+
+    The anchor's date and age ride in the breakdown (`cash_as_of`, `cash_age_days`, days from the
+    anchor's date to `as_of`) so they reach `engine_sessions.detail` and the score run beside the
+    number they underwrite. No age fails: the plan rules no refresh cadence, and a limit would be a
+    constant nobody ruled.
     """
     held = held_book(cur)
     equity, unpriced = marked_equity(cur, held, as_of)
@@ -312,6 +324,8 @@ def derived_engine_nav(cur, as_of):
     cash = cash_by_account(cur).get(ENGINE_ACCOUNT)
     if cash is None:
         return None, f"no balances anchor for {ENGINE_ACCOUNT} — §2.0 makes balances the truth"
+    anchored = cash.get("as_of")
+    age = (as_of - anchored).days if anchored is not None else None
     cad, usd = float(cash.get("cad") or 0), float(cash.get("usd") or 0)
     cad_in_usd = 0.0
     fx = None
@@ -323,11 +337,22 @@ def derived_engine_nav(cur, as_of):
             return None, f"{cad:,.2f} CAD cash and no USDCAD close on or before {as_of}"
         fx = float(row[0])
         cad_in_usd = cad / fx
-    nav = equity + usd + cad_in_usd
+    in_cash = usd + cad_in_usd
+    if round(in_cash, 2) < 0:
+        moved = ", ".join(f"{v:+,.2f} {k}"
+                          for k, v in sorted((cash.get("moved_since_anchor") or {}).items()))
+        return None, (f"{ENGINE_ACCOUNT} cash derives to {in_cash:,.2f} USD ({usd:,.2f} USD"
+                      + (f" + {cad:,.2f} CAD @ {fx:,.4f}" if cad else "")
+                      + f") from the anchor of {anchored} ({age} day{'' if age == 1 else 's'})"
+                      + (f", moved {moved} by the ledger since" if moved else "")
+                      + " — a TFSA cannot hold negative cash, so a credit is missing or a row is"
+                        " on the wrong side of the anchor")
+    nav = equity + in_cash
     if nav <= 0:
         return None, f"derived NAV {nav:,.2f} is not positive — nothing to size against"
     return nav, dict(source="derived", marked_equity=round(equity, 2), cash_usd=round(usd, 2),
-                     cash_cad=round(cad, 2), usdcad=fx, cash_as_of=str(cash.get("as_of") or ""))
+                     cash_cad=round(cad, 2), usdcad=fx, cash_as_of=str(anchored or ""),
+                     cash_age_days=age)
 
 
 def sheet(cur, as_of, nav):

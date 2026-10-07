@@ -157,7 +157,8 @@ def cash_by_account(cur):
     deposits, dividends and interest keep being absorbed at the next anchor, exactly as §2.0 says.
     A levered buy can drive an account's cash negative between anchors — that is the undrawn
     facility showing through, and NAV lands in the same place either way, because borrowing is
-    NAV-neutral at the moment of use.
+    NAV-neutral at the moment of use. The TFSA has no facility to show through (§2.3 draws the LOC
+    into the NONREG), which is why `desk.derived_engine_nav` refuses a negative TFSA balance.
     """
     cur.execute("""select distinct on (b.account) b.account, a.kind, b.cash, b.cash_cad,
                           b.cash_usd, b.drawn, b.credit_limit, b.total_value, b.as_of

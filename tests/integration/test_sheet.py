@@ -196,14 +196,14 @@ def test_the_config_row_supplies_the_nav_when_the_environment_does_not(db, migra
         assert nav == 187_500.0 and source["source"] == "config"
 
 
-def _engine_world(cur, days):
+def _engine_world(cur, days, *, cad=140.0, usd=16.0, anchored=None):
     """The engine's own numbers, for the derivation: two priced TFSA positions, a cash anchor,
     and an FX row."""
     cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
                    values ('N00.US','TFSA','momentum',20,40.0,'open'),
                           ('N01.US','TFSA','momentum',10,40.0,'open')""")
     cur.execute("""insert into balances (account, as_of, cash_cad, cash_usd, source)
-                   values ('TFSA', %s, 140.0, 16.0, 'test')""", (days[-1],))
+                   values ('TFSA', %s, %s, %s, 'test')""", (anchored or days[-1], cad, usd))
     cur.execute("""insert into universe (ticker,name,kind,currency,status)
                    values ('USDCAD.FOREX','USDCAD','fx','CAD','active')
                    on conflict (ticker) do nothing""")
@@ -335,6 +335,50 @@ def test_a_tsx_holding_is_judged_by_the_tsx_calendar(db, migrated):
         assert nav is None and "stale TFSA position(s): XYZ.TO" in source["why"]
 
 
+def test_a_negative_tfsa_balance_fails_closed_and_the_test_reads_the_total(db, migrated):
+    """A52. A TFSA cannot borrow — §2.3's facility is a separate account whose draws buy VXC.TO in
+    the NONREG — so cash that derives below zero is no state the account can be in: a credit the
+    store never heard of, or a row on the wrong side of the anchor, of a size nobody can know from
+    here. It flowed into NAV, and so into every NAV/5 buy, for as long as NAV stayed positive.
+
+    The test reads the account's total in USD. A USD buy paid out of CAD takes the USD leg negative
+    while NAV is right — the ledger has no row for the conversion — so -500 USD beside C$1,400
+    (US$1,000 at 1.40) is a sound account and derives; -2,000 USD beside it is not, and does not."""
+    buy = """insert into transactions (ticker, account, side, qty, price, currency, trade_date,
+                                       confirmed)
+             values ('N05.US','TFSA','buy',50,30.0,'USD',%s,true)"""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _engine_world(cur, days, cad=1_400.0, usd=1_000.0, anchored=days[-2])
+        cur.execute(buy, (days[-1],))
+        db.commit()
+        nav, source = sheet.engine_nav(cur, days[-1])
+        assert nav is not None, source
+        assert source["cash_usd"] == pytest.approx(-500.0)
+
+        cur.execute(buy, (days[-1],))
+        db.commit()
+        nav, source = sheet.engine_nav(cur, days[-1])
+        assert nav is None
+        why = source["why"]
+        assert "TFSA cash derives to -1,000.00 USD (-2,000.00 USD + 1,400.00 CAD @ 1.4000)" in why
+        assert f"anchor of {days[-2]} (1 day)" in why and "-3,000.00 USD by the ledger" in why
+
+
+def test_the_anchors_date_and_age_ride_with_the_derived_nav(db, migrated):
+    """A52. Every NAV/5 buy is sized off a cash term whose truth is a hand-written reading, and
+    nothing said how old the reading was: production's sat at 2026-08-17 for seven weeks while the
+    dividends and withholding the ledger does not model piled up behind it. No age fails — the
+    plan rules no refresh cadence — but the date and the age travel with the number."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _engine_world(cur, days, anchored=days[-31])
+        db.commit()
+        nav, source = sheet.engine_nav(cur, days[-1])
+        assert nav is not None, "an old anchor is reported, never refused"
+        assert source["cash_as_of"] == str(days[-31]) and source["cash_age_days"] == 30
+
+
 def test_shadow_and_live_are_separate_records_of_the_same_close(db, migrated):
     """§6.4 runs the pipeline live producing sheets nobody trades. The shadow's answer for a close
     must not overwrite the live answer for that close, or the comparison compares nothing."""
@@ -414,6 +458,59 @@ def test_the_job_writes_a_green_run_when_it_is_sized(db, migrated):
         status, rows = cur.fetchone()
         assert status == "green"
         assert rows == 25, "20 ranks + 5 proposals"
+
+
+def _score(migrated, days):
+    """The job as CI runs it — no ENGINE_NAV, so the NAV is derived."""
+    out = subprocess.run([sys.executable, str(ROOT / "src" / "sheet.py")],
+                         capture_output=True, text=True,
+                         env={"DATABASE_URL": migrated, "DB_SSLMODE": "disable",
+                              "AS_OF": days[-1].isoformat(), "PATH": "/usr/bin:/bin"})
+    assert out.returncode == 0, out.stdout + out.stderr
+    return out
+
+
+def test_the_anchors_age_reaches_the_session_row_and_the_score_run(db, migrated):
+    """A52: the anchor's date and age are stored where the NAV is — `engine_sessions.detail` and
+    the score run's detail — so the brief and the check read them off the night's own record."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _engine_world(cur, days, anchored=days[-8])
+    db.commit()
+    _score(migrated, days)
+    with db.cursor() as cur:
+        cur.execute("""select nav, detail->'nav_source' from engine_sessions
+                        where session_date = %s and mode = 'live'""", (days[-1],))
+        nav, stored = cur.fetchone()
+        assert nav is not None
+        assert stored["cash_as_of"] == str(days[-8]) and stored["cash_age_days"] == 7
+        cur.execute("""select status, detail->'nav_source' from runs
+                        where job = 'score' order by id desc limit 1""")
+        status, ran = cur.fetchone()
+        assert status == "green"
+        assert ran["cash_as_of"] == str(days[-8]) and ran["cash_age_days"] == 7
+
+
+def test_a_negative_balance_holds_the_buys_and_lets_the_sells_stand(db, migrated):
+    """A52 through the job: NAV is None with the reason, so `score` goes amber — a price-critical
+    amber, which holds the buys (§4.3 as amended 2026-09-14) — and the protective half of the sheet
+    is untouched (§5.4)."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",))         # rank 16: below §3.5's exit rank of 12
+        _engine_world(cur, days, cad=0.0, usd=-250.0)
+    db.commit()
+    _score(migrated, days)
+    with db.cursor() as cur:
+        cur.execute("select status, detail from runs where job='score' order by id desc limit 1")
+        status, detail = cur.fetchone()
+        assert status == "amber"
+        assert any("TFSA cash derives to -250.00 USD" in a for a in detail["amber"]), detail
+        cur.execute("""select action, ticker, qty from tickets
+                        where session_date = %s""", (days[-1],))
+        rows = cur.fetchall()
+        assert ("sell", "N15.US", 100.0) in rows, "the exit is sized from the book, not from NAV"
+        assert [q for a, _, q in rows if a == "buy"] and \
+            all(q is None for a, _, q in rows if a == "buy"), "every buy is written unsized"
 
 
 def test_a_shadow_pass_writes_no_tickets_at_all(db, migrated):
