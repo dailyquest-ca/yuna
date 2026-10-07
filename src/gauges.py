@@ -290,7 +290,7 @@ def _sheet_without_tickets(stored):
 
 def _score_hold(cur, stored):
     """The holds tonight's `score` declared — Zak's 2026-10-07 R1 (a gate that cannot be evaluated
-    on fresh data), worded by the desk.
+    on fresh data) and R2 (a held name with no bar on the decision session), worded by the desk.
 
     Read from the newest `score` run of this mode rather than from the stored session, because R1
     writes no session at all: its whole point is that nothing new is proposed, so the newest
@@ -332,7 +332,7 @@ def sheet_arithmetic(cur, stored):
     is `score`'s amber, which the freshness gauge turns into held buys — and a buy the cash could
     not reach, which is no ticket and so appears on no sheet. The brief prints the check's reasons
     and nothing of `score`'s, and both are things Zak is to be told: his ruling is that the brief
-    names the stale bar, and v1.1's that a shortfall "is reported".
+    names the stale bar and the held name, and v1.1's that a shortfall "is reported".
     """
     g = _sheet_verdict(cur, stored)
     hold = _score_hold(cur, stored)

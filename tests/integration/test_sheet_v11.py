@@ -1,4 +1,4 @@
-"""§4.1's `score` job under v1.1's §3.5 and Zak's ruling R1 of 2026-10-07, end to end — src/sheet.py
+"""§4.1's `score` job under v1.1's §3.5 and Zak's rulings of 2026-10-07, end to end — src/sheet.py
 as CI invokes it, then the record it leaves and what §4.4's check makes of that record.
 
 `test_desk_v11` pins the decisions; this pins that the job writes exactly what it decided, attests
@@ -181,3 +181,25 @@ def test_a_gate_that_cannot_be_evaluated_writes_nothing_and_says_why(db, migrate
     sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
     assert sheet_gauge["status"] == "amber" and f"printed {days[-1]}" in sheet_gauge["why"]
     assert verdict == "red"
+
+
+def test_a_held_name_with_no_bar_goes_amber_by_name_end_to_end(db, migrated):
+    """Item 6 end to end (R2). The job writes the sheet without selling or replacing the dark name,
+    attests the hold, and goes amber naming it; the tickets still match the attestation exactly
+    (item 7); and the check's sheet gauge carries the name to the brief."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N00.US", "N01.US", "N02.US", "N15.US"), cash=200_000.0)
+        cur.execute("delete from prices where ticker = 'N02.US' and d = %s", (days[-1],))
+    db.commit()
+    out = _job(migrated, days[-1], ENGINE_NAV="200000")
+    assert out.returncode == 0, out.stdout + out.stderr
+    with db.cursor() as cur:
+        status, detail = _last_score(cur)
+        assert status == "amber"
+        assert any("N02.US" in a and "keeps its slot" in a for a in detail["amber"])
+        att = _attested(cur, days[-1])
+        assert att["unbarred"] == ["N02.US"] and "N02.US" not in att["sells"] + att["buys"]
+        assert _written(cur, days[-1]) == ({(t, "sell") for t in att["sells"]}
+                                           | {(t, "buy") for t in att["buys"]})
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "amber" and "N02.US" in g["why"]

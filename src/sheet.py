@@ -27,9 +27,9 @@ already forbids new buy tickets under amber.
 
 On cash. Since v1.1 (2026-10-06) a buy is "the lesser of slot weight and deployable TFSA cash", so
 NAV alone sizes nothing: the desk reads the cash from the store whatever the NAV's source, and when
-the store cannot state it the buys are written unsized under the same amber. A hold Zak ruled on
-2026-10-07 goes amber too — a gate that cannot be evaluated on fresh data, on which nothing is
-written at all (`desk.sheet`).
+the store cannot state it the buys are written unsized under the same amber. Two holds Zak ruled
+on 2026-10-07 go amber too — a gate that cannot be evaluated on fresh data (nothing is written
+at all) and a held name with no bar on the decision session (`desk.sheet`).
 """
 import datetime as dt
 import json
@@ -121,8 +121,9 @@ def write_session(cur, s, mode, digest):
                      "sizing": s.get("sizing"),
                      "held_below": [dict(ticker=h["ticker"], rank=h.get("rank"), why=h["why"])
                                     for h in s.get("held_below") or []],
-                     # Zak's 2026-10-07 hold, the reason score went amber.
-                     "hold": s.get("hold") or []},
+                     # Zak's 2026-10-07 holds — the reason score went amber — and R2's held names
+                     # with no bar on the session, which kept their slots.
+                     "hold": s.get("hold") or [], "unbarred": s.get("unbarred") or []},
                     default=str)))
     return cur.fetchone()[0]
 
@@ -281,9 +282,9 @@ def main():
                                  frozen_at=str(froze_at) if froze_at else None,
                                  frozen_buys=s.get("frozen_buys", []))
             for why in s.get("hold") or []:
-                # Zak's 2026-10-07 hold (R1), worded by the desk. Amber even under a freeze: a gate
-                # read off stale bars is a fault in the data, not a state Zak chose, and the amber
-                # is what holds the buys (§4.3).
+                # Zak's 2026-10-07 holds (R1, R2), worded by the desk. Amber even under a freeze:
+                # a gate read off stale bars and a held name that stopped printing are faults in
+                # the data, not a state Zak chose, and the amber is what holds the buys (§4.3).
                 hb.amber(why)
             if nav is None and not frozen:
                 # `score` goes amber, and a price-critical amber holds the buys through the

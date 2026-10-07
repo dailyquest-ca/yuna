@@ -262,14 +262,18 @@ def sheet(cur, as_of, nav):
     arithmetic and its inputs ride out in `sizing`, which `score` attests and §4.4's sheet gauge
     re-derives.
 
-    A hold Zak ruled on 2026-10-07, ahead of the plan's text:
+    Two holds Zak ruled on 2026-10-07, ahead of the plan's text:
 
       R1  §3.4's gate cannot be evaluated on fresh data (`gate_unevaluable`). Nothing new is
           proposed — no buy, and no gate-off sell either: "a data outage alone never sells the
           book".
+      R2  A held name has no bar on the decision session — a rename, merger, takeover, halt or
+          vendor omission. It "is never turned into a rank exit or a refill by inference": it keeps
+          its quantity and its slot, the buys are held, and it is named until Zak records what
+          happened. A gate-off still lists it to sell (§5.4), marked unpriced.
 
-    It arrives as a sentence in `hold`, and `score` makes a hold its amber: a price-critical amber
-    holds the buys (§4.3), and nothing holds the exits.
+    Each arrives as a sentence in `hold`, and `score` makes a hold its amber: a price-critical
+    amber holds the buys (§4.3), and nothing holds the exits.
     """
     sessions, tickers, adj, raw, dv, index_px = load(cur, as_of)
     i = len(sessions) - 1
@@ -312,13 +316,16 @@ def sheet(cur, as_of, nav):
     held = {t: q for t, q in book.items() if t not in PARKED}
     col = {t: j for j, t in enumerate(tickers)}
     # Every holding's close ON the decision session, which is what a sell is marked at and what
-    # its proceeds are counted at (§3.5). None is a name that did not print there.
+    # its proceeds are counted at (§3.5). None is a name that did not print there — R2's case.
     mark_of = {t: decision_close(cur, t, sessions[i], raw[i, col[t]] if t in col else None)
                for t in held}
+    unbarred = [] if stale else [t for t in held if mark_of[t] is None]
     # A holding that has left the universe entirely — delisted, or newly excluded — has no column
     # and cannot be ranked. §3.5 queues anything below rank 12, and "not ranked at all" is below it.
+    # That holds for a name that PRINTED tonight and failed the screen; a name with no print at all
+    # is R2's, and is not ranked below anything — its rank is unknown, not bad.
     held_cols = [col[t] for t in held if t in rank_of]
-    unranked = [t for t in held if t not in rank_of]
+    unranked = [t for t in held if t not in rank_of and t not in unbarred]
 
     # §3.7(3)'s twin relation, computed from the tape and handed to `engine.orders` as a callable.
     # `bars.same_security` is the one definition — daily returns at 1e-4 with the variation floor —
@@ -333,17 +340,43 @@ def sheet(cur, as_of, nav):
     def twin_of(a, b):
         return bars.same_security(_ret(a), _ret(b))
 
+    # R2: a held name with no print keeps its slot, so the free slots are counted without it. Only
+    # the slot COUNT moves; the name itself never reaches `engine.orders`, which could otherwise
+    # only read "no rank" as "below 12".
+    room = engine.SLOTS - len(unbarred)
     if stale:
         sells, buys, unranked = [], [], []
+    elif gate_on and room < 1:
+        # Every slot is held by a name that did not print tonight: nothing can be bought, so
+        # nothing is displaced. A holding the rank still covers exits by §3.5's rule alone — the
+        # slot count passed here is one more than the book, so no swap can be computed.
+        sells, _ = engine.orders(ranked, held_cols, gate_on=True, twin_of=twin_of,
+                                 slots=len(held_cols) + 1)
+        buys = []
     else:
-        sells, buys = engine.orders(ranked, held_cols, gate_on=gate_on, twin_of=twin_of)
-    sell_tk = [tickers[j] for j in sells] + unranked
+        sells, buys = engine.orders(ranked, held_cols, gate_on=gate_on, twin_of=twin_of,
+                                    slots=room)
+    if unbarred:
+        hold.append(f"no bar on {sessions[i]} for held "
+                    + ", ".join(f"{t} ({held[t]:g} sh, newest bar {newest_bar(cur, t, as_of)})"
+                                for t in unbarred)
+                    + (" — not a rank exit and not a refill: it keeps its slot and its quantity,"
+                       " and buys are held" if gate_on else
+                       " — the gate is OFF, so it is listed to sell at the book's quantity,"
+                       " unpriced (§5.4)")
+                    + " until Zak records what happened (a rename, merger, takeover, halt or"
+                      " vendor omission). Zak, 2026-10-07")
+    # A gate-off still sells it (§5.4), at the book's quantity and with no decision close.
+    sell_tk = [tickers[j] for j in sells] + unranked + ([] if gate_on else unbarred)
 
     orders = []
     for tk in sell_tk:
         o = dict(action="sell", ticker=tk, qty=held[tk], rank=rank_of.get(tk), mark=mark_of[tk],
                  clause="gate_off" if not gate_on else "rank_exit",
                  why="gate off" if not gate_on else "rank")
+        if o["mark"] is None:
+            o["why"] = f"gate off — unpriced: no bar on {sessions[i]}"
+            o["note"] = f"unpriced: no bar on {sessions[i]} (Zak, 2026-10-07)"
         orders.append(o)
 
     # §6.5 gates the park draw on the shadow having passed. `passes` is §6.4's condition verbatim
@@ -370,9 +403,10 @@ def sheet(cur, as_of, nav):
         sizing, qty_of, draws = size_buys(
             cur, as_of, sessions[i], nav, wants,
             [(o["ticker"], o["qty"], o["mark"]) for o in orders], parked,
-            # The park pays a shortfall only once §6.5's shadow has passed; buys that could not
-            # be sized never reach the draw at all (`size_buys`).
-            may_draw=gate_on and phase0_done)
+            # The park pays a shortfall only for buys that can be acted on: never while the shadow
+            # runs (§6.5), and never beside a hold — A23's fund sell, shipped with held buys,
+            # emptied the park into cash for orders nobody could place.
+            may_draw=gate_on and phase0_done and not hold)
         for tk, px in wants:
             j = col[tk]
             addv = float(addv_row[j])
@@ -434,7 +468,7 @@ def sheet(cur, as_of, nav):
                 universe=len(tickers), ranked=len(ranked), screened=screened,
                 marked_equity=equity, unpriced=unpriced, underweight=underweight,
                 parked=sorted(parked), parked_qty=parked, phase0_done=phase0_done,
-                held=sorted(held), unranked=unranked,
+                held=sorted(held), unranked=unranked, unbarred=unbarred,
                 hold=hold, stale=stale, sizing=sizing, held_below=held_below,
                 top=[tickers[j] for j in ranked[:engine.FILL_BAND]], orders=orders,
                 ranks=[dict(ticker=tickers[j], rank=r, score=scores.get(tickers[j]),
@@ -458,6 +492,12 @@ def decision_close(cur, ticker, session, tape_close=None):
         tape_close = row[0] if row and row[0] is not None else float("nan")
     px = float(tape_close)
     return px if np.isfinite(px) and px > 0 else None
+
+
+def newest_bar(cur, ticker, as_of):
+    """The date of a name's newest bar on or before `as_of` — what a hold names it by."""
+    cur.execute("select max(d) from prices where ticker = %s and d <= %s", (ticker, as_of))
+    return cur.fetchone()[0]
 
 
 def gate_unevaluable(cur, as_of, session, pool):
@@ -574,7 +614,7 @@ def size_buys(cur, as_of, session, nav, wants, sold, parked, *, may_draw):
     is reported as held-below-weight, not funded": the buys need a slot each, and what cash and
     proceeds do not cover is drawn from a park lot in whole shares, enough to cover it and never
     more than the lot (`engine.park_draw`). It used to sell every park lot whenever anything
-    bought (A6), and beside buys that were unsized (A23), which never reach the draw now.
+    bought (A6), and beside buys that were unsized or held (A23); `may_draw` is false for those.
 
     `qty_of[ticker]` below one is a buy the cash cannot reach. It is no ticket: the sheet reports it
     as held below weight, with the reason. `sizing` carries every input and the result, for the

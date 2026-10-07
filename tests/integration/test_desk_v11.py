@@ -1,4 +1,4 @@
-"""§3.5 as v1.1 amended it (promoted 2026-10-06), and Zak's ruling R1 of 2026-10-07, against a
+"""§3.5 as v1.1 amended it (promoted 2026-10-06), and Zak's two rulings of 2026-10-07, against a
 real database — the decision, through `desk.sheet`.
 
     v1.1 §3.5  "Order size = the lesser of slot weight and deployable TFSA cash — TFSA cash on the
@@ -10,6 +10,9 @@ real database — the decision, through `desk.sheet`.
     R1         A gate that cannot be evaluated on fresh data is unevaluated: nothing new is
                proposed, buys are held, the brief names the stale bar, and a data outage alone
                never sells the book.
+    R2         A held name with no bar on the decision session is never turned into a rank exit or
+               a refill by inference: it keeps its quantity and its slot, buys are held, and it is
+               named until Zak records what happened; a gate-off still lists it to sell, unpriced.
 
 The worlds are `test_desk`'s; `_world(cash=...)` states the TFSA cash v1.1 sizes against.
 """
@@ -163,6 +166,22 @@ def test_the_park_is_not_drawn_for_buys_that_were_not_sized(db, migrated):
     assert not [o for o in s["orders"] if o["clause"] == "fund"], "and the park is not drawn"
 
 
+def test_the_park_is_not_drawn_beside_a_hold(db, migrated):
+    """A23's other shape: buys a hold has stopped. With a held name dark tonight (R2) the buys are
+    held, so the park is not sold to pay for them; they are sized to the cash and the night's
+    proceeds alone, for the record."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N00.US", "N01.US", "N02.US", "N15.US"), cash=0.0)
+        _park(cur, days)
+        _shadow_passed(cur, days)
+        cur.execute("delete from prices where ticker = 'N02.US' and d = %s", (days[-1],))
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    assert not [o for o in s["orders"] if o["clause"] == "fund"], "the park is not drawn"
+    assert s["hold"] and [o for o in s["orders"] if o["action"] == "buy"], "beside held buys"
+
+
 def test_a_gate_off_sheet_proposes_no_park_buy(db, migrated):
     """§3.4 (v1.1): "Park, interim (ruled 2026-10-06): USD cash in the TFSA — no park purchase is
     executed while OFF." So a gate-off sheet sells the book and buys nothing — not SPY.US, not
@@ -253,6 +272,48 @@ def test_a_holiday_print_by_a_name_the_engine_never_ranks_is_not_a_session(db, m
         s = desk.sheet(cur, holiday, 200_000.0)
     assert not s.get("stale") and not s.get("hold") and s["session"] == days[-1]
     assert len([o for o in s["orders"] if o["action"] == "buy"]) == 5
+
+
+def test_a_held_name_with_no_bar_keeps_its_slot_and_holds_the_buys(db, migrated):
+    """Zak, 2026-10-07 (R2): a held name with no bar on the decision session "is never turned into
+    a rank exit or a refill by inference: the name keeps its last recorded quantity and its slot,
+    buys are held, and it is named until Zak records what happened."
+
+    QC A70 and A3: it was sold in full as a rank exit — with no mark, unexecutable after a rename —
+    and its slot refilled; a halted rank-2 holding went round trip on a decision the rank never
+    made. Here N02 misses tonight's bar while N15 leaves at rank 16: N15's slot refills, and the
+    dark name's does not."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N00.US", "N01.US", "N02.US", "N15.US"), cash=200_000.0)
+        cur.execute("delete from prices where ticker = 'N02.US' and d = %s", (days[-1],))
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    assert "N02.US" not in [o["ticker"] for o in s["orders"]], "not sold, not replaced"
+    assert [o["ticker"] for o in s["orders"] if o["action"] == "sell"] == ["N15.US"]
+    assert len([o for o in s["orders"] if o["action"] == "buy"]) == 2, \
+        "five slots: N00, N01 and the dark N02 hold three, so two fill — N15's and the empty one"
+    assert s["unbarred"] == ["N02.US"] and "N02.US" not in s["unranked"]
+    assert len(s["hold"]) == 1 and "N02.US" in s["hold"][0] and "keeps its slot" in s["hold"][0]
+    assert f"newest bar {days[-2]}" in s["hold"][0]
+
+
+def test_a_gate_off_still_sells_a_held_name_with_no_bar_unpriced(db, migrated):
+    """R2's other half: "A gate-off still lists it to sell (§5.4), marked unpriced." The exit is an
+    obligation whatever the tape knows about the name; what the sheet cannot give it is a decision
+    close it does not have."""
+    with db.cursor() as cur:
+        days = _world(cur, rising=False, held=("N00.US", "N01.US"))
+        cur.execute("delete from prices where ticker = 'N01.US' and d = %s", (days[-1],))
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    sells = {o["ticker"]: o for o in s["orders"] if o["action"] == "sell"}
+    assert sorted(sells) == ["N00.US", "N01.US"]
+    assert all(o["clause"] == "gate_off" for o in sells.values())
+    assert sells["N01.US"]["qty"] == 100 and sells["N01.US"]["mark"] is None
+    assert "unpriced" in sells["N01.US"]["why"] and sells["N00.US"]["mark"] is not None
+    assert s["unbarred"] == ["N01.US"] and "listed to sell" in s["hold"][0]
 
 
 def test_a_holding_that_left_the_universe_sells_at_its_decision_close(db, migrated):
