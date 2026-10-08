@@ -793,3 +793,72 @@ def test_a_proposal_score_never_decided_is_red(db, migrated):
     assert g["status"] == "red", g
     assert any("SELL N09.US: proposed on the sheet and never decided by score" == f
                for f in g["failures"])
+
+
+# ---- the book against its ledger (QC 2026-10-07, A22; §4.4 as v1.2 words it) ------------------
+
+def _name(cur, ticker):
+    cur.execute("""insert into universe (ticker,name,kind,exchange,currency,status)
+                   values (%s,%s,'stock','US','USD','active') on conflict (ticker) do nothing""",
+                (ticker, ticker.split(".")[0]))
+
+
+def _bought(cur, ticker, qty, account="TFSA"):
+    """A broker receipt, so the ledger trigger opens the position the ordinary way."""
+    cur.execute("""insert into transactions (ticker,account,side,qty,price,currency,trade_date,
+                                             confirmed,confirmed_at,applied_at,grade,source)
+                   values (%s,%s,'buy',%s,40.0,'USD','2026-08-10',true,now(),now(),'broker',
+                           'export')""", (ticker, account, qty))
+
+
+def _attested(cur):
+    cur.execute("insert into runs (job, status, finished_at) values ('reconcile','green', now())")
+
+
+def test_a_tfsa_book_its_ledger_contradicts_is_red(db, migrated):
+    """A22. Nothing read `v_ledger_vs_book`, and a reconcile that compared nothing read green every
+    night: VXC.TO's stray NONREG row printed in seven briefs, 418 shares against the ledger's 279,
+    with every gauge quiet. In the TFSA the same break moves engine NAV and every exit quantity,
+    so it is red there and names the position."""
+    with db.cursor() as cur:
+        _name(cur, "N01.US")
+        _bought(cur, "N01.US", 100)
+        db.commit()
+        cur.execute("update book set qty = 150 where ticker = 'N01.US'")   # around the ledger
+        _attested(cur)
+        db.commit()
+        g = gauges.reconciliation_age(cur)
+    assert g["status"] == "red", g
+    assert "TFSA N01.US ledger=100 book=150" in g["why"]
+    assert "last broker statement compared: never" in g["why"]
+
+
+def test_a_break_outside_the_engine_or_with_no_ledger_history_is_amber(db, migrated):
+    """The engine neither ranks nor trades the NONREG (§2.1), so a break there is amber; a holding
+    with no ledger rows behind it at all is amber too, explained by the next export (069)."""
+    with db.cursor() as cur:
+        _name(cur, "N02.US")
+        _name(cur, "N03.US")
+        _bought(cur, "N02.US", 50, account="NONREG")
+        db.commit()
+        cur.execute("update book set qty = 60 where ticker = 'N02.US'")
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N03.US','TFSA','momentum',10,40.0,'open')""")
+        _attested(cur)
+        db.commit()
+        g = gauges.reconciliation_age(cur)
+    assert g["status"] == "amber", g
+    assert "NONREG N02.US ledger=50 book=60" in g["why"]
+    assert "TFSA N03.US ledger=0 book=10 — no ledger history behind it" in g["why"]
+
+
+def test_a_book_that_agrees_with_its_ledger_is_green_and_says_so(db, migrated):
+    with db.cursor() as cur:
+        _name(cur, "N04.US")
+        _bought(cur, "N04.US", 25)
+        _attested(cur)
+        db.commit()
+        g = gauges.reconciliation_age(cur)
+    assert g["status"] == "green", g
+    assert g["why"].startswith("the book agrees with the ledger")
+    assert g["ledger_breaks"] == [] and g["last_statement"] is None

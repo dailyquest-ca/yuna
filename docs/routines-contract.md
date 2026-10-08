@@ -11,39 +11,30 @@ now.** This file is the new contract, in the form a Routine needs it.
 
 ---
 
-## 0. Where the Routines read the law — not from this repository
+## 0. Where the Routines read the law — `v_law` (§0.7)
 
-The Routines run in the claude.ai project with no checkout of this repository. Both prompts — the
-weekday morning note and the Saturday letter — read, every run, with the Projects tool:
-`yuna_plan.md` as the law, then `runbooks/routines_contract.md`. Those are **the project's own
-copies**, not `docs/yuna_plan.md` and not this file, and the prompts quote §3's and §6's SQL
-inline. So a change here, or to the plan here, reaches a Routine only when someone carries it into
-the project copy **and** into both prompts by hand. This repository cannot see whether the project's
-contract matches this file.
+The Routines run in the claude.ai project with no checkout of this repository. Since plan v1.2
+(§0.7) they read the law the way they read the brief: from Supabase, every run.
 
-**The project's plan is not this repository's plan** (compared 2026-10-07, against the project copy
-as of 2026-10-06). The project copy is v1.1, which it records as promoted by Zak on 2026-10-06 —
-buys sized to deployable TFSA cash, an interim cash park — and `docs/yuna_plan.md` does not carry.
-It was also rewritten from a base older than the repository's, so it **lacks the three amendments
-this repository's plan carries**:
+```sql
+select document, version, left(sha256, 12) as hash, published_at, body
+  from v_law;
+```
 
-- **2026-09-02 — §5.2, the drawdown record.** Run 624's table of how often the cell of record sat
-  10–50% below its running high, the two recoveries (−60.3% on 2009-03-09 to a new high on
-  2013-09-10; −45.9% on 2025-11-21 to 2026-04-30), the rule that the brief prints them every
-  session, §5.1's "with the drawdown record beside it (§5.2)", and the §7 changelog entry.
-- **2026-09-13 — four §5.6 entries.** The 2026-08-05 operating rulings (stale means the bars; drift
-  never turns a job amber; monthly work is guarded by whether it has run); §4.4's "any red holds
-  buys" binding the check suite and the price-critical jobs, with the census's red a warning; the
-  operating constants of record (bars older than 4 days hold buys, a job's newest run within
-  36 hours is its state, lateness under 30 minutes is not printed, the retry looks back 4 hours);
-  and the census admission floors (a close ≥ $4 and ≥ $5M traded on census day).
-- **2026-09-14 — §4.3 and two §5.6 entries.** §4.3's body is back to the old line "Amber/red
-  pipeline: no new buy tickets." — so an amber from the check suite's own gauges holds buys there
-  and warns here — and the entries recording that amendment and §4.4's screen band of
-  session-to-session change are gone. The project's §5.6 keeps only the 2026-08-15 entry.
+`v_law` holds the newest published text of two documents: `plan` (`docs/yuna_plan.md` on `main`)
+and `routines-contract` (this file). The `law` job publishes them on every merge to `main` that
+changes either. **There is no other copy.** The project files `yuna_plan.md` and
+`runbooks/routines_contract.md` are retired, and a prompt never quotes the plan's text inline — it
+reads it here.
 
-Both prompts still call that file "plan v1.0". Until Zak makes one copy authoritative, a Routine
-reading its law can contradict the pipeline it reports on.
+Every brief's first line names the law it was read under — `# Yuna · 2026-10-08 · law v1.2 ·
+3f9c1a2e4b7d` — and the payload carries the same (`v_session_payload.law`). A Routine whose law
+differs from `v_law`'s version and hash is reading a copy, and says so rather than reporting on it.
+
+Why: until 2026-10-07 both prompts read project copies of the plan and of this contract. The
+project's plan had drifted. It carried v1.1, which the repository did not, and lacked the
+repository's 2026-09-02, 09-13 and 09-14 amendments. So a Routine reading its law could contradict
+the pipeline it reported on, and nothing could see it (migration 076).
 
 ---
 
@@ -186,7 +177,9 @@ once and then judges. It never recomputes a score, a rank or a gate in chat.
 Its keys carry §4.2's nine items, and they are all new:
 
 `gate` · `book` · `order_sheet` · `top12` · `exclusions` · `nav` · `facilities` · `tranches` ·
-`check_report` · `pipeline` · `reconciliation` · `learnings` · `not_orders`
+`check_report` · `pipeline` · `reconciliation` · `learnings` · `not_orders` · `law`
+
+`law` (migration 076) is the plan's published version and hash; the law's text is in `v_law` (§0).
 
 Three of them answer for tonight and nothing else (migration 068):
 

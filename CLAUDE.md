@@ -12,6 +12,8 @@ Read [`README.md`](README.md) first, then the three documents it names:
 
 Nothing joins the pipeline schedule without a plan edit. If a change would alter what runs when, that is a plan change first and a code change second.
 
+**The plan has one copy: `docs/yuna_plan.md` on `main`** (§0.7). The `law` job publishes it, with `docs/routines-contract.md`, to Supabase's append-only `law` table on every merge that changes either, and the Routines and chat sessions read `v_law`. Never keep, edit or promote a copy anywhere else; a plan change is a commit here, and its merge to `main` is the promotion Zak rules on (§0.3).
+
 ## Shared doctrine comes from two marketplaces
 
 Declared in [`.claude/settings.json`](.claude/settings.json), and they are split by what they are *about*:
@@ -34,7 +36,7 @@ keeping only its own flavour — §3.2's exact thresholds, the engine, and the r
 
 **The no-assumed-values doctrine matters more here than anywhere else in the estate.** An invented constant in a scoring threshold or a position-sizing rule does not throw. It produces a plausible number, places a real order, and costs real money. Every constant needs a source in the plan.
 
-`dq-finance` is the constants library and has a Python reader (`from dq_finance import resolve`). It is **not yet a dependency of this repo** — every entry in it is unverified, so it cannot return a value, and a private-repo git dependency would need a token in CI where all thirteen workflows currently run a plain `pip install -r requirements.txt`. Add it once entries are verified.
+`dq-finance` is the constants library and has a Python reader (`from dq_finance import resolve`). It is **not yet a dependency of this repo** — every entry in it is unverified, so it cannot return a value, and a private-repo git dependency would need a token in CI where all eleven workflows currently run a plain `pip install -r requirements.txt`. Add it once entries are verified.
 
 Destructive database and git operations are blocked by a hook; `git push`, migrations, and direct SQL prompt with an impact summary. That is intended.
 
@@ -45,7 +47,7 @@ Destructive database and git operations are blocked by a hook; `git push`, migra
 | Language | Python 3, `numpy` · `pandas` · `psycopg` |
 | Store | Supabase Postgres — universe, book, briefs, fundamentals, rulings and learnings ledgers |
 | Data | EODHD **EOD Historical Data — All World** (§4.5) — bulk and per-ticker EOD bars, FX, exchange symbol lists. The screener, fundamentals and calendar feeds left with the 2026-09 downgrade; a job that calls them gets `403` (learning 63) |
-| Compute | GitHub Actions: three scheduled workflows on four crons (the nightly and its retry, the Saturday census, the Saturday backup) and the chain that hangs off them by `workflow_run` and `needs:` in `pipeline.yml` |
+| Compute | GitHub Actions: three scheduled workflows on four crons (the nightly and its retry, the Saturday census, the Saturday backup) and the chain that hangs off them by `workflow_run` and `needs:` in `pipeline.yml`; `law` runs on merges to `main` that change the plan or the routines contract (§0.7) |
 | Tests | pytest — `tests/` unit, `tests/integration/` against local Postgres |
 
 ## Dependencies are pinned on purpose

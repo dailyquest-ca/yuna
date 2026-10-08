@@ -544,13 +544,57 @@ def _deployable_re_added(written, sizing, nav):
 
 # ---- 5. book-vs-broker reconciliation age ------------------------------------------------------
 
+def ledger_breaks(cur):
+    """§4.4 (v1.2): where `book` and the ledger disagree, as `v_ledger_vs_book` states it (069,
+    075). Returns (red, amber) — one line per position.
+
+    Red is a break in the engine's account: §3.5 sizes, marks and sells against the TFSA's book, so
+    a book the ledger contradicts there is a decision about shares that may not exist. A break in
+    another account is amber — the engine neither ranks nor trades it (§2.1) — and so is a holding
+    with no ledger history behind it at all, which the next export explains (069's
+    `predates_the_ledger`). A position held in more than one open book row is a break wherever it
+    sits; 069's index refuses a second row, so one is a write that went around it.
+
+    Found by the 2026-10-07 review (A22): nothing read this view. VXC.TO's stray NONREG row printed
+    in seven briefs, 418 shares against the ledger's 279, with every gauge quiet.
+    """
+    cur.execute("""select account, ticker, ledger_qty, book_qty, predates_the_ledger, open_rows
+                     from v_ledger_vs_book order by account, ticker""")
+    red, amber = [], []
+    for account, ticker, ledger, book, predates, rows in cur.fetchall():
+        line = (f"{account} {ticker} ledger={float(ledger or 0):g} book={float(book or 0):g}"
+                + (f" in {rows} open rows" if rows and rows > 1 else ""))
+        if predates and not (rows and rows > 1):
+            amber.append(line + " — no ledger history behind it")
+        elif account == desk.ENGINE_ACCOUNT:
+            red.append(line)
+        else:
+            amber.append(line)
+    return red, amber
+
+
+def last_statement(cur):
+    """When a broker statement was last compared with the book: the newest reconcile run that read
+    a manifest's positions, or None. §4.4 (v1.2) shows it beside the gauge and never colours it —
+    no statement feed exists, so its age measures Zak's exports, not the system's health."""
+    cur.execute("""select max(finished_at) from runs
+                    where job = 'reconcile' and not dry_run and status in ('green', 'amber')
+                      and jsonb_typeof(detail->'manifests') = 'array'
+                      and jsonb_array_length(detail->'manifests') > 0""")
+    return cur.fetchone()[0]
+
+
 def reconciliation_age(cur):
-    """How long since the book was checked against an outside witness — and what is still waiting.
+    """§4.4: does the book agree with its witnesses — the ledger every night, the broker when Zak
+    exports — and what is still waiting on a receipt?
 
     The tolerance is derived, not chosen. A ticket sits in `approved` from the moment Zak says he
     will trade it until a receipt settles it, so an approval still waiting after a LATER session has
     been scored means the loop demonstrably did not close: either the trade did not happen or the
     receipt was never read, and the book is wrong either way. That comparison needs no constant.
+
+    Book against ledger (`ledger_breaks`) is the comparison that runs every night. The broker
+    statement's age rides along uncoloured (`last_statement`).
     """
     cur.execute("select last_receipt, last_attested, awaiting_receipt, oldest_awaiting "
                 "from v_reconciliation_age")
@@ -558,6 +602,12 @@ def reconciliation_age(cur):
     detail = dict(last_receipt=str(receipt) if receipt else None,
                   last_attested=str(attested) if attested else None,
                   awaiting_receipt=awaiting, oldest_awaiting=str(oldest) if oldest else None)
+    led_red, led_amber = ledger_breaks(cur)
+    statement = last_statement(cur)
+    detail.update(ledger_breaks=led_red + led_amber,
+                  last_statement=str(statement) if statement else None)
+    seen = (f"last broker statement compared: "
+            f"{f'{statement:%Y-%m-%d}' if statement else 'never'}")
 
     # The NEWEST reconcile run, whatever it concluded. `last_attested` deliberately counts only
     # green and amber runs — it answers "when did the comparison last succeed" — so on its own it
@@ -598,9 +648,17 @@ def reconciliation_age(cur):
                       + (" · ".join(said) or run.get("fatal") or "no reason recorded"),
                       breaks=breaks[:8], refused=refused[:8], **detail)
 
+    if led_red:
+        return _gauge("reconciliation", "red",
+                      f"the {desk.ENGINE_ACCOUNT}'s book disagrees with its ledger — "
+                      + "; ".join(led_red[:8])
+                      + f" — §3.5 sizes and sells against the book · {seen}", **detail)
+    ledger_said = ((" · the book disagrees with the ledger outside the engine: "
+                    + "; ".join(led_amber[:8])) if led_amber else "")
     if attested is None:
         return _gauge("reconciliation", "amber",
-                      "the book has never been checked against the broker", **detail)
+                      "the book has never been checked against the broker" + ledger_said,
+                      **detail)
     if awaiting:
         cur.execute("select max(session_date) from engine_sessions where mode = 'live'")
         newest = cur.fetchone()[0]
@@ -610,9 +668,14 @@ def reconciliation_age(cur):
                           f"{oldest} — a session has been scored since, so the book has been "
                           f"reasoned from without knowing whether that trade happened", **detail)
         return _gauge("reconciliation", "amber",
-                      f"{awaiting} approved ticket(s) await a receipt (oldest {oldest})", **detail)
-    return _gauge("reconciliation", "green", f"last attested {attested:%Y-%m-%d %H:%M} UTC",
-                  **detail)
+                      f"{awaiting} approved ticket(s) await a receipt (oldest {oldest})"
+                      + ledger_said, **detail)
+    if led_amber:
+        return _gauge("reconciliation", "amber", ledger_said.removeprefix(" · ") + f" · {seen}",
+                      **detail)
+    return _gauge("reconciliation", "green",
+                  f"the book agrees with the ledger · last attested {attested:%Y-%m-%d %H:%M} UTC"
+                  f" · {seen}", **detail)
 
 
 # ---- 6. data freshness --------------------------------------------------------------------------

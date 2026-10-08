@@ -1,4 +1,8 @@
-"""compose — §4.2's fourth verb, first half: the pipeline writes the words down.
+"""compose — RETIRED with the old engine (§6.3, learning 66). No workflow runs it; the brief Zak
+reads is `brief.py`. Its source stays for history, as CLAUDE.md keeps the retired machine's, and
+its tests prove this file and nothing live: a fix made here reaches nobody (QC 2026-10-07, A59).
+
+The old engine's §4.2 fourth verb, first half: the pipeline writes the words down.
 
 Dispatch is a sequence, not a moment: score → check → compose → notify. This job reads the same
 one-read payload the sessions read (`v_session_payload`) and renders it **mechanically** —
