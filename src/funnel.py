@@ -25,10 +25,18 @@ produced a runs row and L0 had never been rebuilt. Now every firing writes its h
 one question instead: has this calendar month's universe been built? Unbuilt -> rebuild. Built ->
 exit green, saying so. A missed Saturday is picked up the following week rather than lost.
 
-FORCE=true rebuilds regardless (manual runs)."""
-import os, sys, json, time, urllib.request
+FORCE=true rebuilds regardless (manual runs).
+
+**Every firing also re-reads the duplicate-listing exclusions against the tape** (QC 2026-10-07,
+A51). An exclusion is membership too, and §3.2 decides each one by a fact that can change after the
+row is written: "keep the line still printing". Nothing else re-asks it — `dedupe_scan.py` guards
+only the rows it proposes, and both it and `exchange_census.py` are dispatch-only — so a row that
+keeps a dead line used to sit there for good: SGI.US was out of the universe for eight weeks behind
+a row keeping TPX.US, a line with no bar since 2025-02-14. Read-only, no vendor call, amber only."""
+import os, re, sys, json, time, urllib.request
 import psycopg
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent))
+import engine                                                             # noqa: E402
 from db import db_url, key, Heartbeat, scheduled_run
 
 DRY = os.environ.get("DRY_RUN","false").lower() in ("1","true","yes")
@@ -53,12 +61,16 @@ def month_built_at(cur):
     """The work key (ruled 2026-08-05): the timestamp of this calendar month's rebuild, or None if
     it is unbuilt.
 
-    The ledger is the key. A rebuild is a run that finished green and actually wrote rows, so a
-    dry run, a crash and this job's own skip rows all leave the month unbuilt — which is the whole
-    point: the guard asks whether the WORK happened, not whether a job ran on a particular date.
+    The ledger is the key. A rebuild is a run that finished and actually wrote rows, so a dry run,
+    a crash and this job's own skip rows all leave the month unbuilt — which is the whole point:
+    the guard asks whether the WORK happened, not whether a job ran on a particular date.
+
+    Green or AMBER. The only amber this job writes is the exclusion re-check's, which is a finding
+    about `universe_excluded` and says nothing against the rebuild beside it — counting only green
+    would make a standing flag rebuild the universe every Saturday until Zak rules on it.
     """
     cur.execute("""select started_at from runs
-                    where job = 'ingest-universe' and status = 'green' and not dry_run
+                    where job = 'ingest-universe' and status in ('green', 'amber') and not dry_run
                       and coalesce(rows_written, 0) > 0
                       and date_trunc('month', started_at at time zone 'utc')
                           = date_trunc('month', now() at time zone 'utc')
@@ -67,12 +79,112 @@ def month_built_at(cur):
     return row[0] if row else None
 
 
+# How a `duplicate_listing` row names the line kept in its place. The table has no column for the
+# keeper, so it lives in `detail`, and these are every phrasing the table holds: 041/050/056 by
+# hand ("same series as", "share-class spelling of", "same company as"), the 2026-08-13 pass
+# ("same series as", "pre-merger line of") and `dedupe_scan.py`'s writer ("same daily returns
+# as"). The first `.US` symbol after the phrase is the keeper. A row in none of these shapes is not
+# skipped: if its line prints, the re-check names it as a row it cannot read (see below).
+KEPT_LINE = re.compile(r"(?:same series as|same daily returns as|share-class spelling of|"
+                       r"same company as|pre-merger line of) ([A-Za-z0-9_.-]+?\.US)\b")
+
+
+def kept_line(detail):
+    """The line a duplicate-listing row says it keeps, or None when the row does not say."""
+    m = KEPT_LINE.search(detail or "")
+    return m.group(1) if m else None
+
+
+# §3.2's exclusion categories that describe the INSTRUMENT rather than one line's data: "non-common
+# equity (preferreds, warrants, thin share-class lines)" and "exchange test symbols". A spelling
+# twin of a preferred is a preferred, so when the kept line is out on one of these the whole group
+# is outside §3.2's universe on its own account, and which of its lines prints decides nothing.
+# A quarantine or a vendor gap is a defect of one line's data and is NOT here: a group whose kept
+# line is out on one of those can still be losing a company whose other line prints.
+INSTRUMENT_OUT = ("not_common_equity", "not_a_security")
+
+
+def reverify_exclusions(cur):
+    """§3.2, asked again of every duplicate-listing row: "keep the line still printing" (A51).
+
+    Returns (session, rows, flags): the session the question was asked on, the (excluded, kept)
+    pairs read, and one sentence per row that fails it. A row fails when its excluded line printed
+    on the session and the line it keeps did not — the shape of 041's SGI.US row, which kept TPX.US
+    eighteen months after TPX's last bar. A printing line whose row names no keeper fails too: the
+    question cannot be asked of it, and that is said rather than passed over.
+
+    No number is chosen. "Printing" is a bar ON the benchmark's newest session — the session the
+    desk ranks, on the calendar `desk.load` takes from §3.6's regime source — so the test is the
+    rule's own words, read on the night it would bite. A line that did not print cannot be the line
+    still printing, so a dead excluded line is never flagged, whatever its keeper did: when neither
+    line prints the clause does not reach the pair (056 says so of the `Q` continuations), and the
+    both-dead rows (BBBY/BYON, CWEN-A/CWENA) stay quiet. Spelling twins that print side by side
+    (GEFB/GEF-B) pass, because their keeper prints too.
+
+    A group whose kept line is out on the instrument's own account (`INSTRUMENT_OUT`) is passed
+    over, because the rule has nothing to keep. That is measured, not tidiness: HPE-P-C.US and
+    FOUR-P-A.US, both preferreds, skipped seven sessions their spelling twins printed in the year
+    to 2026-10-06 — one a Friday, 2026-10-02 — and the census would have told Zak a preferred
+    share's exclusion needed his ruling.
+    """
+    cur.execute("select max(d) from prices where ticker = %s", (engine.REGIME_SOURCE,))
+    session = cur.fetchone()[0]
+    cur.execute("select ticker, reason, detail from universe_excluded order by ticker")
+    excluded_for = {}
+    rows = []
+    for t, reason, detail in cur.fetchall():
+        excluded_for[t] = reason
+        if reason == "duplicate_listing":
+            rows.append((t, kept_line(detail)))
+    if not rows or session is None:
+        return session, rows, []
+    names = sorted({t for t, _ in rows} | {k for _, k in rows if k})
+    # one index probe per line rather than a scan of `prices`: its newest bar, and whether it
+    # carries one on the session
+    cur.execute("""select t, (select max(d) from prices where ticker = t),
+                          exists (select 1 from prices where ticker = t and d = %s)
+                     from unnest(%s::text[]) as t""", (session, names))
+    last, printed = {}, set()
+    for t, newest, on_session in cur.fetchall():
+        last[t] = newest
+        if on_session:
+            printed.add(t)
+    flags = []
+    for excluded, kept in rows:
+        if excluded not in printed or excluded_for.get(kept) in INSTRUMENT_OUT:
+            continue
+        if kept is None:
+            flags.append(f"{excluded} printed on {session} and is excluded as a duplicate listing, "
+                         f"but its row names no kept line the census can read — §3.2's 'keep the "
+                         f"line still printing' cannot be checked")
+        elif kept not in printed:
+            flags.append(f"{excluded} printed on {session} and is excluded as a duplicate of "
+                         f"{kept}, which did not (last bar {last.get(kept) or 'none'}) — §3.2 "
+                         f"keeps the line still printing; the exclusion needs Zak's ruling")
+    return session, rows, flags
+
+
 def main():
     calls=[0]
     with psycopg.connect(db_url()) as conn:
         with Heartbeat(conn, "ingest-universe", dry_run=DRY, scheduled_utc="10:23") as hb:
             hb.calls = calls
             with conn.cursor() as cur:
+                # Every firing, before the month guard: it reads the store and calls no vendor, so
+                # a Saturday that rebuilds nothing still re-asks the question. AMBER and never red —
+                # the census writes no price and its colour holds nothing (§5.6, 2026-09-13); the
+                # flag is a defect report for a ruling, not a reason to stop the desk.
+                session, rows, flags = reverify_exclusions(cur)
+                hb.detail["exclusions"] = dict(session=str(session) if session else None,
+                                               duplicate_listings=len(rows), flagged=len(flags))
+                print(f"exclusions: {len(rows)} duplicate listings re-read against the {session} "
+                      f"tape — {len(flags)} flagged")
+                for why in flags:
+                    print(f"  ⚠ {why}")
+                    hb.amber(why)
+                if rows and session is None:
+                    hb.amber(f"no {engine.REGIME_SOURCE} bar on the tape — {len(rows)} "
+                             f"duplicate-listing exclusions were not re-checked against §3.2")
                 # a hand dispatch is never guarded (the guard is against a duplicate SCHEDULED
                 # firing, never against a person — see db.scheduled_run)
                 built = month_built_at(cur) if scheduled_run() and not FORCE else None
@@ -80,12 +192,12 @@ def main():
                 # exits clean, and says which run did the work — a silent skip is what hid this
                 # job's absence for a month
                 hb.detail.update(stage="guard", rebuilt=False, month_built_at=str(built))
-                print(f"ingest-universe: green — the month's universe was built {built}; "
-                      f"nothing to do")
+                print(f"ingest-universe: the month's universe was built {built}; nothing to "
+                      f"rebuild")
                 return 0
             hb.detail["stage"] = "census"
             hb.rows = census(conn, hb, calls)
-            print(f"ingest-universe: green — {hb.rows} coarse-L0 names, {calls[0]} calls")
+            print(f"ingest-universe: {hb.rows} coarse-L0 names, {calls[0]} calls")
     return 0
 
 

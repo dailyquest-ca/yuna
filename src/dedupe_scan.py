@@ -233,6 +233,15 @@ def keeper(cur, tickers, already=frozenset()):
     return max(live, key=lambda t: (rows[t][1], rows[t][0], [-ord(c) for c in t]))
 
 
+def exclusion_detail(kept, frac, moving, shared, provenance):
+    """The `detail` this scan writes for an exclusion. Its opening words name the KEPT line, and
+    that is load-bearing: the Saturday census reads the keeper back out of this prose
+    (`funnel.kept_line`) to ask §3.2's "keep the line still printing" of every row, every week.
+    One writer, so the phrasing has one place to drift from and one test to catch it."""
+    return (f"same daily returns as {kept} ({frac:.4f} of {moving} moving sessions agree to "
+            f"{TOL:g}, over {shared} shared); {provenance}")
+
+
 def main():
     apply = os.environ.get("SCAN_APPLY", "").strip().lower() == "true"
     with connect() as conn:
@@ -369,8 +378,7 @@ def main():
                 cur.execute("""insert into universe_excluded (ticker, reason, detail)
                                values (%s, 'duplicate_listing', %s)
                                on conflict (ticker) do nothing""",
-                            (t, f"same daily returns as {k} ({f:.4f} of {mv} moving sessions agree "
-                                 f"to {TOL:g}, over {sh} shared); {prov}"))
+                            (t, exclusion_detail(k, f, mv, sh, prov)))
             conn.commit()
             print(f"\nwrote {len(fresh)} exclusions")
     return 0
