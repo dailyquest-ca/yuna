@@ -64,7 +64,20 @@ def gate_reproduces(cur, stored):
     RED on a mismatch, and this is the one gauge where red is obviously right: the gate decides
     whether the entire book sells. A stored ON against a recomputed OFF means either the tape moved
     or the latch was carried wrong, and both of those are answered by looking, not by trading.
+
+    It is also the suite's currency check, in both directions. A decision stamped AFTER the newest
+    bar was decided on bars that are gone; a newest bar LATER than the newest decision means the
+    tape advanced and no session was scored on it, so every gauge below is re-proving an old sheet
+    against itself — and with the sheet gauge green on a quiet night, nothing else would say so
+    (QC 2026-10-07, A46). Both are red: §0.4, a stale pipeline means no new tickets.
     """
+    cur.execute("select max(d) from prices where ticker = %s", (engine.REGIME_SOURCE,))
+    newest = cur.fetchone()[0]
+    if newest is not None and newest > stored["session_date"]:
+        return _gauge("gate", "red", f"the newest {engine.REGIME_SOURCE} bar is {newest}, but the "
+                                     f"newest scored session is {stored['session_date']} — the "
+                                     f"tape advanced and no session was scored on it, so this "
+                                     f"check is proving an old sheet", newest_bar=str(newest))
     cur.execute("""select d, coalesce(adj_close, close) from prices
                     where ticker = %s and d <= %s order by d""",
                 (engine.REGIME_SOURCE, stored["session_date"]))
@@ -322,6 +335,10 @@ def sheet_arithmetic(cur, stored):
            for pair in sorted(missing, key=lambda p: (p[1] != "sell", p[0]))]
     unsized = 0
     nav = stored["nav"]
+    cur.execute("""select ticker, addv from engine_ranks
+                    where session_date = %s and mode = %s and addv is not null""",
+                (stored["session_date"], stored.get("mode") or "live"))
+    addv_of = {t: float(a) for t, a in cur.fetchall()}
     for tk, action, qty, mark, rank, state, clause in rows:
         if clause not in ("fill", "rank_exit", "displaced", "gate_off", "phase0",
                           "fund", "top_up"):
@@ -360,9 +377,24 @@ def sheet_arithmetic(cur, stored):
                             where ticker = %s and account = %s and status = 'open'""",
                         (tk, stored.get("account") or "TFSA"))
             held_now = float(cur.fetchone()[0])
-            want = max(0, want - int(held_now))
+            # desk.sheet's own expression, truncated AFTER subtracting the held line. Truncating
+            # first (`want - int(held_now)`) asks one share more of every fractionally held name —
+            # ASX.US is 512.4837 — and turned a correct top-up RED (QC 2026-10-07, A8).
+            want = max(0, int(want - held_now))
         if int(qty) != want:
             bad.append(f"{tk}: qty {qty:g} but §3.5 gives {want} for clause {clause}")
+        # §3.5's participation cap, re-derived from the ADDV `score` ranked the name on. "A
+        # correctness check, not a live constraint at current size" — which is why it is checked
+        # here: a cap that never fires at this size is the one that fires silently at a larger
+        # one. Unknown liquidity is not permission (engine.participation_ok), and every buy comes
+        # from a ranked name, so a buy with no ranked ADDV is itself a failure.
+        addv = addv_of.get(tk)
+        if not engine.participation_ok(float(qty), float(mark), addv):
+            bad.append(f"{tk}: qty {qty:g} at {float(mark):g} is "
+                       + (f"{float(qty) * float(mark) / addv:.2f}x the name's ADDV "
+                          f"({addv:,.0f}); §3.5 caps an order at {engine.MAX_PARTICIPATION}x"
+                          if addv else "a buy with no ranked ADDV — its participation cannot "
+                                       "be checked against §3.5"))
 
     if bad:
         # The reason carries the first failures, not just their count: the brief renders this
