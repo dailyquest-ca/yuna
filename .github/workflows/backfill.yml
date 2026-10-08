@@ -1,14 +1,15 @@
 name: backfill
-# Dispatch-only tooling (§4.2) for the one-time deepening §4.1 sanctions: ten years of bars, a
-# trailing year of dividends, and the raw filing documents. Per-ticker history calls are the cold
-# -start exception, never the routine — the job meters the vendor's quota before spending and
-# truncates rather than dying two-thirds of the way through.
+# Dispatch-only tooling (§4.2) for the one-time deepening §4.1 sanctions: ten years of bars and a
+# trailing year of dividends. Per-ticker history calls are the cold-start exception, never the
+# routine — the job meters the vendor's quota before spending and truncates rather than dying
+# two-thirds of the way through. The filing-documents pass (`fundamentals`) is retired: §4.5's
+# product does not carry that endpoint, so it answers 403 and the run goes red naming it (A74).
 on:
   workflow_dispatch:
     inputs:
       what:
-        description: 'passes to run: bars,dividends,fundamentals,delisted'
-        default: 'bars,dividends,fundamentals'
+        description: 'passes to run: bars,dividends,delisted (fundamentals is retired: 403 on the All World plan)'
+        default: 'bars,dividends'
       years:
         description: 'bar depth in years (§4.1 window is 10)'
         default: '10'
