@@ -217,7 +217,12 @@ def cash_by_account(cur):
                                      then  t.qty * t.price - coalesce(t.fees, 0)
                                    when t.side = 'buy'
                                      then -t.qty * t.price - coalesce(t.fees, 0)
-                                   else 0 end)
+                                   -- a confirm restates a share count and a split restates the
+                                   -- shares (migration 075); neither moves money. Any other verb
+                                   -- is NaN, not 0 (learning 51), and the vocabulary constraint
+                                   -- makes it unreachable.
+                                   when t.side in ('confirm', 'split') then 0
+                                   else 'NaN'::double precision end)
                      from transactions t
                      join anchor a on a.account = t.account
                     where t.trade_date >= a.as_of

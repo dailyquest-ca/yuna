@@ -581,10 +581,18 @@ def reconciliation_age(cur):
             said.append(f"{len(breaks)} position break(s): "
                         + "; ".join(f"{b['ticker']} broker={b['broker']} book={b['book']}"
                                     for b in breaks[:8]))
-        if refused:
-            said.append(f"{len(refused)} receipt(s) the ledger refused: "
+        # Since 075 a split reconcile could not record rides in `refused` too, carrying `split`:
+        # the book may hold the pre-split count, which is the same reason to hold the buys.
+        splits = [r for r in refused if r.get("split")]
+        receipts = [r for r in refused if not r.get("split")]
+        if splits:
+            said.append(f"{len(splits)} split(s) on a held name not recorded: "
+                        + "; ".join(f"{r['account']} {r['ticker']} ({r['split']}): {r['why']}"
+                                    for r in splits[:8]))
+        if receipts:
+            said.append(f"{len(receipts)} receipt(s) the ledger refused: "
                         + "; ".join(f"{r['account']} {r['ticker']}: {r['why']}"
-                                    for r in refused[:8]))
+                                    for r in receipts[:8]))
         return _gauge("reconciliation", "red",
                       "the last reconcile went red — "
                       + (" · ".join(said) or run.get("fatal") or "no reason recorded"),
