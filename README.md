@@ -64,7 +64,7 @@ src/          ingest + compute jobs (Python); db.py holds the shared heartbeat c
 | `sheet.py` | the tape, `book`, `config.engine_nav` | `engine_sessions`, `engine_ranks`, and §4.3's tickets in state `proposed` |
 | `gauges.py` | the tape and everything `sheet` wrote | nothing but its own report row — a checker that can edit what it checks is a participant, not a witness |
 | `shadow.py` | the tape, `concentrated.py` | `shadow_attestations` — §6.4's written record |
-| `brief.py` | `v_session_payload`, one read | a composed `briefs` row: §5.1's morning brief, or §4.1's Saturday letter |
+| `brief.py` | `v_session_payload`, one read — plus the accounts' cash anchors (§2.4) and, Saturdays, the household against §1's destination | a composed `briefs` row: §5.1's morning brief, or §4.1's Saturday letter |
 | `notify.py` | composed `briefs`, `config.push_channel` | nothing but its runs row — proves the words exist before the Routines deliver them |
 | `funnel.py` (`ingest-universe`, Saturdays) | the US exchange listing and the bulk last-day tape — two calls, no screener | `universe` membership: who is listed, who is liquid, who has gone |
 | `backup.py` | the decisions — everything but the bars, the research grid and `fundamentals` | a compressed dump, committed from inside the job's own heartbeat |

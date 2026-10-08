@@ -26,8 +26,11 @@ select session_date, summary, body, at
 ```
 
 - **`body`** is the complete brief — freshness banner, gate and latch, the order sheet, the book,
-  NAV and drawdown, the levered layer, the top 12, reconciliation, learnings. Send it as-is.
-- **`summary`** is a one-liner for a push title: `gate ON · 6 order(s)`.
+  NAV and drawdown, the levered layer, account cash, the top 12, reconciliation, learnings. Send
+  it as-is.
+- **`summary`** is a one-liner for a push title: `gate ON · 6 order(s)`. The count is of ORDERS —
+  proposed and approved tickets. A ticket the engine withdrew, Zak cancelled, or Zak already
+  executed is not one; the body lists those apart, under "Not orders" (migration 068).
 - **`detail->>'engine' = 'v1'`** matters. The retired `compose.py` also writes `kind = 'nightly'`,
   and it is still dispatchable. Without this filter a Routine can pick up the old engine's row.
 
@@ -45,7 +48,15 @@ select session_date, summary, body, at
 
 Same shape, `kind = 'saturday'`. It carries §4.1's six weekly items — gate flips on record, rank
 stability across the week, drawdown, live-vs-shadow divergences, learnings, and NAV against §1's
-destination. It is composed by the chain hanging off `ingest-universe`, Saturdays.
+destination — and §3.2's exclusion table, which §3.2 says "is surfaced in the payload and the
+Saturday letter". The destination line is the household as the store holds it on the session:
+every holding at its close, every account's cash anchor carried by the ledger, less the facility
+(it used to print a `nav_snapshots` row nothing has written since 2026-08-15). It is composed by
+the chain hanging off `ingest-universe`, Saturdays.
+
+The letter does **not** carry a count of the week's sessions with the gate ON or of the week's
+orders — neither §4.1 nor this contract asks for one. A Routine that wants either has no number in
+the body to copy, and must not compute one in chat (§0.4).
 
 ---
 
@@ -74,10 +85,24 @@ never composed, which is worth saying out loud rather than swallowing.
 An interactive session — as opposed to a Routine pushing a message — reads **`v_session_payload`**
 once and then judges. It never recomputes a score, a rank or a gate in chat.
 
-Its nine keys are §4.2's list, and they are all new:
+Its keys carry §4.2's nine items, and they are all new:
 
 `gate` · `book` · `order_sheet` · `top12` · `exclusions` · `nav` · `facilities` · `tranches` ·
-`check_report` · `pipeline` · `reconciliation` · `learnings`
+`check_report` · `pipeline` · `reconciliation` · `learnings` · `not_orders`
+
+Three of them answer for tonight and nothing else (migration 068):
+
+- **`order_sheet`** is the orders: tonight's tickets in `proposed` or `approved`. **`not_orders`**
+  is the rest of tonight's tickets — withdrawn (`cancelled`, `expired`) or done (`executed`,
+  `reconciled`). Never present a `not_orders` row as something to execute.
+- **`check_report`** is the newest live, non-dry `check` that began after tonight's session row
+  was written, naming that session — or a check that died before it could name one. **Null means
+  no check has proved tonight's sheet, and buys are held.** A row with no `verdict` (a crash, a
+  pre-heartbeat death, still `running`) holds them too; only a finished green or amber verdict
+  releases them.
+- **`nav`**'s drawdown is measured on engine NAV (positions + TFSA cash, USD), not on the
+  positions alone. `nav.household` is the last `nav_snapshots` row — dated, provisional, and not
+  refreshed by any scheduled job; the Saturday letter computes the household itself.
 
 The old keys — `armed`, `queue`, `bench`, `unruled_at_the_line`, `ruled_at_the_line`,
 `escalated_awaiting_zak`, `quarantined_watchlist` — are gone. They belonged to the fundamentals

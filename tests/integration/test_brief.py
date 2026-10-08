@@ -32,6 +32,23 @@ def _score(cur, days, nav=200_000.0):
     return s
 
 
+def _check(conn, session, verdict, *, mode="live", dry_run=False, why="planted by the test"):
+    """A finished `check` row, keyed as `gauges.main` writes one: verdict, mode and session in the
+    same update, `blocks_buys` true exactly when the verdict is red. Committed on its own, so it
+    begins after the session row it checks — as the job does, which runs after `score`."""
+    detail = {"gauges": [], "verdict": verdict, "mode": mode, "session": str(session),
+              "blocks_buys": verdict == "red"}
+    if verdict != "green":
+        detail[verdict] = [why]
+    with conn.cursor() as cur:
+        cur.execute("""insert into runs (job, status, dry_run, finished_at, detail)
+                       values ('check', %s, %s, now(), %s) returning id""",
+                    (verdict, dry_run, json.dumps(detail)))
+        rid = cur.fetchone()[0]
+    conn.commit()
+    return rid
+
+
 def test_the_payload_carries_every_item_ss4_2_names(db, migrated):
     """"gate state & latch, current book with ranks, the nightly order sheet, top-12 with scores,
     the exclusion table, NAV & DD status, levered facilities & tranche schedule, pipeline
@@ -106,18 +123,21 @@ def test_the_drawdown_section_always_says_that_nothing_happens_at_a_milestone(db
     """§5.2 is the plan's most load-bearing negative: "**No mechanical intervention exists at any
     level.** Any intervention is Zak's explicit ruling in chat. This is the design, chosen with the
     three numbers in view." A brief that printed a milestone without it invites the reading that
-    the system is about to do something."""
+    the system is about to do something.
+
+    The fall is in engine NAV, the number §5.2's "engine DD" is measured on since migration 068
+    (A28); this fixture moved `marked_equity`, the positions alone, until then."""
     with db.cursor() as cur:
         days = _world(cur, held=("N15.US",))
         _score(cur, days)
         db.commit()
         # a peak, then a 35% fall
-        cur.execute("""update engine_sessions set marked_equity = 100000
+        cur.execute("""update engine_sessions set nav = 100000, marked_equity = 100000
                         where session_date = %s""", (days[-1],))
         cur.execute("""insert into engine_sessions
                          (session_date, gate_on, gate_green, universe_count, ranked_count,
-                          marked_equity, param_digest, mode)
-                       values (%s, true, true, 20, 20, 65000, 'x', 'live')""",
+                          marked_equity, nav, param_digest, mode)
+                       values (%s, true, true, 20, 20, 65000, 65000, 'x', 'live')""",
                     (days[-1] + dt.timedelta(days=1),))
         db.commit()
         text = brief.render(brief.payload(cur))
@@ -134,21 +154,22 @@ def test_the_drawdown_section_carries_the_record_beside_the_number(db, migrated)
     cell of record's sessions that sat at least 30% below their high, both recoveries, and the
     sentence that says what the record does and does not promise. At −2% it quotes the −10% share
     and says today is one of the other sessions. Every number is the plan's, none is the store's —
-    `test_brief_record.py` holds the plan and the code to the same figures."""
+    `test_brief_record.py` holds the plan and the code to the same figures. (The depth is engine
+    NAV's since migration 068, A28 — the fixture moved `marked_equity` until then.)"""
     with db.cursor() as cur:
         days = _world(cur, held=("N15.US",))
         _score(cur, days)
         db.commit()
-        cur.execute("""update engine_sessions set marked_equity = 100000
+        cur.execute("""update engine_sessions set nav = 100000, marked_equity = 100000
                         where session_date = %s""", (days[-1],))
         cur.execute("""insert into engine_sessions
                          (session_date, gate_on, gate_green, universe_count, ranked_count,
-                          marked_equity, param_digest, mode)
-                       values (%s, true, true, 20, 20, 65000, 'x', 'live')""",
+                          marked_equity, nav, param_digest, mode)
+                       values (%s, true, true, 20, 20, 65000, 65000, 'x', 'live')""",
                     (days[-1] + dt.timedelta(days=1),))
         db.commit()
         deep = brief.render(brief.payload(cur))
-        cur.execute("""update engine_sessions set marked_equity = 98000
+        cur.execute("""update engine_sessions set nav = 98000, marked_equity = 98000
                         where session_date = %s""", (days[-1] + dt.timedelta(days=1),))
         db.commit()
         shallow = brief.render(brief.payload(cur))
@@ -193,10 +214,15 @@ def test_a_red_check_ships_the_sheet_with_its_buys_held(db, migrated):
 
 
 def test_the_tranche_line_holds_when_the_gate_is_off(db, migrated):
-    """§2.3: "Each tranche requires the gate (§3.4) ON that week." """
+    """§2.3: "Each tranche requires the gate (§3.4) ON that week."
+
+    THAT week — the tranche's own. The fixture puts tranche three's planned date on the session,
+    because the rule is about the gate in the tranche's week; until 2026-10-07 (A71) this asserted
+    a 2026 tranche held by a 2024 session's gate."""
     with db.cursor() as cur:
         days = _world(cur, rising=False)
         _score(cur, days)
+        cur.execute("update levered_tranches set planned_on = %s where seq = 3", (days[-1],))
         db.commit()
         text = brief.render(brief.payload(cur))
     assert "gate **OFF**" in text
@@ -255,7 +281,11 @@ def test_dry_run_renders_and_writes_nothing(db, migrated):
 
 def test_the_saturday_letter_carries_ss4_1s_six_items(db, migrated):
     """§4.1: "Weekly: the Saturday letter (clinical: gate, rank stability, DD status, divergences,
-    learnings, NAV vs the §1 destination)." """
+    learnings, NAV vs the §1 destination)."
+
+    The household here is the store's own: one CAD cash anchor and nothing held. Until 2026-10-07
+    the letter printed the newest `nav_snapshots` row instead, which nothing scheduled writes (A50),
+    so this fixture planted the figure there."""
     with db.cursor() as cur:
         days = _world(cur)
         _score(cur, days)
@@ -263,8 +293,8 @@ def test_the_saturday_letter_carries_ss4_1s_six_items(db, migrated):
         cur.execute("""insert into engine_sessions (session_date, gate_on, gate_green,
                          universe_count, ranked_count, param_digest, mode)
                        values (%s, false, false, 20, 20, 'x', 'shadow')""", (days[-1],))
-        cur.execute("""insert into nav_snapshots (d, nav_cad, provisional)
-                       values (current_date, 250000, false)""")
+        cur.execute("""insert into balances (account, as_of, cash_cad, cash_usd, source)
+                       values ('TFSA', %s, 250000, 0, 'test')""", (days[-1],))
         db.commit()
         p = brief.payload(cur)
         text = "\n".join(brief.saturday_lines(cur, p))
@@ -302,6 +332,10 @@ def test_a_rescored_night_refreshes_the_brief_rather_than_serving_the_first_rend
         days = _world(cur)
         _score(cur, days)
     db.commit()
+    # The first render carries a completed GREEN check of the session, as `gauges.main` writes one.
+    # Until 2026-10-07 this render had no check at all and the test read that as "no hold" — but a
+    # session no check has proved holds its buys (A9), so the contrast is now green against red.
+    _check(db, days[-1], "green")
     env = {"DATABASE_URL": migrated, "DB_SSLMODE": "disable", "PATH": "/usr/bin:/bin"}
     subprocess.run([sys.executable, str(ROOT / "src" / "brief.py")], check=True,
                    capture_output=True, text=True, env=env)
@@ -549,3 +583,388 @@ def test_the_brief_is_silent_when_purpose_and_wrapper_agree(db, migrated):
         _score(cur, days)
         db.commit()
         assert brief.sleeve_lines(brief.payload(cur)) == []
+
+
+# ---- 2026-10-07: what the brief may call an order, and what may release a buy ------------------
+#
+# The QC review of 2026-10-07 found the brief rendering things no job had decided: withdrawn
+# tickets as orders (A10), a check of another session or mode as tonight's (A9), a check that never
+# finished as no reason to hold (A20), a name being sold as a slot held below weight (A25), the
+# RRSP reserve as engine capital (A69), USD figures with no currency (A55), cash as drawdown (A28),
+# a seven-week-old snapshot as the household (A50), and none of §3.2's exclusion table (A43), §2.3's
+# tranche week (A71) or §2.4's account cash (A72). Each test below pins the rule, not the render.
+
+ENV = {"DB_SSLMODE": "disable", "PATH": "/usr/bin:/bin"}
+
+
+def _compose(migrated, **extra):
+    out = subprocess.run([sys.executable, str(ROOT / "src" / "brief.py")], capture_output=True,
+                         text=True, env={**ENV, "DATABASE_URL": migrated, **extra})
+    assert out.returncode == 0, out.stdout + out.stderr
+    return out
+
+
+def test_a_withdrawn_or_executed_ticket_is_not_an_order(db, migrated):
+    """§4.3: "The nightly sheet is the only source of engine orders." Learning 57: "A withdrawn
+    proposal is not an order." On 2026-08-17 a re-score's withdrawals and a sell Zak had cancelled
+    as already executed printed as SELL and BUY lines under the sheet, counted in "6 order(s)" with
+    three live (A10). Proposed and approved are orders; the rest print apart, as what they are."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",))           # rank 16: a rank-exit sell, and five buys
+        _score(cur, days)
+        cur.execute("update tickets set state = 'cancelled' where ticker = 'N15.US'")
+        cur.execute("update tickets set state = 'reconciled' where ticker = 'N00.US'")
+        cur.execute("update tickets set state = 'approved' where ticker = 'N01.US'")
+    db.commit()
+    _check(db, days[-1], "green")
+    _compose(migrated)
+    with db.cursor() as cur:
+        p = brief.payload(cur)
+        cur.execute("select summary, body from briefs where kind = 'nightly'")
+        summary, body = cur.fetchone()
+
+    on_sheet = body.split("## Order sheet")[1].split("## Book")[0].split("## Not orders")[0]
+    assert "N15.US" not in on_sheet, "a withdrawn sell is not an order"
+    assert "N00.US" not in on_sheet, "nor is a ticket already executed"
+    assert "BUY  N01.US" in on_sheet, "an approved ticket still is"
+    assert {r["state"] for r in p["order_sheet"]} == {"proposed", "approved"}
+    assert summary == "gate ON · 4 order(s)", "the count notify sends is of orders"
+    apart = body.split("## Not orders — withdrawn or already done; do not execute")[1]
+    assert "N15.US     sell 100 — withdrawn [cancelled]" in apart.split("## Book")[0]
+    assert "N00.US     buy" in apart and "already done [reconciled]" in apart
+
+
+@pytest.mark.parametrize("shape", ["crashed", "died before its heartbeat", "still running"])
+def test_a_check_that_did_not_finish_holds_the_buys(db, migrated, shape, tmp_path):
+    """§4.4: "Any red holds buys." §4.3: "Red pipeline: no new buy tickets." A check that raised
+    (Heartbeat's red: `fatal` and a trace), died before its heartbeat (report_fail's row) or is
+    still `running` never wrote `blocks_buys` — only a finished check does — so the brief printed a
+    bare "check RED" over sized buys and compose closed green (A20). A check that has not finished
+    has proved nothing, which holds the buys exactly as a red verdict does."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+    db.commit()
+    with db.cursor() as cur:
+        if shape == "crashed":
+            cur.execute("""insert into runs (job, status, finished_at, detail)
+                           values ('check', 'red', now(), %s)""",
+                        (json.dumps({"fatal": "KeyError: 'N00.US'", "trace": "..."}),))
+        elif shape == "still running":
+            cur.execute("""insert into runs (job, status, detail)
+                           values ('check', 'running', %s)""",
+                        (json.dumps({"actions": {"run_id": "7", "attempt": "1"}}),))
+    db.commit()
+    if shape == "died before its heartbeat":             # the workflow's own autopsy step
+        tail = tmp_path / "job.out"
+        tail.write_text("ModuleNotFoundError: No module named 'numpy'\n")
+        out = subprocess.run([sys.executable, str(ROOT / "src" / "report_fail.py"), "check",
+                              str(tail)], capture_output=True, text=True,
+                             env={**ENV, "DATABASE_URL": migrated, "GITHUB_RUN_ID": "4242",
+                                  "GITHUB_RUN_ATTEMPT": "1"})
+        assert out.returncode == 0, out.stdout + out.stderr
+    with db.cursor() as cur:
+        p = brief.payload(cur)
+    line = brief.freshness_line(p)
+    assert "**buys held; exits stand**" in line.splitlines()[0], line
+    assert "BUY  N00.US" in brief.render(p), "the sheet still ships; the banner says which half"
+
+    _compose(migrated)
+    with db.cursor() as cur:
+        cur.execute("select status, detail from runs where job = 'compose' order by id desc limit 1")
+        status, detail = cur.fetchone()
+    assert status == "amber", "compose does not close green over a check that proved nothing"
+    assert any("buys held" in a for a in detail["amber"])
+
+
+def test_a_shadow_or_dry_check_does_not_speak_for_the_live_sheet(db, migrated):
+    """Tonight's live check is red. A later `engine_mode=shadow` pass and a later DRY_RUN pass both
+    come back green, and the brief read whichever `check` row was newest — so either lifted the
+    hold over the live buys (A9). Learning 67: a row that is not a fact must not decide."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+    db.commit()
+    _check(db, days[-1], "red", why="sheet: qty does not follow from §3.5")
+    _check(db, days[-1], "green", mode="shadow")
+    _check(db, days[-1], "green", dry_run=True)
+    with db.cursor() as cur:
+        line = brief.freshness_line(brief.payload(cur))
+    assert line.startswith("✗ check RED — **buys held; exits stand**"), line
+    assert "sheet: qty does not follow from §3.5" in line
+
+
+def test_a_check_of_another_session_does_not_prove_tonight(db, migrated):
+    """Last night's green is not tonight's proof. A check job that dies before it can connect leaves
+    no row at all, and the newest row was then the previous session's verdict, rendered over
+    tonight's sheet (A9)."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days[:-1])                        # last night's session
+    db.commit()
+    _check(db, days[-2], "green")
+    with db.cursor() as cur:
+        _score(cur, days)                             # tonight's, and no check of it
+    db.commit()
+    with db.cursor() as cur:
+        line = brief.freshness_line(brief.payload(cur))
+    assert line.startswith(f"✗ no check for session {days[-1]} — **buys held; exits stand**"), line
+
+
+def test_a_check_begun_before_the_rescore_does_not_prove_the_new_sheet(db, migrated):
+    """The retry chain re-scores the session, then re-checks it. The first chain's green proved the
+    sheet as it stood; once the re-score has rewritten it, that green proves nothing about what is
+    there now, and a second check that never wrote a row must not be covered for by it."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+    db.commit()
+    _check(db, days[-1], "green")
+    with db.cursor() as cur:
+        _score(cur, days)                             # `write_session` restamps created_at
+    db.commit()
+    with db.cursor() as cur:
+        line = brief.freshness_line(brief.payload(cur))
+    assert line.startswith(f"✗ no check for session {days[-1]} — **buys held"), line
+
+
+def test_a_name_tonight_sells_is_not_counted_as_held_below_weight(db, migrated):
+    """"Held below §3.5's equal weight" is about KEPT names: `engine.orders` keeps a top-12 holding
+    rather than re-buying it, so a partial line occupies a slot. A name the sheet sells tonight
+    keeps nothing. Counted, it asked Zak to rule on topping up the name the same page told him to
+    sell — WDC.US at rank 14 on 2026-10-05 — and overstated the shortfall by 108% (A25)."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",))          # rank 16: sold tonight
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','momentum',20,40.0,'open')""")   # rank 1: kept
+        _score(cur, days)
+        db.commit()
+        lines = "\n".join(brief.underweight_lines(brief.payload(cur)))
+    assert "N00.US" in lines, "the kept partial line is still reported"
+    assert "N15.US" not in lines, "the name being sold is not"
+    assert "1 slot(s) count as filled" in lines
+
+
+def test_a_gated_off_book_has_no_slot_held_below_weight(db, migrated):
+    """§3.4: "Gate OFF: the entire book sells at the next executable open." Nothing is kept, so no
+    slot is filled at any weight (A25)."""
+    with db.cursor() as cur:
+        days = _world(cur, rising=False, held=("N00.US",))
+        _score(cur, days)
+        db.commit()
+        p = brief.payload(cur)
+    assert p["gate"]["gate_on"] is False
+    assert brief.underweight_lines(p) == []
+
+
+def test_the_rrsp_reserve_is_never_called_engine_capital(db, migrated):
+    """§2.1: "RRSP | Reserve | SPMO". §2.2: "SPMO in the RRSP". §8: "Park — SPY.US, where engine
+    capital sits while gated off." The note checked the instrument before the account, so every
+    brief since the TFSA bridge was sold has told Zak the RRSP's SPMO is engine capital (A69)."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                       values ('SPMO.US','SPMO','etf','USD','active')""")
+        for d in days[-5:]:
+            cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                           values ('SPMO.US',%s,153,153,153,153,153,3000000)""", (d,))
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('SPMO.US','RRSP','reserve',107.1729,140.0,'open')""")
+        _score(cur, days)
+        db.commit()
+        lines = "\n".join(brief.book_lines(brief.payload(cur)))
+    assert "park — engine capital" not in lines
+    assert "RRSP — reserve per §2.1's table, not engine capital" in lines
+
+
+def test_engine_figures_say_they_are_usd(db, migrated):
+    """`desk.derived_engine_nav` is USD — positions at their USD closes plus TFSA cash at USDCAD —
+    and §3.5 sizes USD orders off whatever engine NAV is, override included. The brief printed it
+    with no unit beside a Saturday sentence saying NAV is CAD "throughout this system" (A55)."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        cur.execute("""update engine_sessions set detail = detail || '{"nav_source":
+                         {"source": "config"}}'::jsonb where session_date = %s""", (days[-1],))
+        db.commit()
+        p = brief.payload(cur)
+        text = brief.render(p)
+        letter = "\n".join(brief.saturday_lines(cur, p))
+    assert "engine NAV 200,000.00 USD (config.engine_nav — Zak's override, sized as USD)" in text
+    assert "engine-NAV peak of 200,000.00 USD" in text
+    assert "throughout this system" not in letter
+
+
+def test_cash_between_a_sell_and_its_buy_is_not_a_drawdown(db, migrated):
+    """§5.2: "Pager at −10% engine DD" — engine NAV, positions plus TFSA cash, the number §3.5 sizes
+    against. Measured on the positions alone, an exit whose buy is held read as a 19% fall and a
+    gate-off whose proceeds sat in cash as −100% with every milestone passed (A28)."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        cur.execute("""update engine_sessions set nav = 100000, marked_equity = 99000
+                        where session_date = %s""", (days[-1],))
+        # next session: a 19,000 exit sold, its buy held by a red check — the money is cash
+        cur.execute("""insert into engine_sessions
+                         (session_date, gate_on, gate_green, universe_count, ranked_count,
+                          marked_equity, nav, param_digest, mode)
+                       values (%s, true, true, 20, 20, 80000, 99500, 'x', 'live')""",
+                    (days[-1] + dt.timedelta(days=1),))
+        db.commit()
+        held = brief.render(brief.payload(cur))
+        # and a gate-off night: every position sold, nothing bought, the proceeds in cash
+        cur.execute("""update engine_sessions set marked_equity = 0, nav = 98000, gate_on = false
+                        where session_date = %s""", (days[-1] + dt.timedelta(days=1),))
+        db.commit()
+        gated = brief.render(brief.payload(cur))
+    assert "drawdown -0.5% from an engine-NAV peak of 100,000.00 USD" in held
+    assert "pager" not in held
+    assert "drawdown -2.0%" in gated and "milestones passed" not in gated
+
+
+def test_the_letter_measures_the_household_from_the_store_not_a_snapshot(db, migrated):
+    """§4.1: "NAV vs the §1 destination." The letter printed the newest `nav_snapshots` row, whose
+    only writer is the retired `arming.py`: one provisional 2026-08-15 snapshot of the
+    pre-liquidation book, 204,109 CAD, in seven letters running (A50). The household is every
+    holding at the session's close, every account's cash, less the facility, in CAD."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N05.US",))          # 100 shares, USD, kept at rank 6
+        _score(cur, days)
+        cur.execute("""insert into nav_snapshots (d, nav_cad, provisional)
+                       values ('2026-08-15', 204108.63, true)""")
+        cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                       values ('USDCAD.FOREX','USDCAD','fx','CAD','active')""")
+        cur.execute("""insert into prices (ticker,d,close) values ('USDCAD.FOREX',%s,1.40)""",
+                    (days[-1],))
+        cur.execute("""insert into balances (account, as_of, cash_cad, cash_usd, source)
+                       values ('TFSA', %s, 1000, 500, 'test')""", (days[-3],))
+        cur.execute("select close from prices where ticker = 'N05.US' and d = %s", (days[-1],))
+        px = cur.fetchone()[0]
+        db.commit()
+        text = "\n".join(brief.saturday_lines(cur, brief.payload(cur)))
+    house = 100 * px * 1.40 + (1000 + 500 * 1.40)
+    assert f"NAV vs the §1 destination: {house:,.0f} of 5,000,000 CAD" in text, text
+    assert "204,109" not in text, "a seven-week-old snapshot is not the household"
+
+
+def test_a_levered_draw_lands_in_the_nonreg_and_leaves_the_household_whole(db, migrated):
+    """§2.3: "Every draw purchases VXC.TO in the NONREG the same day — one draw, one purchase." The
+    ledger records the purchase and not the draw. Production, 2026-09-22: 139 VXC.TO for
+    C$11,995.70 out of a NONREG anchored at C$37.01, while the LOC's newer reading took the C$12,000
+    draw onto the debt side. Carried by trades alone the NONREG read −C$11,958.69 and the household
+    lost the draw twice (A50, A72)."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        anchor = days[-30]
+        cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                       values ('VXC.TO','VXC','etf','CAD','active')""")
+        for d in days[-5:]:
+            cur.execute("insert into prices (ticker,d,close) values ('VXC.TO',%s,86.83)", (d,))
+        cur.execute("""insert into balances (account, as_of, cash_cad, cash_usd, source) values
+                         ('TFSA', %s, 100000, 0, 'test'), ('NONREG', %s, 37.01, 0, 'test')""",
+                    (anchor, anchor))
+        cur.execute("""insert into balances (account, as_of, drawn, credit_limit, source) values
+                         ('LOC', %s, 12000, 75000, 'test'), ('LOC', %s, 24000, 58600, 'test')""",
+                    (anchor, days[-3]))
+        cur.execute("""insert into transactions (ticker, account, side, qty, price, currency,
+                                                 trade_date, confirmed)
+                       values ('VXC.TO','NONREG','buy',139,86.30,'CAD',%s,true)""", (days[-10],))
+        db.commit()
+        text = "\n".join(brief.saturday_lines(cur, brief.payload(cur)))
+    house = 100000 + 139 * 86.83 + 41.31 - 24000      # the C$41.31 the NONREG really holds
+    assert f"NAV vs the §1 destination: {house:,.0f} of 5,000,000 CAD" in text, text
+
+
+def test_the_brief_shows_each_accounts_cash_and_the_age_of_its_anchor(db, migrated):
+    """§2.4: "Cash that is not awaiting a same-week engine order sits in the account's designated
+    holding." No brief ever showed account cash: the C$584.87 the RRSP was anchored with on
+    2026-08-17 sat seven weeks unseen, and so did every anchor's age (A72). Information only — no
+    ticket is proposed for it."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        anchor = days[-30]
+        cur.execute("""insert into balances (account, as_of, cash_cad, cash_usd, source) values
+                         ('RRSP', %s, 584.87, 4.69, 'test'), ('TFSA', %s, 47.33, 1458.90, 'test')""",
+                    (anchor, anchor))
+    db.commit()
+    _check(db, days[-1], "green")
+    _compose(migrated)
+    with db.cursor() as cur:
+        cur.execute("select body from briefs where kind = 'nightly'")
+        body = cur.fetchone()[0]
+        cur.execute("select count(*) from tickets where account <> 'TFSA'")
+        assert cur.fetchone()[0] == 0, "information, never a ticket"
+    assert "## Cash (§2.4" in body
+    rrsp = [ln for ln in body.split("## Cash (§2.4")[1].splitlines() if ln.startswith("  RRSP")][0]
+    assert "584.87 CAD" in rrsp and "4.69 USD" in rrsp
+    assert f"anchor {anchor}, 29 days before this session" in rrsp
+
+
+def test_the_saturday_letter_surfaces_the_exclusion_table(db, migrated):
+    """§3.2: "The live table is surfaced in the payload and the Saturday letter." It was in the
+    payload and in no letter: SGI.US, a live common stock, was excluded to "keep TPX" — a line whose
+    last bar is 2025-02-14 — and seven letters went by without the row (A43). Every row prints, with
+    the excluded line's own last bar beside its reason: §3.2 keeps "the line still printing"."""
+    with db.cursor() as cur:
+        days = _world(cur, excluded=("N19.US",))
+        _score(cur, days)
+        db.commit()
+        text = "\n".join(brief.saturday_lines(cur, brief.payload(cur)))
+    assert "exclusions (§3.2 — the live table, 1 row(s)" in text
+    assert f"N19.US       duplicate_listing  last bar {days[-1]} · planted by the test" in text
+
+
+def test_a_drawn_tranche_does_not_print_its_planned_amount_as_drawn(db, migrated):
+    """`levered_tranches.amount_cad` is the PLAN's figure; the ladder has no column for what was
+    drawn. Printed as drawn, two C$12,000 draws read as C$25,000 one line below a facility drawn
+    24,000.00 (A71)."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        cur.execute("""update levered_tranches set status = 'drawn', drawn_on = '2026-08-16'
+                        where seq = 1""")
+        db.commit()
+        text = "\n".join(brief.tranche_lines(brief.payload(cur)))
+    assert "tranche 1: $12,500 — drawn" not in text
+    assert "tranche 1: drawn 2026-08-16 against a planned $12,500" in text
+
+
+def test_tonights_gate_opens_a_tranche_only_in_its_own_week(db, migrated):
+    """§2.3: "Each tranche requires the gate (§3.4) ON that week; a skipped tranche shifts one
+    month." THAT week is the tranche's. The brief printed "gate ON this week" against every planned
+    tranche whenever tonight's gate was ON — a month early, or after its week had passed with the
+    gate OFF and §2.3 had already moved it on (A71)."""
+    with db.cursor() as cur:
+        days = _world(cur)                            # gate ON
+        _score(cur, days)
+        s = days[-1]
+        for seq, planned in ((1, s + dt.timedelta(days=28)), (2, s - dt.timedelta(days=28)),
+                             (3, s)):
+            cur.execute("update levered_tranches set planned_on = %s where seq = %s",
+                        (planned, seq))
+        db.commit()
+        lines = brief.tranche_lines(brief.payload(cur))
+    one, two, three = (next(ln for ln in lines if ln.startswith(f"  tranche {k}:"))
+                       for k in (1, 2, 3))
+    assert "has not come" in one and "gate ON this week" not in one
+    assert "has passed undrawn" in two and "skipped tranche shifts one month" in two
+    assert "Zak's to record" in two
+    assert "this is its planned week and the gate is ON" in three
+
+
+def test_never_two_tranches_in_one_month(db, migrated):
+    """§2.3: "never two tranches in one month." A tranche planned in the month another was drawn is
+    held, whatever the gate says (A71)."""
+    with db.cursor() as cur:
+        days = _world(cur)                            # gate ON
+        _score(cur, days)
+        s = days[-1]
+        cur.execute("""update levered_tranches set status = 'drawn', drawn_on = %s
+                        where seq = 2""", (s,))
+        cur.execute("update levered_tranches set planned_on = %s where seq = 3", (s,))
+        db.commit()
+        lines = brief.tranche_lines(brief.payload(cur))
+    three = next(ln for ln in lines if ln.startswith("  tranche 3:"))
+    assert f"held: §2.3 — never two tranches in one month; tranche 2 was drawn {s}" in three
