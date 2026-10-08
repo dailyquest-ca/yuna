@@ -838,12 +838,25 @@ def exclusion_lines(p):
     return out
 
 
+def law_name(law):
+    """The law this brief was read under, as its header names it: "law v1.2 · 3f9c1a2e4b7d".
+
+    §0.7: the plan on `main` is the only copy, published by the `law` job and carried in the
+    payload (076). A Routine or a session quoting any other version is visibly reading another
+    copy. Before the first publication there is nothing to name, and the header says so rather
+    than guessing at a version.
+    """
+    if not law or not law.get("hash"):
+        return "law unpublished (§0.7)"
+    return f"law {law.get('version') or '?'} · {law['hash']}"
+
+
 def render(p, frozen=False, words=None, cash=None, splits=None):
     """The brief. `cash` is `account_cash`'s read, passed in by `main` because the payload does not
     carry it; without it the cash section is left out rather than printed empty. `splits` is
     `recorded_splits`' read, passed in the same way."""
     g = p["gate"] or {}
-    out = [f"# Yuna · {g.get('session_date') or 'no session'}", ""]
+    out = [f"# Yuna · {g.get('session_date') or 'no session'} · {law_name(p.get('law'))}", ""]
     if frozen:
         # Above the freshness line, because it governs everything below it. §5.5 is Zak's word and
         # the brief repeats it back to him rather than paraphrasing — a freeze lifted "only by

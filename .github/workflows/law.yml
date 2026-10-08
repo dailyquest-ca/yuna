@@ -1,0 +1,47 @@
+name: law
+# §0.7 (plan v1.2): the plan and the routines contract on `main` are the only copies of the law, and
+# this job is how every reader gets them. On each push to `main` that changes either file it
+# appends the new text, its SHA-256, the plan's version and the commit to Supabase's append-only
+# `law` table (src/law.py, migration 076); sessions and Routines read `v_law`, and the brief prints
+# the version it was read under. Not on a clock: the law changes when Zak promotes it, and a merge
+# to `main` is the promotion. A dispatch publishes whatever `main` holds, and writes nothing when
+# the published text already matches.
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/yuna_plan.md
+      - docs/routines-contract.md
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'say what would be published and write nothing'
+        default: 'false'
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: yuna-writes
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - name: publish the law
+        id: work
+        run: set -o pipefail; python src/law.py 2>&1 | tee /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      - name: autopsy on failure
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
+        run: python src/report_fail.py law /tmp/job.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
