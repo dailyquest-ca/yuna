@@ -138,14 +138,24 @@ def get(path, calls, tries=3, timeout=90, **params):
             raise
 
 
+# When a session opens, as a fact of the market rather than a parameter: 09:30 New York time on
+# every exchange this book trades — NYSE and Nasdaq for the `.US` names, the TSX for VXC.TO — with
+# America/New_York carrying the DST change (13:30 UTC in summer, 14:30 UTC in winter). §4.3 has Zak
+# execute market orders at the open, and a market order does not fill before it. That makes the open
+# the one LOWER bound the store holds on when a fill happened, and `cash_by_account` orders an
+# anchor against a same-day fill by it.
+SESSION_OPEN = "09:30"
+SESSION_TZ = "America/New_York"
+
+
 def cash_by_account(cur):
-    """Per-account cash by currency: Sunday's anchor, carried forward by the ledger.
+    """Per-account cash by currency: the newest anchor, carried forward by the ledger.
 
     §2.0 — **balances are truth, prices are the extrapolation** — and §2.0 again, on the other
     side of the same coin: a ticket "is only written if that account holds the cash", and cash
     "includes unsettled proceeds of same-account sells". Money moves when a fill happens. The
-    anchor is a Sunday reading, so a fill after it has already moved the real cash and the anchor
-    has not caught up: the ledger is what carries it forward.
+    anchor is a reading taken at one moment, so a fill after it has already moved the real cash and
+    the anchor has not caught up: the ledger is what carries it forward.
 
     Found the day four 2026-08-04 fills were reconciled. The book gained NUE and RS while the cash
     that bought them sat untouched in an anchor dated the 3rd, and NAV read 8.1% high — C$17,937
@@ -153,30 +163,55 @@ def cash_by_account(cur):
     reconciliation the two errors cancelled, which is the least comfortable way for a number to be
     right.
 
+    **Which fills are after the reading** (A30). A fill dated after the anchor's `as_of` is after
+    it; one dated before is inside it. A fill dated ON the anchor's date is the hard case, because
+    the question needs a time and neither side carries the one it needs: `trade_date` is a date,
+    `confirmed_at` and `applied_at` are when the ROW was written (the 2026-08-17 SPMO buys were
+    recorded on the 20th), and `recorded_at` is when the reading was written, not when it was
+    taken. Two upper bounds cannot order two events. One lower bound exists — no fill precedes its
+    session's open (SESSION_OPEN) — so a reading WRITTEN before its own date's open was TAKEN
+    before every fill of that date, and those fills count. That is the case that costs money: cash
+    stated before the open and spent at it, where the date alone took the buy to be inside the
+    reading — so the money counted twice, once as cash and once as the stock it bought.
+
+    Any other same-day fill cannot be ordered from the store. It is taken as inside the reading,
+    as it always was — a post-trade screenshot dated the day of the trades is right that way, and
+    the 2026-08-17 anchor is one — but it is no longer assumed in silence: `same_day_assumed_inside`
+    names how many fills rest on that reading of the date and what they move, per currency.
+
     A buy takes its own currency out, a sell puts it back, fees on both. Nothing else is modelled:
     deposits, dividends and interest keep being absorbed at the next anchor, exactly as §2.0 says.
     A levered buy can drive an account's cash negative between anchors — that is the undrawn
     facility showing through, and NAV lands in the same place either way, because borrowing is
-    NAV-neutral at the moment of use.
+    NAV-neutral at the moment of use. The TFSA has no facility to show through (§2.3 draws the LOC
+    into the NONREG), which is why `desk.derived_engine_nav` refuses a negative TFSA balance.
     """
     cur.execute("""select distinct on (b.account) b.account, a.kind, b.cash, b.cash_cad,
-                          b.cash_usd, b.drawn, b.credit_limit, b.total_value, b.as_of
+                          b.cash_usd, b.drawn, b.credit_limit, b.total_value, b.as_of,
+                          b.recorded_at
                    from balances b join accounts a on a.code=b.account
                    order by b.account, b.as_of desc, b.id desc""")
     bal = {r[0]: dict(kind=r[1], cash=r[2], cad=r[3], usd=r[4], drawn=r[5], limit=r[6],
-                      total=r[7], as_of=r[8]) for r in cur.fetchall()}
+                      total=r[7], as_of=r[8], recorded_at=r[9]) for r in cur.fetchall()}
 
-    # only movement the anchor cannot already contain — strictly after its date, and only the two
-    # sides that are cash. `confirm` rows are R4 restating a share count and move no money.
+    # Only movement the anchor cannot already contain, and only the two sides that are cash.
+    # `confirm` rows are R4 restating a share count and move no money. `after_reading` is the
+    # ordering in the docstring: a later date, or the anchor's own date when the reading was
+    # written before that date's open. Same-day rows it cannot order are returned too — they are
+    # reported, never counted.
     #
     # `superseded_by is null` since migration 059. When the bank's export lands for a trade Zak had
     # already described in chat, the stated row STAYS (§0.6) and stops counting — counting both
     # would take the cost of one purchase out of the account twice, which is a NAV error in the
     # direction that blocks a real trade for want of funds that are there.
     cur.execute("""with anchor as (
-                     select distinct on (account) account, as_of from balances
+                     select distinct on (account) account, as_of,
+                            recorded_at < ((as_of + %s::time) at time zone %s) as before_open
+                       from balances
                       order by account, as_of desc, id desc)
                    select t.account, coalesce(t.currency, 'USD'),
+                          t.trade_date > a.as_of or a.before_open as after_reading,
+                          count(*) filter (where t.side in ('buy', 'sell')),
                           sum(case when t.side = 'sell'
                                      then  t.qty * t.price - coalesce(t.fees, 0)
                                    when t.side = 'buy'
@@ -184,12 +219,17 @@ def cash_by_account(cur):
                                    else 0 end)
                      from transactions t
                      join anchor a on a.account = t.account
-                    where t.trade_date > a.as_of
+                    where t.trade_date >= a.as_of
                       and t.superseded_by is null
-                    group by 1, 2""")
-    since = {}
-    for acct, ccy, delta in cur.fetchall():
-        since.setdefault(acct, {})[ccy] = float(delta or 0)
+                    group by 1, 2, 3""", (SESSION_OPEN, SESSION_TZ))
+    since, unordered = {}, {}
+    for acct, ccy, after_reading, fills, delta in cur.fetchall():
+        if after_reading:
+            since.setdefault(acct, {})[ccy] = float(delta or 0)
+        elif fills:
+            u = unordered.setdefault(acct, dict(fills=0, net={}))
+            u["fills"] += fills
+            u["net"][ccy] = round(float(delta or 0), 2)
 
     out = {}
     for acct, b in bal.items():
@@ -199,11 +239,12 @@ def cash_by_account(cur):
         else:
             # the deprecated single column, kept readable for rows written before migration 016
             cad, usd = float(b.get("cash") or 0), 0.0
-        out[acct] = dict(kind=b["kind"], as_of=b["as_of"], drawn=b["drawn"], limit=b["limit"],
-                         total=b["total"],
+        out[acct] = dict(kind=b["kind"], as_of=b["as_of"], recorded_at=b["recorded_at"],
+                         drawn=b["drawn"], limit=b["limit"], total=b["total"],
                          cad=cad + moved.get("CAD", 0.0), usd=usd + moved.get("USD", 0.0),
                          anchored_cad=cad, anchored_usd=usd,
-                         moved_since_anchor={k: round(v, 2) for k, v in moved.items() if v})
+                         moved_since_anchor={k: round(v, 2) for k, v in moved.items() if v},
+                         same_day_assumed_inside=unordered.get(acct))
     return out
 
 

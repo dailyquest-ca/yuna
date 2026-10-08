@@ -24,9 +24,17 @@ import fixtures as world                                                  # noqa
 YESTERDAY = dt.date.today() - dt.timedelta(days=1)
 
 
-def anchor(cur, *, cad=10_000.0, usd=50_000.0, as_of=YESTERDAY, account="TFSA"):
-    cur.execute("""insert into balances (account, as_of, cash_cad, cash_usd, source)
-                   values (%s,%s,%s,%s,'test')""", (account, as_of, cad, usd))
+def anchor(cur, *, cad=10_000.0, usd=50_000.0, as_of=YESTERDAY, account="TFSA",
+           recorded_at=None):
+    cur.execute("""insert into balances (account, as_of, cash_cad, cash_usd, source, recorded_at)
+                   values (%s,%s,%s,%s,'test',coalesce(%s::timestamptz, now()))""",
+                (account, as_of, cad, usd, recorded_at))
+
+
+def utc(d, hour):
+    """`d` at `hour`:00 UTC. The regular session opens at 09:30 New York time — 13:30 UTC under
+    daylight time, 14:30 UTC under standard time — so an hour in UTC lands on a known side of it."""
+    return dt.datetime.combine(d, dt.time(hour, 0), tzinfo=dt.timezone.utc)
 
 
 def fill(cur, *, side, qty, price, ccy="USD", when=None, account="TFSA", fees=0):
@@ -84,14 +92,61 @@ def test_a_sell_puts_the_proceeds_back(db):
 
 
 def test_a_fill_the_anchor_already_saw_is_not_counted_twice(db):
-    """Zak reads the balance off Wealthsimple on Sunday; anything up to that date is already in it.
-    Double-counting would be the same defect with the sign flipped."""
+    """Zak reads the balance off Wealthsimple after the day's trades; anything up to that date is
+    already in it. Double-counting would be the same defect with the sign flipped.
+
+    The reading is written after the close on purpose, and that line is the only change since A30.
+    The time a reading was written is now part of how it is ordered against that day's fills — one
+    written before its date's open precedes all of them — so leaving it at `now()` made this test's
+    answer depend on the hour it ran: before 13:30 UTC the buy below is correctly counted."""
+    today = dt.date.today()
     with db.cursor() as cur:
-        anchor(cur, as_of=dt.date.today())
-        fill(cur, side="buy", qty=10, price=419.83, when=dt.date.today())
+        anchor(cur, as_of=today, recorded_at=utc(today, 22))
+        fill(cur, side="buy", qty=10, price=419.83, when=today)
         fill(cur, side="buy", qty=10, price=419.83, when=YESTERDAY)
     db.commit()
     assert cash(db)["usd"] == pytest.approx(50_000)
+
+
+def test_a_reading_written_before_the_open_holds_none_of_that_days_fills(db):
+    """A30. Zak states his cash before the open, then trades at it. The session writes the reading
+    dated today, and the date alone read today's buy as already inside it — so the money that paid
+    for the buy stayed in the account, NAV read high by the whole fill, and every NAV/5 slot was
+    sized off cash that was gone, until somebody wrote another anchor.
+
+    No fill precedes its session's open (§4.3 — market orders at the open), so a reading written
+    before the open was taken before every fill of that date. 14:00 UTC on a January session is
+    09:00 in New York, half an hour before it."""
+    winter = dt.date(2026, 1, 15)                          # a Thursday, standard time
+    with db.cursor() as cur:
+        anchor(cur, as_of=winter, recorded_at=utc(winter, 14))
+        fill(cur, side="buy", qty=10, price=419.83, when=winter)
+    db.commit()
+    c = cash(db)
+    assert c["usd"] == pytest.approx(50_000 - 4_198.30), "the buy came after the reading"
+    assert c["moved_since_anchor"] == {"USD": pytest.approx(-4_198.30)}
+    assert c["same_day_assumed_inside"] is None, "nothing on that date is left unordered"
+
+
+def test_a_same_day_fill_the_store_cannot_order_is_named_rather_than_assumed(db):
+    """A30, the other side. 14:00 UTC on a July session is 10:00 in New York — after the open — and
+    the store cannot say whether the reading was taken before the buy or after it: `trade_date` is a
+    date, and `recorded_at`, `confirmed_at` and `applied_at` are only when rows were written. The
+    fill stays inside the reading, as before — a post-trade screenshot dated the day of the trades
+    is right that way, and 2026-08-17's is one — but the assumption is now stated, with its size.
+
+    Together with the January test this pins the clock as New York's: a fixed 13:30 UTC open would
+    get January wrong, and a fixed 14:30 UTC open would get this one wrong."""
+    summer = dt.date(2026, 7, 16)                          # a Thursday, daylight time
+    with db.cursor() as cur:
+        anchor(cur, as_of=summer, recorded_at=utc(summer, 14))
+        fill(cur, side="buy", qty=10, price=419.83, when=summer)
+        fill(cur, side="buy", qty=1, price=100.0, when=summer - dt.timedelta(days=1))
+    db.commit()
+    c = cash(db)
+    assert c["usd"] == pytest.approx(50_000), "an unordered fill is not counted"
+    assert c["same_day_assumed_inside"] == {"fills": 1, "net": {"USD": pytest.approx(-4_198.30)}}, \
+        "only the anchor's own date is unordered; the day before is inside the reading by date"
 
 
 def test_a_quantity_confirmation_moves_no_money(db):
