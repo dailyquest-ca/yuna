@@ -167,6 +167,18 @@ def write_tickets(cur, s, mode="live"):
     the previous pass proposed and no longer stands behind. The row stays, because "the engine
     proposed this and then withdrew it" is a fact §6.4's shadow has to be able to read.
 
+    **And tonight's sheet supersedes every earlier one** (A57). §4.3 makes the nightly sheet "the
+    only source of engine orders", and §3.5 cancels an entry that found no print rather than
+    retrying it — so an older session's proposal still sitting in `proposed` is not an order. It
+    is withdrawn the same way, by state, noted "superseded by session <tonight>". This used to
+    stop at tonight's own session, and 27 August proposals sat `proposed` for six weeks, where
+    `reconcile` would have linked a future receipt for the same name to the oldest of them. A
+    proposal Zak has already acted on is left alone: one carrying a fill, or with a ledger row
+    behind it, is a receipt waiting to be read, not a stale proposal — and a receipt that names a
+    superseded ticket still advances it to `executed` (`reconcile.apply_unapplied`). Idempotent:
+    a second pass finds nothing left in `proposed` to supersede. The second count returned covers
+    both kinds of withdrawal.
+
     **Shadow mode writes no tickets at all**, and that is a correctness fix rather than a policy.
     `engine_sessions` and `engine_ranks` are keyed by (session, mode); tickets are keyed by
     (session, ticker, action) because §4.3 makes the sheet "the only source of engine orders" and a
@@ -202,7 +214,15 @@ def write_tickets(cur, s, mode="live"):
                           note = coalesce(note,'') || ' | withdrawn: not on the re-scored sheet'
                     where session_date = %s and state = 'proposed' and not (id = any(%s))""",
                 (s["session"], written))
-    return len(written), cur.rowcount
+    withdrawn = cur.rowcount
+    # ...and neither is a proposal an EARLIER sheet made, unless Zak has acted on it (see above).
+    cur.execute("""update tickets k set state = 'cancelled', updated_at = now(),
+                          note = coalesce(k.note,'') || %s
+                    where k.session_date < %s and k.state = 'proposed'
+                      and k.fill_qty is null and k.fill_price is null
+                      and not exists (select 1 from transactions t where t.ticket_id = k.id)""",
+                (f" | superseded by session {s['session']}", s["session"]))
+    return len(written), withdrawn + cur.rowcount
 
 
 def main():

@@ -565,3 +565,93 @@ def test_a_shadow_pass_writes_no_tickets_at_all(db, migrated):
         cur.execute("""select id, state from tickets where session_date = %s order by id""",
                     (days[-1],))
         assert cur.fetchall() == before, "the live sheet is untouched, in both directions"
+
+
+def _proposal(cur, session, ticker, *, state="proposed", qty=40, fill=None):
+    cur.execute("""insert into tickets (session_date, ticker, account, sleeve, action, clause,
+                                        order_type, qty, state, fill_qty, fill_price, fill_date)
+                   values (%s,%s,'TFSA','momentum','buy','fill','market',%s,%s,%s,%s,%s)
+                   returning id""",
+                (session, ticker, qty, state, fill, 41.0 if fill else None,
+                 session if fill else None))
+    return cur.fetchone()[0]
+
+
+def _state(cur, tid):
+    cur.execute("select state, note from tickets where id = %s", (tid,))
+    return cur.fetchone()
+
+
+def test_tonights_sheet_supersedes_every_earlier_proposal(db, migrated):
+    """QC 2026-10-07, A57. §4.3: "The nightly sheet is the only source of engine orders", and §3.5
+    cancels an entry that found no print rather than retrying it. `write_tickets` withdrew only its
+    own session's stale proposals, so 27 from 2026-08-14..26 sat `proposed` for six weeks — where
+    `reconcile` would have linked a receipt to the oldest of them.
+
+    Tonight's sheet now withdraws every earlier proposal, by state, saying which session superseded
+    it — except one Zak has already acted on (a fill on it, or a ledger row behind it), and except
+    his `approved` word, which only a receipt moves. Idempotent, and nothing that reads tonight's
+    sheet — the payload's order sheet, the sheet gauge — sees any of it."""
+    import gauges
+    with db.cursor() as cur:
+        days = _world(cur)
+        # TFSA cash to size the buys against: once v1.1 lands (§3.5, "the lesser of slot weight
+        # and deployable TFSA cash") a sheet with no cash anchor leaves its buys unsized, and the
+        # sheet gauge below reads amber for that rather than for anything this test is about. A
+        # million covers five slots of NAV / 5 at weight; before v1.1 the cash is not read here.
+        cur.execute("""insert into balances (account, as_of, cash_cad, cash_usd, source)
+                       values ('TFSA', %s, 0, 1000000, 'test')""", (days[-40],))
+        earlier = days[-8]
+        stale = _proposal(cur, earlier, "N10.US")
+        approved = _proposal(cur, earlier, "N11.US", state="approved")
+        filled = _proposal(cur, earlier, "N12.US", fill=40)
+        receipted = _proposal(cur, earlier, "N13.US")
+        cur.execute("""insert into transactions (ticket_id, ticker, account, side, qty, price,
+                                                 currency, trade_date, confirmed, confirmed_at,
+                                                 grade, source)
+                       values (%s,'N13.US','TFSA','buy',40,41.0,'USD',%s,true,now(),'stated',
+                               'zak in chat')""", (receipted, days[-7]))
+        db.commit()
+
+        _, _, proposed, withdrawn = _run(cur, days)
+        db.commit()
+        assert withdrawn == 1
+        state, note = _state(cur, stale)
+        assert state == "cancelled" and note.endswith(f"superseded by session {days[-1]}")
+        assert [_state(cur, t)[0] for t in (approved, filled, receipted)] == [
+            "approved", "proposed", "proposed"], "what Zak acted on is left for its receipt"
+        cur.execute("""select count(*) from tickets
+                        where session_date = %s and state = 'proposed'""", (days[-1],))
+        assert cur.fetchone()[0] == proposed > 0, "tonight's sheet stands"
+
+        _, _, again, withdrawn_again = _run(cur, days)
+        db.commit()
+        assert withdrawn_again == 0 and _state(cur, stale)[1].count("superseded") == 1
+
+        cur.execute("select jsonb_array_length(order_sheet) from v_session_payload")
+        assert cur.fetchone()[0] == again, "the brief's sheet is tonight's, and only tonight's"
+        assert gauges.sheet_arithmetic(cur, gauges.newest_session(cur))["status"] == "green"
+
+
+def test_a_superseded_proposal_zak_executed_still_reaches_executed(db, migrated):
+    """A57's other half. Zak trades a sheet at the open and may tell the chat after the next sheet
+    is scored — "sometimes those transactions are lagged... by days" (2026-08-18). The proposal is
+    superseded by then, and the receipt that names it is still the event (§4.3): it advances the
+    ticket to `executed` rather than leaving an order he filled recorded as withdrawn."""
+    import reconcile
+    with db.cursor() as cur:
+        days = _world(cur)
+        order = _proposal(cur, days[-2], "N00.US")
+        _run(cur, days)
+        db.commit()
+        assert _state(cur, order)[0] == "cancelled", "superseded by tonight's sheet"
+
+        cur.execute("""insert into transactions (ticket_id, ticker, account, side, qty, price,
+                                                 currency, trade_date, confirmed, confirmed_at,
+                                                 grade, source)
+                       values (%s,'N00.US','TFSA','buy',40,41.0,'USD',%s,true,now(),'stated',
+                               'zak in chat, a night late')""", (order, days[-1]))
+        db.commit()
+        assert reconcile.apply_unapplied(cur) != []
+        db.commit()
+        assert _state(cur, order)[0] == "executed"

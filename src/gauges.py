@@ -439,12 +439,26 @@ def reconciliation_age(cur):
                     order by id desc limit 1""")
     newest = cur.fetchone()
     if newest and newest[0] == "red":
-        breaks = (newest[1] or {}).get("breaks") or []
+        run = newest[1] or {}
+        breaks = run.get("breaks") or []
+        refused = run.get("refused") or []
+        # A receipt the ledger refused (QC A21) is a red with no position break behind it: its
+        # ticker and the ledger's reason ride in the run's `refused`, and a brief that printed only
+        # "0 position break(s)" over held buys named nothing to repair. A run that died with
+        # neither says how it died, where the heartbeat or the autopsy recorded it.
+        said = []
+        if breaks:
+            said.append(f"{len(breaks)} position break(s): "
+                        + "; ".join(f"{b['ticker']} broker={b['broker']} book={b['book']}"
+                                    for b in breaks[:8]))
+        if refused:
+            said.append(f"{len(refused)} receipt(s) the ledger refused: "
+                        + "; ".join(f"{r['account']} {r['ticker']}: {r['why']}"
+                                    for r in refused[:8]))
         return _gauge("reconciliation", "red",
-                      f"the last reconcile went red on {len(breaks)} position break(s): "
-                      + "; ".join(f"{b['ticker']} broker={b['broker']} book={b['book']}"
-                                  for b in breaks[:8]),
-                      breaks=breaks[:8], **detail)
+                      "the last reconcile went red — "
+                      + (" · ".join(said) or run.get("fatal") or "no reason recorded"),
+                      breaks=breaks[:8], refused=refused[:8], **detail)
 
     if attested is None:
         return _gauge("reconciliation", "amber",

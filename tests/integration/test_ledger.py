@@ -28,8 +28,10 @@ import sys
 import psycopg
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "src"))
+ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT / "src"))
 import desk                                                               # noqa: E402
+import fixtures as world                                                  # noqa: E402
 import ledger                                                             # noqa: E402
 
 # A Wealthsimple-shaped export: headers by NAME, a dividend and a contribution mixed in with the
@@ -503,3 +505,217 @@ def test_a_chat_imported_export_counts_as_a_receipt(db):
         db.commit()
         cur.execute("select last_receipt from v_reconciliation_age")
         assert str(cur.fetchone()[0]) == "2026-08-17"
+
+
+# ------------------------------------------------ a position is one book row (migration 069)
+#
+# QC 2026-10-07, A11 and A13. `yuna_book_from_ledger` found a position with `limit 1` and no ORDER
+# BY, and `book_open_unique` (007) allowed one open row per LOT. On 2026-09-28 the trigger set
+# NONREG VXC.TO's row to the whole ledger (279), and six seconds later a chat session — logged in
+# as `postgres`, which `guard_book` admits — inserted a second open row of 139 beside it. Every
+# reader that sums a position counted 418 from then on. Migration 069 closes that row on Zak's
+# word and makes the state impossible; the tests that need it rebuild it inside
+# `world.book_before_069`.
+
+MIGRATION_069 = ROOT / "migrations" / "069_a_position_is_one_row.sql"
+
+
+def _split(cur, ticker="N00.US", account="TFSA"):
+    """VXC.TO as production held it until 069: two broker buys the ledger moved into one row (279),
+    then a second open row of 139 written straight into `book` beside it. Nothing in a
+    `book_before_069` block commits, so the ledger is made to move the book row by row."""
+    cur.execute("set constraints ledger_moves_the_book immediate")
+    _universe(cur, ticker)
+    for qty, px, ref in ((140, 85.45, "ws-t1"), (139, 86.30, "ws-t2")):
+        ledger.record(cur, dict(ticker=ticker, account=account, side="buy", qty=qty, price=px,
+                                trade_date="2026-08-17", external_ref=ref), "broker", "csv")
+    cur.execute("""insert into book (ticker,account,sleeve,lot,qty,avg_cost,currency,status)
+                   values (%s,%s,'levered','tranche2',139,86.30,'USD','open')""", (ticker, account))
+
+
+def _open_rows(cur, ticker):
+    cur.execute("""select id, lot, qty from book where ticker = %s and status = 'open'
+                    order by id""", (ticker,))
+    return cur.fetchall()
+
+
+def _sold_out_with_a_row_left_open(cur, ticker="N00.US"):
+    """A11's phantom: the ledger bought and sold the name out, and a row is open anyway."""
+    _universe(cur, ticker)
+    for side in ("buy", "sell"):
+        ledger.record(cur, dict(ticker=ticker, account="TFSA", side=side, qty=100, price=50.0,
+                                trade_date="2026-08-17"), "stated", "chat")
+        cur.connection.commit()              # the deferred trigger moves the book at each commit
+    assert _book(cur, ticker)[2] == "closed"
+    cur.execute("""insert into book (ticker,account,sleeve,lot,qty,avg_cost,currency,status)
+                   values (%s,'TFSA','momentum','tranche2',50,50.0,'USD','open')""", (ticker,))
+    cur.connection.commit()
+
+
+def test_the_book_holds_a_position_in_one_open_row(db):
+    """A11's door, closed where it opened. `guard_book` cannot tell a chat session from a job —
+    both arrive as `postgres` — so the rule is the schema's: a second open row for a position is
+    refused for every role, the owner included. The key is the POSITION, (account, ticker): the
+    same name in another account is another position."""
+    with db.cursor() as cur:
+        _universe(cur, "N00.US")
+        ledger.record(cur, dict(ticker="N00.US", account="TFSA", side="buy", qty=140,
+                                price=85.45, trade_date="2026-08-17"), "stated", "chat")
+        db.commit()
+        with pytest.raises(psycopg.errors.UniqueViolation, match="book_one_open_row_per_position"):
+            cur.execute("""insert into book (ticker,account,sleeve,lot,qty,avg_cost,currency,status)
+                           values ('N00.US','TFSA','levered','tranche2',139,86.30,'USD','open')""")
+        db.rollback()
+        assert [(lot, q) for _, lot, q in _open_rows(cur, "N00.US")] == [("core", 140.0)]
+
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,currency,status)
+                       values ('N00.US','RRSP','reserve',5,80.0,'USD','open')""")
+        db.commit()
+        cur.execute("select count(*) from book where ticker = 'N00.US' and status = 'open'")
+        assert cur.fetchone()[0] == 2, "one open row in each account"
+
+
+def test_a_position_held_in_two_book_rows_is_refused_rather_than_picked(db):
+    """A11, where the index is not. The function moved whichever open row Postgres returned first:
+    tranche three would have set ONE of VXC's rows to 289 and left the other on top of it (428 or
+    568), and the full sale would close one row and leave the other open for ever — a phantom that
+    sells, holds a §3.5 slot and is marked into NAV. Which row is the position is the broker's fact,
+    so the ledger refuses to choose (§0.2), says which position, and moves neither row."""
+    with world.book_before_069(db), db.cursor() as cur:
+        _split(cur)
+        before = _open_rows(cur, "N00.US")
+        assert sum(q for _, _, q in before) == 418.0
+
+        for side, qty in (("buy", 10), ("sell", 279)):          # tranche three, then the exit
+            cur.execute("savepoint attempt")
+            with pytest.raises(psycopg.errors.RaiseException,
+                               match=r"TFSA N00\.US in 2 open rows .* against a ledger of"):
+                ledger.record(cur, dict(ticker="N00.US", account="TFSA", side=side, qty=qty,
+                                        price=87.0, trade_date="2026-10-15",
+                                        external_ref=f"ws-{side}"), "broker", "csv")
+            cur.execute("rollback to savepoint attempt")
+            assert _open_rows(cur, "N00.US") == before, f"the {side} moved neither row"
+
+
+def test_a_position_split_across_rows_is_a_real_break_even_where_the_rows_add_up(db):
+    """A11, where the index is not. Every summed reader counts both rows and the ledger refuses to
+    move them, so `v_ledger_vs_book` lists a split position as a real break whatever the sums say
+    — here the rows add up to the ledger exactly, and the view used to read that as agreement."""
+    with world.book_before_069(db), db.cursor() as cur:
+        cur.execute("set constraints ledger_moves_the_book immediate")
+        _universe(cur, "N00.US")
+        ledger.record(cur, dict(ticker="N00.US", account="TFSA", side="buy", qty=100,
+                                price=50.0, trade_date="2026-08-17"), "stated", "chat")
+        cur.execute("update book set qty = 60 where ticker = 'N00.US'")
+        cur.execute("""insert into book (ticker,account,sleeve,lot,qty,avg_cost,currency,status)
+                       values ('N00.US','TFSA','levered','tranche2',40,50.0,'USD','open')""")
+
+        cur.execute("""select ticker, ledger_qty, book_qty, predates_the_ledger
+                         from v_ledger_vs_book""")
+        assert cur.fetchall() == [("N00.US", 100.0, 100.0, False)]
+        cur.execute("select open_rows from v_ledger_vs_book where ticker = 'N00.US'")
+        assert cur.fetchone()[0] == 2
+
+
+def _production_vxc(cur, stray_qty=139.0):
+    """NONREG VXC.TO exactly as production holds it on 2026-10-07: txns 25 and 39 in the ledger
+    (279), book 22 carrying both, and book 28 restating txn 39 beside it."""
+    _universe(cur, "VXC.TO")
+    cur.execute("""insert into transactions (ticker,account,side,qty,price,currency,trade_date,
+                                             confirmed,confirmed_at,applied_at,grade,source)
+                   values ('VXC.TO','NONREG','buy',140,85.45,'CAD','2026-08-17',true,now(),now(),
+                           'broker','ws_export_2026-08-17'),
+                          ('VXC.TO','NONREG','buy',139,86.30,'CAD','2026-09-22',true,now(),now(),
+                           'broker','zak_chat_2026-09-28')""")
+    cur.execute("""insert into book (id,ticker,account,sleeve,lot,qty,avg_cost,currency,opened_at,
+                                     status,note) overriding system value
+                   values (22,'VXC.TO','NONREG','levered','tranche1',279,85.873476702509,'CAD',
+                           '2026-08-17','open','§2.3 tranche 1'),
+                          (28,'VXC.TO','NONREG','levered','tranche2',%s,86.30,'CAD',
+                           '2026-09-22','open','§2.3 tranche 2, applied in chat')""", (stray_qty,))
+
+
+def test_069_closes_the_row_zak_confirmed_is_not_a_position(db):
+    """A13, on Zak's word (2026-10-07: the NONREG account holds 279 VXC.TO, not 418). The stray row
+    is closed the way the function closes a position — never deleted (§0.6) — with a note saying
+    who confirmed what; the row the ledger moves carries the ledger; the break is gone; and the
+    index that makes the next one impossible exists."""
+    with world.book_before_069(db), db.cursor() as cur:
+        _production_vxc(cur)
+        cur.execute(MIGRATION_069.read_text())
+
+        cur.execute("""select id, qty, status, closed_at = current_date, note from book
+                        where ticker = 'VXC.TO' order by id""")
+        (keep, kept_qty, kept_status, _, kept_note), (stray, qty, status, closed_today, note) = (
+            cur.fetchall())
+        assert (keep, kept_qty, kept_status, kept_note) == (22, 279.0, "open", "§2.3 tranche 1")
+        assert (stray, qty, status, closed_today) == (28, 0.0, "closed", True)
+        assert note.startswith("§2.3 tranche 2, applied in chat | Closed by migration 069")
+        assert "Zak's confirmation of 2026-10-07" in note and "A13" in note
+        cur.execute("select count(*) from v_ledger_vs_book")
+        assert cur.fetchone()[0] == 0, "the ledger and the book agree"
+        cur.execute("select 1 from pg_indexes where indexname = 'book_one_open_row_per_position'")
+        assert cur.fetchone() is not None
+
+
+def test_069_stops_rather_than_apply_a_confirmation_to_another_state(db):
+    """A13. Zak confirmed one state — book 28 holding 139 beside book 22. If the book has moved
+    since (the old function picks a VXC row at random on the next tranche), closing row 28 would
+    apply his confirmation to a state he never saw. The migration then closes nothing, refuses to
+    build the index over a split, and names every split position, in one transaction that leaves
+    the database exactly as it was."""
+    with world.book_before_069(db), db.cursor() as cur:
+        _production_vxc(cur, stray_qty=289.0)
+        with pytest.raises(psycopg.errors.RaiseException,
+                           match=r"migration 069 stops: .*NONREG VXC\.TO \(book 22 lot tranche1: "
+                                 r"279, book 28 lot tranche2: 289\)"):
+            cur.execute(MIGRATION_069.read_text())
+
+
+def test_a_row_left_open_after_the_ledger_sold_the_name_out_is_a_break(db):
+    """A26. `v_ledger_positions` drops a name whose rows net to zero, so a SOLD-OUT name read
+    exactly like one the ledger had never heard of: `predates_the_ledger` true, "the export has not
+    landed yet", amber and self-healing — for a row no export will ever heal. The question is
+    whether history EXISTS, the same one `yuna_book_from_ledger` asks before it touches anything."""
+    with db.cursor() as cur:
+        _sold_out_with_a_row_left_open(cur)
+        cur.execute("""select ticker, ledger_qty, book_qty, predates_the_ledger
+                         from v_ledger_vs_book""")
+        assert cur.fetchall() == [("N00.US", None, 50.0, False)], "a break, not a pre-ledger row"
+
+
+def test_the_sweep_closes_a_row_the_ledger_sold_out(db):
+    """A76. The sweep walked only the names `v_ledger_positions` lists, which leaves out every name
+    the ledger has sold out — so the one stray it most needed to close was the one it never saw,
+    and it reported nothing to do."""
+    with db.cursor() as cur:
+        _sold_out_with_a_row_left_open(cur)
+        assert ledger.rebuild_book(cur) == ["TFSA N00.US: 50 -> closed"]
+        db.commit()
+        assert _open_rows(cur, "N00.US") == []
+        assert desk.held_book(cur) == {}, "and no slot is held by it tonight"
+
+
+def test_the_sweep_never_reports_a_repair_it_did_not_make(db):
+    """A76, where the index is not. Recording anything through `ledger.py` sweeps the whole book,
+    and the sweep printed the ledger's quantity as the book's new state: VXC.TO read "418 -> 279" on
+    every pass while the book stayed at 418, so an operator who ran it to clear the double count
+    would read success and stop. A split position is now refused by name — raised to a caller with
+    nowhere to report it, listed for one that has — the book is left exactly as it was, and the rest
+    of the sweep still runs."""
+    with world.book_before_069(db), db.cursor() as cur:
+        _split(cur)
+        _universe(cur, "MU.US")
+        ledger.record(cur, dict(ticker="MU.US", account="TFSA", side="buy", qty=2, price=954.58,
+                                trade_date="2026-08-14"), "stated", "chat")
+        cur.execute("update book set qty = 1 where ticker = 'MU.US'")   # something to repair
+
+        cur.execute("savepoint sweep")
+        with pytest.raises(psycopg.errors.RaiseException, match=r"TFSA N00\.US in 2 open rows"):
+            ledger.rebuild_book(cur)
+        cur.execute("rollback to savepoint sweep")
+
+        refused = []
+        assert ledger.rebuild_book(cur, refused=refused) == ["TFSA MU.US: 1 -> 2"]
+        assert len(refused) == 1 and refused[0].startswith("TFSA N00.US: book holds")
+        assert sum(q for _, _, q in _open_rows(cur, "N00.US")) == 418.0, "left as it was"
