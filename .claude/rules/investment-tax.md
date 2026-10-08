@@ -10,11 +10,11 @@ The general domain is in the `market-domain` plugin from the [`dq-investing`](ht
 
 ## The plan encodes tax rules as strategy
 
-`docs/yuna_plan.md` §2.6 makes account placement a tax decision:
+`docs/yuna_plan.md` §2.1 makes account placement a tax decision — the accounts are the allocation:
 
-- **Momentum lives in the TFSA only.** Tax-free turnover is the edge. The accepted cost is stated in the plan: TFSA losses burn contribution room permanently, and there is no capital loss to claim
-- **RRSP is the compounder satellite**, preferred for US names with a trailing-12-month dividend yield at or above the plan's threshold, because **US dividend withholding is treaty-exempt in an RRSP and is not in a TFSA**
-- **Non-registered carries the levered layer**, and every swap there carries a tax flag because the disposition is real
+- **The engine lives in the TFSA only** (§2.1). Tax-free turnover is the edge. The cost, which the plan accepts by placing it there: a TFSA loss is no capital loss anyone can claim, and the contribution room it consumed does not come back
+- **The RRSP holds the reserve, SPMO**, a US listing, because **US dividend withholding is treaty-exempt in an RRSP and is not in a TFSA** (§2.1's table)
+- **The NONREG holds VXC.TO — the reserve's residue and every levered lot** (§2.2, §2.3). Each draw buys VXC.TO the same day so the interest stays deductible under ITA 20(1)(c) with a clean paper trail, and any sale there is a real disposition that carries a tax flag
 
 These are the plan's rulings, not defaults to re-derive. **Do not change placement logic as a side effect of another task.** If a tax rule appears to contradict the plan, raise it — the plan is the law, and a conflict means either the plan needs a ruling or the reading is wrong.
 
@@ -30,7 +30,7 @@ These are the plan's rulings, not defaults to re-derive. **Do not change placeme
 
 `dq-finance` is the constants library, and it has a Python reader — `from dq_finance import resolve`.
 
-**It is not yet a dependency of this repo, deliberately.** Every entry in it is currently unverified, so it cannot return a value; adding it to `requirements.txt` would risk the workflows without buying anything. Add it once entries are verified, and note that a private-repo git dependency needs a token available to CI — all thirteen workflows install with a plain `pip install -r requirements.txt` today.
+**It is not yet a dependency of this repo, deliberately.** Every entry in it is currently unverified, so it cannot return a value; adding it to `requirements.txt` would risk the workflows without buying anything. Add it once entries are verified, and note that a private-repo git dependency needs a token available to CI — all eleven workflows install with a plain `pip install -r requirements.txt` today.
 
 Until then: **any tax rate, limit, or threshold needed here is an unverified value and the calculation fails closed.** Do not inline a number from the plan, from a search, or from memory. See the `no-assumed-values` skill.
 

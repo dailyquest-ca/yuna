@@ -68,6 +68,7 @@ src/          ingest + compute jobs (Python); db.py holds the shared heartbeat c
 | `notify.py` | composed `briefs`, `config.push_channel` | nothing but its runs row — proves the words exist before the Routines deliver them |
 | `funnel.py` (`ingest-universe`, Saturdays) | the US exchange listing and the bulk last-day tape — two calls, no screener; `universe_excluded` against the tape | `universe` membership: who is listed, who is liquid, who has gone — and an amber naming any duplicate-listing exclusion whose excluded line prints while its kept line does not (§3.2) |
 | `backup.py` | the decisions — everything but the bars, the research grid and `fundamentals` | a compressed dump, committed from inside the job's own heartbeat |
+| `law.py` (`law`, on merges to `main` that change the plan or the routines contract) | `docs/yuna_plan.md`, `docs/routines-contract.md` | an append-only `law` row per changed document — §0.7's one copy, read through `v_law` |
 
 **Dispatch-only.** `desk.py` (tonight's sheet, read-only) · `migrate.py` · `backfill.py` ·
 `verify_run.py` · `concentrated.py` and the rest of the research grid. **Hand-run, no workflow:**
