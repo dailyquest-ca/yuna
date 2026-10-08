@@ -5,8 +5,9 @@ name: backtest
 #   2. on demand        — workflow_dispatch, for "I am about to suggest a change" and for
 #                         "I just want to see that it still does what I think it does"
 #   3. behaviour git cannot see — 52 config keys live in the database; the run stamps the digest
-#                         it decided under and `check` ambers when the newest run's stamp is stale
-#   4. weekly           — the Saturday chain, so the answer is never more than seven days old
+#                         it decided under. Only the retired `check.py` compared that stamp; the
+#                         live gauges (`gauges.py`) do not, so a stale stamp turns nothing amber
+#   4. weekly           — never built: no cron and no `workflow_run` trigger runs this file
 #
 # **It reports; it does not gate on performance.** The build fails only when a CONFORMANCE clause
 # fails — an entry below the MCN floor, an exit reason §3.2 does not name, a clause no data covered.

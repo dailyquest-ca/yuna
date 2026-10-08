@@ -30,9 +30,10 @@ name: pipeline
 # as §4.7 and v1.0 does not carry it at all. It is honoured here because the reasoning survives
 # the plan that stated it — flagged to Zak 2026-08-16 as a candidate for re-promotion.
 #
-# Retired from this chain by §6.3, and dispatch-only from here: the fundamentals-and-arming `score`
-# (`src/score.py`), its `check` (`src/check.py`), its `compose` (`src/compose.py`) and the fill
-# loop (`src/fills.py`). §3.3 replaced the whole apparatus with one number.
+# Retired from this chain by §6.3, and run by no workflow at all (learning 66): the
+# fundamentals-and-arming `score` (`src/score.py`), its `check` (`src/check.py`), its `compose`
+# (`src/compose.py`) and the fill loop (`src/fills.py`). §3.3 replaced the whole apparatus with
+# one number.
 on:
   workflow_run:
     workflows: [ingest-daily, ingest-universe]

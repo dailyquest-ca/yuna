@@ -1,13 +1,18 @@
 """backtest — the momentum sleeve replayed under the law, using the law's own code.
 
 This job is a **driver**, not a second implementation. Every rule it applies is a call into
-`signals.py`, the same module `arming.py` calls tonight: one market gate, one trend template, one
-base detector, one confirmation state machine, one stop ladder, one sizing formula. Before this
-rewrite the backtest re-derived all of them by hand, and the private copy had drifted in nine
-places — four MCN setup sub-scores against the law's three, pyramid adds at +2.5%/+4.5% against
-+2%/+4%, no add ceiling, no MCN floor, a `volume unconfirmed` exit the plan deleted, and no
-blackout at all. 211 of run 5's 296 trades were entries §3.2 forbids outright. A backtest that
-measures a sincere restatement of the rules measures nothing.
+`signals.py`, the same module the retired `arming.py` called nightly until v1.0's engine took
+production (2026-08-16): one market gate, one trend template, one base detector, one confirmation
+state machine, one stop ladder, one sizing formula. Before this rewrite the backtest re-derived
+all of them by hand, and the private copy had drifted in nine places — four MCN setup sub-scores
+against the law's three, pyramid adds at +2.5%/+4.5% against +2%/+4%, no add ceiling, no MCN
+floor, a `volume unconfirmed` exit the plan deleted, and no blackout at all. 211 of run 5's 296
+trades were entries §3.2 forbids outright. A backtest that measures a sincere restatement of the
+rules measures nothing.
+
+What this replays is that retired engine, `law-v0`, and its § references are to the plan it was
+written under, not to v1.0. v1.0's engine is `engine.py`, replayed by `concentrated.py`, which
+imports from this file (learning 41).
 
 What it models, per the 2026-08-10 rulings:
 

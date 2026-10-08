@@ -376,8 +376,8 @@ def derived_engine_nav(cur, as_of):
     Zak, 2026-08-19: *"You have the balances of all the accounts... What do you mean I have to tell
     you what the NAV is? You know the NAV..."* He is right, and the refusal this replaces was
     calibrated for a book that could not be trusted. Post-059 the book is right by construction —
-    the ledger drives it — and §2.0 already names the doctrine this arithmetic follows: **balances
-    are truth, prices are the extrapolation.**
+    the ledger drives it — and the doctrine this arithmetic follows is the retired plan's §2.0,
+    which v1.0 does not carry: **balances are truth, prices are the extrapolation.**
 
     engine NAV = the engine's marked equity (every TFSA position, park included, at its last close)
                + TFSA cash (the newest anchor, carried forward by the ledger), CAD converted at the
@@ -391,7 +391,7 @@ def derived_engine_nav(cur, as_of):
 
       * an unpriced TFSA position — no bar, or no mark (`holding_mark`): equity would understate;
       * a stale one (`stale_holdings`): it has no decision close to be marked at (§3.5);
-      * no cash anchor: §2.0 makes balances the truth and there is none;
+      * no cash anchor: balances are the truth and there is none;
       * CAD cash with no FX row to convert it;
       * TFSA cash that derives below zero (A52). A TFSA cannot borrow — §2.3's facility is a
         separate account whose draws buy VXC.TO in the NONREG — so negative cash is not a state the

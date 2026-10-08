@@ -89,8 +89,8 @@ def test_reconcile_runs_before_score():
 
 
 def test_the_chain_runs_the_engine_and_not_the_retired_machine():
-    """§6.3 retires the legacy jobs from the SCHEDULE. They remain on disk as dispatch-only
-    tooling, so nothing but this assertion stops the chain quietly running them again."""
+    """§6.3 retires the legacy jobs from the SCHEDULE. Their source stays on disk with no workflow
+    (learning 66), so nothing but this assertion stops the chain quietly running them again."""
     runs = " ".join(step.get("run") or ""
                     for spec in _pipeline()["jobs"].values()
                     for step in spec.get("steps") or [])

@@ -151,11 +151,12 @@ SESSION_TZ = "America/New_York"
 def cash_by_account(cur):
     """Per-account cash by currency: the newest anchor, carried forward by the ledger.
 
-    §2.0 — **balances are truth, prices are the extrapolation** — and §2.0 again, on the other
-    side of the same coin: a ticket "is only written if that account holds the cash", and cash
-    "includes unsettled proceeds of same-account sells". Money moves when a fill happens. The
-    anchor is a reading taken at one moment, so a fill after it has already moved the real cash and
-    the anchor has not caught up: the ledger is what carries it forward.
+    **Balances are truth, prices are the extrapolation** — the retired plan's §2.0, which v1.0
+    does not carry; a standing design decision since Zak's 2026-08-19 ruling derived engine NAV
+    from it (roadmap-2026-08-16, critical path 3). §3.5 buys "the same morning on unsettled
+    proceeds", so money moves when a fill happens. The anchor is the newest reading Zak has
+    given — no cadence is ruled — so a fill after it has already moved the real cash and the anchor
+    has not caught up: the ledger is what carries it forward.
 
     Found the day four 2026-08-04 fills were reconciled. The book gained NUE and RS while the cash
     that bought them sat untouched in an anchor dated the 3rd, and NAV read 8.1% high — C$17,937
@@ -180,7 +181,7 @@ def cash_by_account(cur):
     names how many fills rest on that reading of the date and what they move, per currency.
 
     A buy takes its own currency out, a sell puts it back, fees on both. Nothing else is modelled:
-    deposits, dividends and interest keep being absorbed at the next anchor, exactly as §2.0 says.
+    deposits, dividends and interest are absorbed at the next anchor, as the retired §2.0 had it.
     A levered buy can drive an account's cash negative between anchors — that is the undrawn
     facility showing through, and NAV lands in the same place either way, because borrowing is
     NAV-neutral at the moment of use. The TFSA has no facility to show through (§2.3 draws the LOC
@@ -249,7 +250,7 @@ def cash_by_account(cur):
 
 
 def nav_cad(cur):
-    """NAV per §2.0 — balances are truth, prices are the extrapolation.
+    """Household NAV in CAD, the retired plan's §2.0 model; only the retired engine calls this.
 
     An account's stated total wins when we have one; otherwise we build it from recorded cash
     plus what the book says it holds. Facilities contribute their drawn balance as debt only —
@@ -274,7 +275,7 @@ def nav_cad(cur):
         per_account[acct] = per_account.get(acct, 0.0) + cad
     book_equities = sum(per_account.values())
 
-    bal = cash_by_account(cur)          # the anchor, carried forward by the ledger (§2.0)
+    bal = cash_by_account(cur)          # the anchor, carried forward by the ledger
 
     assets = cash = debt = 0.0
     accounts = {}
@@ -286,7 +287,7 @@ def nav_cad(cur):
         # cash per currency, so the USD sleeve reprices with FX daily
         c_cad, c_usd = float(b.get("cad") or 0), float(b.get("usd") or 0)
         c = c_cad + c_usd * fx
-        value = c + per_account.get(acct, 0.0)      # §2.0: balances anchor, prices extrapolate
+        value = c + per_account.get(acct, 0.0)      # balances anchor, prices extrapolate
         stated = b.get("total")
         accounts[acct] = dict(value_cad=round(value, 2), cash_cad=round(c, 2),
                               cash_native={"CAD": round(c_cad, 2), "USD": round(c_usd, 2)},
@@ -352,8 +353,9 @@ def quantity_canary(cur, *, stale_days=9):
 
     The AVGO alarm that started this work was reported as a stale price. It was not: the price was
     correct to the penny and the *quantity* in the report was wrong. A price check would have passed
-    it, and would pass it again. §4.5 step 5 has Zak confirm settled positions every Sunday, so a
-    book quantity whose last confirmation is older than that is the thing to name.
+    it, and would pass it again. The retired plan's §4.5 step 5 had Zak confirm settled positions
+    every Sunday, so a book quantity whose last confirmation was older than that was the thing to
+    name. v1.0 has no such step, and only the retired engine calls this.
 
     Returns positions with no confirming transaction inside the window. Amber, not red: an
     unconfirmed quantity is a reason to distrust NAV, not a reason to stop protecting the book.

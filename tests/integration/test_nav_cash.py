@@ -1,10 +1,11 @@
-"""Cash moves when a fill happens (§2.0).
+"""Cash moves when a fill happens (the retired plan's §2.0; v1.0 carries no clause for it).
 
 "Balances are truth, prices are the extrapolation" — and the other half of the same section: a
 ticket "is only written if that account holds the cash", and cash "includes unsettled proceeds of
-same-account sells". Money leaves the account when the buy fills. It does not wait for Sunday.
+same-account sells". Money leaves the account when the buy fills. It does not wait for the next
+anchor.
 
-`nav_cad` read the anchor and stopped there, so between Sunday readings a purchase added its stock
+`nav_cad` read the anchor and stopped there, so between anchors a purchase added its stock
 to the book and left the money that paid for it sitting in the account. Found on 2026-08-05, when
 four fills from the 4th were reconciled against an anchor dated the 3rd: NAV read C$222,764 against
 a true C$204,827 — **8.1% high**, C$17,937 of stock the book was credited with owning and with
@@ -209,8 +210,9 @@ def test_a_superseded_statement_is_not_paid_for_twice(db):
     stops counting — so anything that SUMS the ledger has to say which rows it means.
 
     `cash_by_account` did not, and the failure is the expensive direction: one purchase taken out of
-    the account twice reads as less cash than exists, and §2.0 only writes a ticket "if that account
-    holds the cash". A trade Zak can afford gets refused for want of money that is there.
+    the account twice reads as less cash than exists. Under the retired plan's §2.0 that would
+    refuse a trade Zak could afford; under v1.0 it reads the TFSA's engine NAV low, and every buy
+    sized off it comes out short.
     """
     with db.cursor() as cur:
         anchor(cur)

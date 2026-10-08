@@ -12,8 +12,8 @@ carried over from a prior version. Where the plan states no number the function 
 and the caller must supply one — it does not invent a default.
 
 Deliberately pure: arrays in, decisions out, no database and no clock. The job that reads the tape
-and writes the order sheet lives in `score.py`; what it may not do is decide anything this file
-does not.
+and writes the order sheet is `sheet.py` (§4.1's `score` job, deciding through `desk.py`); what it
+may not do is decide anything this file does not.
 
 **Nothing here places an order.** §0.2 — Yuna rules names inside the plan's gates, Zak executes.
 These functions return proposals.
