@@ -477,7 +477,9 @@ def test_the_brief_carries_the_underweight_slots_zak_has_to_rule_on(db, migrated
         lines = "\n".join(brief.underweight_lines(p))
 
     assert "N00.US" in lines
-    assert "NOT ordered" in lines and "Zak's (§0.3)" in lines
+    # v1.1 (2026-10-06) ruled what this section used to leave with Zak (§0.3): "A slot filled below
+    # weight counts as filled and is reported; it is never topped up."
+    assert "NOT ordered" in lines and "never topped up" in lines and "Zak's (§0.3)" not in lines
     assert "so that much capital stays parked" in lines
     assert "%" in lines, "the shortfall is stated as a fraction of the slot it should fill"
 
@@ -548,7 +550,8 @@ def test_the_underweight_ruling_is_named_even_before_the_nav_lands(db, migrated)
         lines = "\n".join(brief.underweight_lines(p))
 
     assert "pending an engine NAV" in lines and "N00.US" in lines
-    assert "config.engine_nav" in lines and "Zak's (§0.3)" in lines
+    # the rule is v1.1's now (2026-10-06), not a ruling waiting on Zak (§0.3)
+    assert "config.engine_nav" in lines and "never topped up" in lines
 
 
 def test_the_brief_names_momentum_money_the_engine_cannot_reach(db, migrated):
@@ -968,3 +971,49 @@ def test_never_two_tranches_in_one_month(db, migrated):
         lines = brief.tranche_lines(brief.payload(cur))
     three = next(ln for ln in lines if ln.startswith("  tranche 3:"))
     assert f"held: §2.3 — never two tranches in one month; tranche 2 was drawn {s}" in three
+
+
+def test_a_fill_below_its_slot_says_so_on_the_sheet():
+    """§3.5 as v1.1 amended it: "A slot filled below weight counts as filled and is reported; it is
+    never topped up." The desk writes the shortfall into the ticket's note; the page Zak executes
+    from carries it beside the buy, and the retired top-up tag is gone with the clause."""
+    p = {"order_sheet": [
+        dict(action="buy", ticker="N04.US", qty=395, mark=126.7, rank=4, state="proposed",
+             clause="fill", note="free slot | fill below §3.5 weight: 395 of 452 shares — "
+                                 "deployable TFSA cash 50,000.00 USD over 1 buy(s) (v1.1)"),
+        dict(action="buy", ticker="N05.US", qty=452, mark=110.0, rank=5, state="proposed",
+             clause="fill", note="free slot")]}
+    lines = brief.sheet_lines(p)
+    short = next(l for l in lines if "N04.US" in l)
+    full = next(l for l in lines if "N05.US" in l)
+    assert "below §3.5 weight: 395 of 452 shares; never topped up" in short
+    assert "below" not in full and "top-up" not in "\n".join(lines)
+
+
+def test_a_held_name_with_no_bar_is_not_called_outside_the_universe(db, migrated):
+    """R2 (Zak's ruling, 2026-10-07): a held name with no bar on the decision session keeps its
+    slot and its quantity and holds the buys. Its rank is missing because it did not print, not
+    because it ranked below 12 — and the book line used to tell Zak the engine treats it "as below
+    12", the opposite of what the sheet above it did."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        cur.execute("""insert into universe (ticker,name,kind,exchange,currency,status)
+                       values ('DARK.US','DARK','stock','US','USD','active')""")
+        cur.executemany("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                           values ('DARK.US',%s,50,50,50,50,50,1000000)""",
+                        [(d,) for d in days[:-3]])
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('DARK.US','TFSA','momentum',100,40.0,'open')""")
+        s = _score(cur, days)
+        db.commit()
+        assert s["unbarred"] == ["DARK.US"]
+        lines = brief.book_lines(brief.payload(cur))
+
+    at = next(k for k, line in enumerate(lines) if line.startswith("  DARK.US"))
+    notes = []
+    for line in lines[at + 1:]:
+        if not line.startswith("      "):              # the next holding's own line
+            break
+        notes.append(line)
+    assert any("no bar on the decision session" in n for n in notes), lines
+    assert not any("outside §3.2's universe" in n for n in notes), lines

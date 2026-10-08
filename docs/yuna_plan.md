@@ -1,6 +1,6 @@
-# yuna_plan.md — v1.0
+# yuna_plan.md — v1.1
 
-**Status: LAW. Promoted by Zak, 2026-08-15. This is the sole authoritative document; where any other text disagrees, this document wins.**
+**Status: LAW. v1.0 promoted by Zak, 2026-08-15. v1.1 promoted by Zak, 2026-10-06 (§7). This is the sole authoritative document; where any other text disagrees, this document wins.**
 
 ---
 
@@ -61,7 +61,7 @@ New contributions land per Zak's direction; the default is each account's design
 
 ## §3 — The engine
 
-**Cell of record: `b5_12_2_L1_3` · run 589 · code stamp `235bef5fd174dcab` · park SPY.US · regime source SPY.US.** The engine's authority is the code at that stamp. Where any document and the code disagree, the code is authoritative and an erratum is recorded.
+**Cell of record: `b5_12_2_L1_3` · run 589 · code stamp `235bef5fd174dcab` · park SPY.US · regime source SPY.US.** The engine's authority is the code at that stamp. Where any document and the code disagree, the code is authoritative and an erratum is recorded. *Live park is USD cash on an interim ruling (§3.4, v1.1) — a recorded divergence from the cell of record (§3.7(6)).*
 
 **3.1 The three-numbers law.** The engine's modeled record is quoted as all three windows or none:
 
@@ -84,15 +84,15 @@ Max modeled drawdown **−61.2%**. Deflated Sharpe **0.214** against a 0.95 bar 
 **3.4 Regime gate.**
 - Signal: SPY adjusted close strictly above the mean of its last 200 adjusted closes (inclusive of today).
 - Latch: 1 red session → OFF · 3rd consecutive green session → ON. If the gate cannot be evaluated on fresh data, it reads OFF.
-- **Gate OFF:** the entire book sells at the next executable open; queued exits clear; all proceeds to park (SPY.US). No buys of any kind while OFF.
+- **Gate OFF:** the entire book sells at the next executable open; queued exits clear; all proceeds to park. **Park, interim (ruled 2026-10-06): USD cash in the TFSA** — no park purchase is executed while OFF. The cell of record parks in SPY.US; a T-bill park (SGOV.US) is under research (§5.3) and is promoted only on evidence. Until the score job is updated, any SPY.US park buy the sheet prints is not executed. No buys of any kind while OFF.
 - **Gate ON (after latch):** normal operation resumes; seeding/refill per §3.5.
 
 **3.5 Book mechanics.**
-- **Slots:** 5, equal weight. Position size = engine NAV ÷ 5, marked at the decision close; fills occur at the next open (drift accepted).
+- **Slots:** 5, equal weight. Engine NAV is the TFSA's engine capital — the slots, the TFSA park, and TFSA cash; reserve and levered holdings (§2.2, §2.3) are outside it. Slot weight = engine NAV ÷ 5, marked at the decision close. **Order size = the lesser of slot weight and deployable TFSA cash** — TFSA cash on the book plus the same session's sell proceeds, marked at the decision close. When several buys share a session, deployable cash divides equally among them, each capped at slot weight. Fills occur at the next open (drift accepted). A slot filled below weight counts as filled and is reported; it is never topped up.
 - **Exit:** a holding ranked below 12 queues that night and sells at the next open; a no-print retries nightly until filled.
 - **Displacement:** if the best unheld name in the top 2 ranks strictly better than the worst holding — swap. At most one displacement per session.
 - **Free slots:** fill from the top 12 by rank. Multiple slots may fill in one session. Seeding fills all five in one session.
-- **Cash sequencing:** sells execute first, buys the same morning on unsettled proceeds. Shortfall draws from park; residue returns to park. A buy that gets no print (no executable trade that session — e.g., a trading halt at the open) is cancelled, not retried; the slot refills from the next ranking. Exits are obligations; entries are options.
+- **Cash sequencing:** sells execute first, buys the same morning on unsettled proceeds. **Buys never draw on capital outside the TFSA**; a shortfall beyond TFSA park and cash is reported as held-below-weight, not funded. Residue returns to park. A buy that gets no print (no executable trade that session — e.g., a trading halt at the open) is cancelled, not retried; the slot refills from the next ranking. Exits are obligations; entries are options.
 - **Participation cap:** an order may not exceed 0.98 of the name's ADDV — a correctness check, not a live constraint at current size.
 
 **3.6 Constants of record.**
@@ -108,9 +108,9 @@ Max modeled drawdown **−61.2%**. Deflated Sharpe **0.214** against a 0.95 bar 
 | Screen | ≥210/252 bars · ≥$5 · ≥$10M median ADDV (50-sess) |
 | Pool | top 500 by ADDV |
 | Score | 21/252 lookback ÷ 252-day vol |
-| Sizing | NAV ÷ 5 at decision close |
+| Sizing | lesser of NAV ÷ 5 and deployable TFSA cash, at decision close (v1.1) |
 | Participation | ≤0.98 ADDV |
-| Park | SPY.US |
+| Park | USD cash, interim (v1.1) · cell of record: SPY.US · T-bill variant under research |
 | Regime source | SPY.US |
 
 **3.7 Sim-vs-live divergence register.** Accepted, in writing:
@@ -119,8 +119,10 @@ Max modeled drawdown **−61.2%**. Deflated Sharpe **0.214** against a 0.95 bar 
 3. Dual-listed / share-class twins inside the top 12: hold at most one of a pair; prefer the higher-ADDV line.
 4. Fractional shares where the broker supports them; otherwise round down, residue parks.
 5. Data revisions: adjusted-close restatements can move a replayed rank; the shadow (§6.4) compares same-vintage data only.
+6. Park (v1.1): live parks gated-off capital in USD cash on an interim ruling; the cell of record parks in SPY.US. Gate-OFF stretches in the live record will not match the sim's until the T-bill research rules and the code of record is updated.
+7. Sizing (v1.1): live caps a buy at deployable TFSA cash; the cell of record sizes every fill at NAV ÷ 5 from a same-account park. A live slot may therefore open below weight where the sim's would not.
 
-**3.8 Known limitations (quoted with the engine, always).** The verdict is unproven by our own bar. Twenty years of tape contains exactly two crash shapes; the engine has never been shown a grinding multi-year decline, and its edge is derived from V-shaped recoveries. The park is SPY: gated-off capital rides the index down (2008 modeled: −37.3% while gated). Five vol-adjusted momentum slots are ~2.5 independent bets, one mechanism. Modeled costs: $132,055 across 752 trades. A −61% drawdown has never been tested against a human.
+**3.8 Known limitations (quoted with the engine, always).** The verdict is unproven by our own bar. Twenty years of tape contains exactly two crash shapes; the engine has never been shown a grinding multi-year decline, and its edge is derived from V-shaped recoveries. The park in the cell of record is SPY: gated-off capital rides the index down (2008 modeled: −37.3% while gated); the live interim park is cash, which removes that ride and also the first days of each modeled recovery — the T-bill research measures the trade. Five vol-adjusted momentum slots are ~2.5 independent bets, one mechanism. Modeled costs: $132,055 across 752 trades. A −61% drawdown has never been tested against a human.
 
 ---
 
@@ -212,8 +214,16 @@ Target: ~mid-September 2026.
 
 **2026-09-02 — §5.2 amended: the drawdown record rides with the milestones. Promoted by Zak in chat.** §5.1 lists it. The shares and the two recoveries are run 624's, re-measured only when the cell of record changes. Information, never action — unchanged.
 
+**v1.1 — 2026-10-06 — Size to deployable TFSA cash; interim cash park. Promoted by Zak.**
+- §3.5 Slots: order size becomes the lesser of slot weight (engine NAV ÷ 5) and deployable TFSA cash; engine NAV defined in words as the code already computes it (TFSA slots + park + cash); a slot filled below weight counts as filled and is never topped up. Triggered by the 2026-10-05 ASX sheet (580 proposed, 512.4837 fundable from the TFSA).
+- §3.5 Cash sequencing: buys never draw on capital outside the TFSA; a shortfall is reported, not funded.
+- §3.4 Gate OFF: park is USD cash in the TFSA on an interim ruling; no park buy executes while OFF. SPY.US remains the cell of record's park; a T-bill park (SGOV.US) is a research work order under §5.3, promoted only on evidence. §3.6, §3.7(6–7), §3.8 and §8 amended to match.
+- **Transitional, until the score job implements both:** the sheet's buy quantity is a ceiling — Zak executes to deployable TFSA cash — and any SPY.US park buy the sheet prints on a gate-OFF morning is not executed; the sells are.
+- Build work orders: `score` sizing cap and park change · `book`/`reconcile` TFSA cash line · `compose` prose (RRSP SPMO is reserve, not park; shortfall sits in the overweight slots) · `check` sizing test · T-bill park backtest on the cell of record.
+- Zak's rulings of the same day, recorded: concentration in the book is accepted as the strategy ("that's the point; we just have to be quick on the move" — the exit rule is the quickness); the note v2 messaging plan of 2026-09-15 is dropped and the 2026-08-24 delivery spec stands.
+
 ---
 
 ## §8 — Glossary
 
-**Engine** — the ranked five-slot book of §3. **Gate** — the SPY/SMA200 latch of §3.4. **Park** — SPY.US, where engine capital sits while gated off. **Reserve** — SPMO/VXC.TO per §2.2. **Cell of record** — the exact backtest configuration whose code governs live behavior. **Print** — an actual executed trade on the tape; "no print" means the order never executed that session. **Shadow** — §6.4. **Freeze** — §5.5. **The three numbers** — §3.1, quoted together or not at all.
+**Engine** — the ranked five-slot book of §3. **Engine NAV** — the TFSA's engine capital: slots + park + TFSA cash; reserve (§2.2) and levered (§2.3) holdings are outside it. **Gate** — the SPY/SMA200 latch of §3.4. **Park** — where engine capital sits while gated off: USD cash in the TFSA (interim, v1.1); SPY.US in the cell of record. **Reserve** — SPMO/VXC.TO per §2.2. **Cell of record** — the exact backtest configuration whose code governs live behavior. **Print** — an actual executed trade on the tape; "no print" means the order never executed that session. **Shadow** — §6.4. **Freeze** — §5.5. **The three numbers** — §3.1, quoted together or not at all.

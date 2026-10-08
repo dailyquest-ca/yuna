@@ -18,8 +18,10 @@ protective-direction and never blocked, so the verdict this job writes is `block
 `blocks_dispatch` — the sheet always ships, and the buy half of it is what a red withdraws.
 
 On thresholds. §4.4 names six gauges and gives no tolerances, and this file invents none. Where a
-gauge needs a comparison it comes from the plan's own arithmetic (§3.5's NAV/5, §3.2's screen,
-§3.4's SMA) or from the stored history itself. The one gauge that reads as if it needs a constant
+gauge needs a comparison it comes from the plan's own arithmetic (§3.5's size — since v1.1 NAV/5
+or a share of deployable cash, the lesser — §3.2's screen, §3.4's SMA) or from the stored history
+itself; a dollar figure derived twice is compared to the cent, money's own unit (half a cent,
+`db.VALUATION_TOLERANCE`). The one gauge that reads as if it needs a constant
 — "within historical band" — takes the band from the history itself: the observed range of every
 prior session-to-session CHANGE in the count (ruled 2026-09-14, §5.6; it was the range of levels,
 and a level band can never admit a new low). A tighter band would be a better gauge and it would
@@ -34,7 +36,7 @@ import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import desk                                                                # noqa: E402
 import engine                                                              # noqa: E402
-from db import connect, dry, freshness, Heartbeat                          # noqa: E402
+from db import VALUATION_TOLERANCE, connect, dry, freshness, Heartbeat     # noqa: E402
 
 
 def _gauge(name, status, why, **detail):
@@ -286,6 +288,23 @@ def _sheet_without_tickets(stored):
                   sells=detail.get("sells"), buys=detail.get("buys"))
 
 
+def _score_hold(cur, stored):
+    """The holds tonight's `score` declared — Zak's 2026-10-07 R1 (a gate that cannot be evaluated
+    on fresh data) and R2 (a held name with no bar on the decision session), worded by the desk.
+
+    Read from the newest `score` run of this mode rather than from the stored session, because R1
+    writes no session at all: its whole point is that nothing new is proposed, so the newest
+    session on record is the last one decided on fresh data, and the only place the hold is
+    written down is the run that declared it. Dry runs are not facts (learning 67).
+    """
+    cur.execute("""select detail from runs
+                    where job = 'score' and not dry_run
+                      and coalesce(detail->>'mode', 'live') = %s
+                    order by id desc limit 1""", (stored.get("mode") or "live",))
+    row = cur.fetchone()
+    return ((row[0] if row else None) or {}).get("hold") or []
+
+
 def sheet_arithmetic(cur, stored):
     """Every ticket on the newest sheet, re-derived: does its quantity follow from §3.5?
 
@@ -293,14 +312,46 @@ def sheet_arithmetic(cur, stored):
 
       completeness  a sell whose ticket is missing is a position that never leaves — checked
                     against what `score` attested it decided (detail.sells / detail.buys)
-      sizing        `int(nav / 5 // price)` — §3.5's own arithmetic, §3.7(4)'s rounding
+      sizing        §3.5 as v1.1 amended it, from the inputs `score` attested (detail.sizing): a
+                    fill is `min(NAV / 5 // price, share // price)`, the share being deployable
+                    TFSA cash over the night's buys; a park's `fund` sell is the whole shares that
+                    cover the recorded shortfall, never more than the lot; and the deployable cash
+                    itself is re-added from its parts — tonight's sell tickets at their quantity ×
+                    decision close, the park's draw likewise, and the cash. A session stored before
+                    the attestation carried sizing is held to `NAV / 5 // price` alone, the rule it
+                    was sized by.
       participation §3.5's 0.98 ADDV cap, "a correctness check, not a live constraint at
                     current size", which is exactly why it needs a gauge: a check that never
                     fires at $200k is the one that fires silently at $2M
 
     A sizing error is RED. A quantity that does not follow from the plan's arithmetic is the single
     most expensive class of defect this repository can produce, because it does not throw.
+
+    And two things it reports rather than checks, as an amber that holds nothing by itself (§4.3:
+    the check suite's own amber warns): a hold `score` declared (`_score_hold`) — the hold proper
+    is `score`'s amber, which the freshness gauge turns into held buys — and a buy the cash could
+    not reach, which is no ticket and so appears on no sheet. The brief prints the check's reasons
+    and nothing of `score`'s, and both are things Zak is to be told: his ruling is that the brief
+    names the stale bar and the held name, and v1.1's that a shortfall "is reported".
     """
+    g = _sheet_verdict(cur, stored)
+    hold = _score_hold(cur, stored)
+    short = (stored.get("detail") or {}).get("held_below") or []
+    said = []
+    if hold:
+        said.append("score held the buys — " + "; ".join(hold))
+    if short:
+        said.append(f"{len(short)} buy(s) held below weight, no ticket (§3.5, v1.1): "
+                    + "; ".join(f"{h['ticker']} — {h['why']}" for h in short))
+    if not said:
+        return g
+    said = " · ".join(said)
+    return dict(g, status="red" if g["status"] == "red" else "amber", held=hold,
+                held_below=[h["ticker"] for h in short],
+                why=said if g["status"] == "green" else f"{g['why']} · {said}")
+
+
+def _sheet_verdict(cur, stored):
     cur.execute("""select ticker, action, qty, mark, rank, state, clause from tickets
                     where session_date = %s order by action, ticker""", (stored["session_date"],))
     written = cur.fetchall()
@@ -335,20 +386,59 @@ def sheet_arithmetic(cur, stored):
            for pair in sorted(missing, key=lambda p: (p[1] != "sell", p[0]))]
     unsized = 0
     nav = stored["nav"]
+    detail = stored.get("detail") or {}
+    # A session `score` attested after v1.1's sizing landed carries `sizing` — None on a night with
+    # no buy, a dict otherwise. One without the key was sized by NAV / 5 alone and is held to it.
+    v11 = "sizing" in detail
+    sizing = detail.get("sizing") or {}
+    alloc = sizing.get("alloc")
+    shortfall = sizing.get("shortfall")
+    # The park's draw, re-derived from the shortfall the desk recorded, lot by lot in the desk's
+    # order. A lot the desk did not draw has no entry, so a fund sell of it is not one §3.5 made.
+    fund_want, left = {}, shortfall
+    for d in sorted(sizing.get("park") or [], key=lambda d: d["ticker"]):
+        if left is None or left <= 0:
+            break
+        q = engine.park_draw(float(left), float(d["lot"]), float(d["mark"]))
+        fund_want[d["ticker"]] = q
+        left -= q * float(d["mark"])
+    if alloc is not None:
+        bad += _deployable_re_added(written, sizing, nav)
     cur.execute("""select ticker, addv from engine_ranks
                     where session_date = %s and mode = %s and addv is not null""",
                 (stored["session_date"], stored.get("mode") or "live"))
     addv_of = {t: float(a) for t, a in cur.fetchall()}
     for tk, action, qty, mark, rank, state, clause in rows:
-        if clause not in ("fill", "rank_exit", "displaced", "gate_off", "phase0",
-                          "fund", "top_up"):
+        if attested is not None and (tk, action) not in attested:
+            # Beyond tonight's decision. One Zak has acted on was sized by an earlier pass of this
+            # close, against that pass's cash, so tonight's share cannot re-derive it — and it is
+            # his trade, not tonight's order (see completeness above). One still `proposed` is
+            # neither: write_tickets withdraws every proposal its own pass did not make, so a live
+            # proposal score never decided is a line on Zak's sheet that nothing stands behind.
+            if state == "proposed":
+                bad.append(f"{_named([(tk, action)])}: proposed on the sheet and never decided "
+                           f"by score")
+            continue
+        if clause not in ("fill", "rank_exit", "displaced", "gate_off", "phase0", "fund"):
+            # `top_up` left this list with v1.1 (§3.5: a slot filled below weight "is never topped
+            # up"), so a top-up proposed tonight is a clause the plan no longer has.
             bad.append(f"{tk}: clause {clause!r} is not a recognised clause")
         if clause == "fund":
-            # The park's cash leg (§6.5). Not §3.5 arithmetic — its quantity is the park position,
-            # not NAV/5 — so the sizing check below must not measure it against a slot. The sell
-            # branch's own completeness check (a sell must carry a positive quantity) still runs.
-            if action != "buy" and (qty is None or float(qty) <= 0):
+            # The park's cash leg: its quantity is a draw on a lot, not a slot, so the slot
+            # arithmetic below must not measure it. It must be an executable sell, and since v1.1
+            # it must be the draw the recorded shortfall gives — never the lot because a lot
+            # exists (A6), never beside buys that were not sized (A23).
+            if action != "sell":
+                bad.append(f"{tk}: a fund {action} — the park's draw is a sell")
+            elif qty is None or float(qty) <= 0:
                 bad.append(f"{tk}: a fund sell with no quantity cannot be executed")
+            elif v11 and tk not in fund_want:
+                bad.append(f"{tk}: a fund sell of {float(qty):g} the session's sizing does not "
+                           f"draw — the park pays the shortfall of sized buys and only that "
+                           f"(§3.5, v1.1)")
+            elif v11 and float(qty) != float(fund_want[tk]):
+                bad.append(f"{tk}: fund sell {float(qty):g} but the recorded shortfall of "
+                           f"{float(shortfall):,.2f} draws {float(fund_want[tk]):g}")
             continue
         if action != "buy":
             if qty is None or float(qty) <= 0:
@@ -367,22 +457,16 @@ def sheet_arithmetic(cur, stored):
             # and a traceback here takes down the proof instead of delivering it.
             bad.append(f"{tk}: sized at {qty:g} with no decision close to size against")
             continue
-        want = engine.position_size(nav, float(mark))
-        if clause == "top_up":
-            # §6.5's top-up: the slot less the line already held. The held quantity is read from
-            # the book NOW rather than stored on the ticket — safe because this gauge runs minutes
-            # after `score` in the same chain and nothing trades in between; a re-run after Zak
-            # executes would find the position at weight and the cancelled ticket excluded above.
-            cur.execute("""select coalesce(sum(qty), 0) from book
-                            where ticker = %s and account = %s and status = 'open'""",
-                        (tk, stored.get("account") or "TFSA"))
-            held_now = float(cur.fetchone()[0])
-            # desk.sheet's own expression, truncated AFTER subtracting the held line. Truncating
-            # first (`want - int(held_now)`) asks one share more of every fractionally held name —
-            # ASX.US is 512.4837 — and turned a correct top-up RED (QC 2026-10-07, A8).
-            want = max(0, int(want - held_now))
+        if v11 and alloc is None:
+            bad.append(f"{tk}: sized at {qty:g} but the session's sizing recorded none — "
+                       f"{sizing.get('unsized') or 'no buy was sized'}")
+            continue
+        want = (engine.capped_size(nav, float(mark), float(alloc)) if v11
+                else engine.position_size(nav, float(mark)))
         if int(qty) != want:
-            bad.append(f"{tk}: qty {qty:g} but §3.5 gives {want} for clause {clause}")
+            bad.append(f"{tk}: qty {qty:g} but §3.5 gives {want} for clause {clause}"
+                       + (f" (NAV ÷ 5 or {float(alloc):,.2f} of deployable cash, the lesser)"
+                          if v11 else ""))
         # §3.5's participation cap, re-derived from the ADDV `score` ranked the name on. "A
         # correctness check, not a live constraint at current size" — which is why it is checked
         # here: a cap that never fires at this size is the one that fires silently at a larger
@@ -404,12 +488,58 @@ def sheet_arithmetic(cur, stored):
                                       + "; ".join(bad[:3]) + ("; …" if len(bad) > 3 else ""),
                       failures=bad[:20], tickets=len(rows))
     if unsized:
-        return _gauge("sheet", "amber", f"{unsized} buy ticket(s) carry no quantity — the session "
-                                        f"recorded no engine NAV, so they are unsized and none of "
-                                        f"them can be executed; `score`'s own amber holds the buys "
-                                        f"through the freshness rule (§4.4)", unsized=unsized)
+        return _gauge("sheet", "amber", f"{unsized} buy ticket(s) carry no quantity — "
+                                        + (sizing.get("unsized") or "the session recorded no "
+                                                                    "engine NAV")
+                                        + " — so none of them can be executed; `score`'s own amber"
+                                          " holds the buys through the freshness rule (§4.4)",
+                      unsized=unsized)
     return _gauge("sheet", "green", f"{len(rows)} ticket(s), every quantity re-derived from §3.5",
                   tickets=len(rows))
+
+
+def _deployable_re_added(written, sizing, nav):
+    """v1.1's deployable cash, added up again from what was written. Returns [failure, ...].
+
+    The share every fill is re-derived against is `deployable ÷ buys`, and deployable is three
+    parts: the cash the store stated (re-added from its own legs), tonight's sells at their
+    tickets' quantity × decision close, and the park's draw likewise. A share that does not follow
+    from its parts sizes every buy on the sheet wrong at once, so each step is checked to the cent
+    — money is counted in cents, and VALUATION_TOLERANCE is half of one.
+    """
+    out = []
+    cash = sizing.get("cash") or {}
+    legs = float(cash.get("usd") or 0) + (float(cash.get("cad") or 0) / float(cash["usdcad"])
+                                          if cash.get("cad") else 0.0)
+    if abs(max(legs, 0.0) - float(cash.get("in_usd") or 0)) > VALUATION_TOLERANCE:
+        out.append(f"the attested cash {float(cash.get('in_usd') or 0):,.2f} USD does not follow "
+                   f"from its own legs ({legs:,.2f})")
+    sells = {r[0]: r for r in written if r[1] == "sell" and r[6] != "fund"}
+    proceeds = 0.0
+    for s in sizing.get("sold") or []:
+        r = sells.get(s["ticker"])
+        if r is None or r[2] is None or r[3] is None:
+            out.append(f"SELL {s['ticker']}: its proceeds count toward deployable cash and its "
+                       f"ticket carries no quantity × decision close")
+            continue
+        proceeds += float(r[2]) * float(r[3])
+    drawn = sum(float(r[2]) * float(r[3]) for r in written
+                if r[6] == "fund" and r[2] is not None and r[3] is not None)
+    deployable = float(cash.get("in_usd") or 0) + proceeds + drawn
+    if abs(deployable - float(sizing["deployable"])) > VALUATION_TOLERANCE:
+        out.append(f"deployable cash attested {float(sizing['deployable']):,.2f} but cash + "
+                   f"tonight's sells + the park's draw re-add to {deployable:,.2f}")
+    if abs(deployable / int(sizing["buys"]) - float(sizing["alloc"])) > VALUATION_TOLERANCE:
+        out.append(f"each buy's share attested {float(sizing['alloc']):,.2f} but "
+                   f"{deployable:,.2f} over {int(sizing['buys'])} buy(s) is "
+                   f"{deployable / int(sizing['buys']):,.2f}")
+    if sizing.get("shortfall") is not None and nav:
+        need = int(sizing["buys"]) * nav / engine.SLOTS - (float(cash.get("in_usd") or 0)
+                                                           + proceeds)
+        if abs(need - float(sizing["shortfall"])) > VALUATION_TOLERANCE:
+            out.append(f"the park's shortfall attested {float(sizing['shortfall']):,.2f} but "
+                       f"{int(sizing['buys'])} slot(s) less cash and proceeds is {need:,.2f}")
+    return out
 
 
 # ---- 5. book-vs-broker reconciliation age ------------------------------------------------------

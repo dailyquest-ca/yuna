@@ -464,8 +464,10 @@ def test_the_job_runs_end_to_end_and_reports_amber_without_a_nav(db, migrated):
 
 
 def test_the_job_writes_a_green_run_when_it_is_sized(db, migrated):
+    """Sized means sized by v1.1's §3.5 — the lesser of NAV ÷ 5 and deployable TFSA cash — so the
+    world states the cash its NAV implies: an empty book of 200,000 is 200,000 of cash."""
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=200_000.0)
     db.commit()
     out = subprocess.run([sys.executable, str(ROOT / "src" / "sheet.py")],
                          capture_output=True, text=True,
