@@ -29,7 +29,9 @@
 --
 -- Zak signs off before this is dispatched. It follows §3.2's own rule, and it ADMITS a tradable
 -- common stock rather than excluding one, but it changes the universe the engine ranks, and
--- `migrate` applies every pending file at once. Record his words here when he gives them.
+-- `migrate` applies every pending file at once. Signed off by Zak in chat on 2026-10-07, asked to
+-- confirm that SGI.US is the line still printing and TPX.US the dead one: "Sounds good, I trust
+-- you."
 --
 -- For whoever re-runs the cell of record on this tape: SGI.US's volume from 2016-08-23 to
 -- 2020-11-23 is a quarter of TPX.US's on identical closes — a raw share count, where learning 34
