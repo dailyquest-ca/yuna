@@ -5,6 +5,7 @@ gauge for it — and ideally only that gauge — notices. The recomputation gaug
 that matters most: the tape is edited underneath a stored decision, which is the failure this
 system is actually exposed to. Nothing crashes, no log records it, and every number changes.
 """
+import json
 import pathlib
 import subprocess
 import sys
@@ -291,6 +292,145 @@ def test_an_unsized_sheet_is_amber_not_red(db, migrated):
         db.commit()
         g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
     assert g["status"] == "amber" and g["unsized"] == 5
+
+
+FULL_BOOK = ("N00.US", "N01.US", "N02.US", "N03.US", "N04.US")   # the fixture's top five
+
+
+def test_a_quiet_night_with_a_full_book_is_green_not_amber(db, migrated):
+    """The book already matches the rank, so score decides nothing and writes nothing. Before the
+    attestation landed this read amber on 25 of the first 36 live sessions (2026-08-14 to 10-06;
+    64 of 93 check runs), every one gate-ON with a full five-name book."""
+    with db.cursor() as cur:
+        days = _world(cur, held=FULL_BOOK)
+        s = _score(cur, days)
+        db.commit()
+        assert s["orders"] == []
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "green" and g["decided"] == 0 and g["tickets"] == 0
+
+
+def test_a_decided_sheet_that_was_never_written_is_red(db, migrated):
+    """The failure the old amber existed to catch, now wearing its own colour."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        db.commit()
+        cur.execute("delete from tickets where session_date = %s", (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red" and g["decided"] == 5
+    assert "never written" in g["why"]
+    # The sheet is empty, so the brief has no order line to show — the reason has to name them.
+    assert all(f"BUY {t}" in g["why"] for t in FULL_BOOK)
+
+
+def test_a_partly_written_sheet_names_the_exit_that_never_left(db, migrated):
+    """Completeness is checked against what score decided, not against a count. A sheet that
+    carries its buys but lost its sell is the sharpest case: §5.4 makes the exit unblockable, and a
+    sell with no ticket is a position that never leaves."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",))
+        s = _score(cur, days)
+        db.commit()
+        assert {(o["ticker"], o["action"]) for o in s["orders"]} >= {("N15.US", "sell")}
+        cur.execute("delete from tickets where session_date = %s and action = 'sell'", (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red"
+    assert "SELL N15.US: decided by score and never written" in g["failures"]
+    assert "SELL N15.US" in g["why"]
+
+
+def test_a_ticket_cancelled_by_hand_was_still_written(db, migrated):
+    """Zak's own sessions have cancelled engine tickets by hand (2026-08-17: "CANCELLED
+    (superseded…)"). That is his call, and the order WAS written — completeness asks whether score
+    wrote what it decided, not whether Zak kept it. Red here would hold his buys for exercising it."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        cur.execute("""update tickets set state = 'cancelled', note = note || ' — CANCELLED by hand'
+                        where session_date = %s""", (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "green", g
+    assert "since withdrawn" in g["why"] and g["withdrawn"] == 5
+
+
+def test_a_ticket_beyond_the_decision_is_not_a_failure(db, migrated):
+    """A re-score withdraws only `proposed` tickets, so one Zak already executed survives a pass
+    that no longer decides it. That is the record of a real trade, not a missing order — the
+    completeness check must compare sets, never counts."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        cur.execute("""insert into tickets (session_date, ticker, account, sleeve, action, reason,
+                                            clause, order_type, qty, mark, rank, state, note)
+                       values (%s, 'N09.US', 'TFSA', 'momentum', 'sell', 'rank_exit', 'rank_exit',
+                               'market', 10, 50.0, 15, 'executed', 'an earlier pass, executed')""",
+                    (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "green", g
+    assert g["tickets"] == 6
+
+
+def test_the_job_attests_what_it_writes_under_a_freeze(db, migrated):
+    """The attestation is only worth something if `score` itself — not a test helper — counts the
+    sheet AFTER the freeze drops its buys. Run the real job under a freeze with one exit due, and
+    the record must say one sell, no buys, and match the tickets on the table."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",))
+        cur.execute("""insert into config (key, value, set_by) values ('freeze', %s, 'zak')""",
+                    (json.dumps({"on": True, "words": "hold the buys"}),))
+    db.commit()
+    out = subprocess.run([sys.executable, str(ROOT / "src" / "sheet.py")],
+                         capture_output=True, text=True,
+                         env={"DATABASE_URL": migrated, "DB_SSLMODE": "disable",
+                              "AS_OF": days[-1].isoformat(), "ENGINE_NAV": "200000",
+                              "PATH": "/usr/bin:/bin"})
+    assert out.returncode == 0, out.stdout + out.stderr
+    with db.cursor() as cur:
+        cur.execute("""select detail from engine_sessions
+                        where session_date = %s and mode = 'live'""", (days[-1],))
+        detail = cur.fetchone()[0]
+        cur.execute("""select ticker, action from tickets
+                        where session_date = %s and state not in ('cancelled', 'void')""",
+                    (days[-1],))
+        written = cur.fetchall()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert detail["orders"] == 1 and detail["sells"] == ["N15.US"] and detail["buys"] == []
+    assert written == [("N15.US", "sell")]
+    assert g["status"] == "green", g
+
+
+def test_a_shadow_session_reads_green_and_is_not_held_to_tickets(db, migrated):
+    """Shadow mode writes no tickets by design (sheet.write_tickets), so its decided orders have no
+    sheet to be compared with — and the gauge must not borrow the live one for the same close."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        s = desk.sheet(cur, days[-1], 200_000.0)
+        sheet.write_session(cur, s, "shadow", engine.digest())
+        sheet.write_ranks(cur, s, "shadow")
+        assert sheet.write_tickets(cur, s, "shadow") == (0, 0)
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur, "shadow"))
+    assert g["status"] == "green"
+    assert "shadow mode writes no tickets" in g["why"]
+    assert g["decided"] == 5 and g["tickets"] == 0
+
+
+def test_a_session_without_the_attestation_keeps_the_old_amber(db, migrated):
+    """Sessions stored before the attestation carry no `orders` key. The gauge still cannot tell a
+    quiet night from a failed write for those, so it must not call them green."""
+    with db.cursor() as cur:
+        days = _world(cur, held=FULL_BOOK)
+        _score(cur, days)
+        cur.execute("update engine_sessions set detail = detail - 'orders' - 'sells' - 'buys'")
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "amber"
+    assert "no attestation" in g["why"]
 
 
 def test_the_reconciliation_gauge_reddens_when_an_approval_outlives_a_session(db, migrated):
