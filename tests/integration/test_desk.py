@@ -6,11 +6,13 @@ pinned. What can go wrong here is the seam: a holding that left the universe, a 
 wrong series, a sell that waits on a buy, or a job that writes when it was told not to.
 """
 import datetime as dt
+import math
 import pathlib
 import subprocess
 import sys
 
 import numpy as np
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -18,8 +20,27 @@ import desk                                                               # noqa
 import engine                                                             # noqa: E402
 
 
-def _world(cur, *, n_days=700, rising=True, held=(), excluded=()):
-    """A tape with a benchmark and enough names to fill a book of five."""
+def _cash(cur, days, usd, cad=0.0, usdcad=None):
+    """A TFSA balances anchor on the last session — and, for CAD cash, the USDCAD close that
+    converts it. Since v1.1 (§3.5) a buy is sized to the lesser of NAV ÷ 5 and deployable TFSA cash,
+    and the cash comes from the store whatever the NAV's source: a world whose buys are meant to
+    carry quantities has to state the money as well as the NAV."""
+    cur.execute("""insert into balances (account, as_of, cash_cad, cash_usd, source)
+                   values ('TFSA', %s, %s, %s, 'test')""", (days[-1], cad, usd))
+    if usdcad is not None:
+        cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                       values ('USDCAD.FOREX','USDCAD','fx','CAD','active')
+                       on conflict (ticker) do nothing""")
+        cur.execute("""insert into prices (ticker,d,close,adj_close,volume) values (%s,%s,%s,%s,0)
+                       on conflict (ticker,d) do update set close = excluded.close""",
+                    ("USDCAD.FOREX", days[-1], usdcad, usdcad))
+
+
+def _world(cur, *, n_days=700, rising=True, held=(), excluded=(), cash=None):
+    """A tape with a benchmark and enough names to fill a book of five.
+
+    `cash` stages a TFSA anchor of that many USD (`_cash`). Left None the store states no cash, and
+    every buy on the sheet is unsized — with the reason — however its NAV was given."""
     names = [f"N{i:02d}.US" for i in range(20)]
     cur.execute("""insert into accounts (code, label, kind, currency)
                    values ('TFSA','TFSA','registered','CAD') on conflict do nothing""")
@@ -67,13 +88,17 @@ def _world(cur, *, n_days=700, rising=True, held=(), excluded=()):
     for t in held:
         cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
                        values (%s,'TFSA','momentum',100,40.0,'open')""", (t,))
+    if cash is not None:
+        _cash(cur, days, cash)
     return days
 
 
 def test_an_empty_book_seeds_five_from_the_top_of_the_rank(db, migrated):
-    """§3.5: "Seeding fills all five in one session." """
+    """§3.5: "Seeding fills all five in one session." The account holds the cash its NAV says it
+    does (an empty book, so NAV is all cash) — and v1.1 sizes against that cash, so every slot
+    fills at weight."""
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=200_000.0)
     db.commit()
     with db.cursor() as cur:
         s = desk.sheet(cur, days[-1], 200_000.0)
@@ -83,6 +108,8 @@ def test_an_empty_book_seeds_five_from_the_top_of_the_rank(db, migrated):
     assert [o["ticker"] for o in buys] == ["N00.US", "N01.US", "N02.US", "N03.US", "N04.US"]
     assert all(o["rank"] <= engine.FILL_BAND for o in buys)
     assert all(o["qty"] > 0 for o in buys), "a seeded slot must size to something"
+    assert all(o["qty"] == engine.position_size(200_000.0, o["mark"]) for o in buys), \
+        "200,000 of cash over five buys is a full slot each"
 
 
 def test_the_gate_off_sells_the_whole_book_and_buys_nothing(db, migrated):
@@ -250,10 +277,15 @@ def test_the_park_is_never_sold_for_failing_to_rank(db, migrated):
 def test_the_park_funds_the_seed_when_the_gate_is_on(db, migrated):
     """§6.5: "all five slots fill from the first live ranking in one session." The capital for that
     is the bridge, so the bridge sells and the five buy in the same session — sells first (§3.5),
-    because the cash has to exist before the buys it pays for."""
+    because the cash has to exist before the buys it pays for.
+
+    v1.1 (§3.5): the park pays the buys' shortfall beyond cash, and a shortfall beyond the park is
+    "reported as held-below-weight, not funded". With no cash at all, five slots need 200,000 and
+    the bridge holds 125,955: the whole lot is drawn because the shortfall is bigger than it, and
+    the five buys share what it raised — each below weight, by hand below."""
     with db.cursor() as cur:
-        days = _world(cur)                        # gate ON, empty book: five buys
-        _park(cur, days)
+        days = _world(cur, cash=0.0)              # gate ON, empty book: five buys, no cash
+        _park(cur, days)                          # SPMO 810 @ 155.5
         _shadow_passed(cur, days)
     db.commit()
     with db.cursor() as cur:
@@ -262,8 +294,14 @@ def test_the_park_funds_the_seed_when_the_gate_is_on(db, migrated):
     assert s["gate"] == "ON"
     actions = [(o["action"], o["ticker"], o["clause"]) for o in s["orders"]]
     assert actions[0] == ("sell", "SPMO.US", "fund"), "the funding sell leads the sheet"
-    assert len([o for o in s["orders"] if o["action"] == "buy"]) == 5
-    assert [o for o in s["orders"] if o["clause"] == "fund"][0]["qty"] == 810
+    buys = [o for o in s["orders"] if o["action"] == "buy"]
+    assert len(buys) == 5
+    assert [o for o in s["orders"] if o["clause"] == "fund"][0]["qty"] == 810, \
+        "200,000 of shortfall is more than the lot, so the draw stops at the lot"
+    share = 810 * 155.5 / 5                       # 25,191 each
+    for o in buys:
+        assert o["qty"] == min(int(200_000.0 / 5 // o["mark"]), int(share // o["mark"]))
+        assert o["below_weight"] is True and "below §3.5 weight" in o["why"]
 
 
 def test_the_park_is_not_sold_when_nothing_actually_buys(db, migrated):
@@ -295,9 +333,12 @@ def test_a_partial_line_holds_a_slot_and_is_reported_rather_than_topped_up(db, m
     buy is emitted, no sell is emitted, and the capital that slot was meant to carry stays parked.
 
     The engine has no rule for this and must not invent one — topping up a kept holding is a
-    rebalance, and rebalancing a momentum book trims winners. So the sheet REPORTS it, in dollars,
-    and §0.3 leaves the ruling with Zak. This test pins both halves: nothing is ordered, and the
-    shortfall is impossible to miss.
+    rebalance, and rebalancing a momentum book trims winners. So the sheet REPORTS it, in dollars.
+    This test pins both halves: nothing is ordered, and the shortfall is impossible to miss.
+
+    The ruling the sheet used to leave with Zak (§0.3) is made: v1.1's §3.5, "A slot filled below
+    weight counts as filled and is reported; it is never topped up." The render now quotes it
+    rather than asking for it.
     """
     with db.cursor() as cur:
         days = _world(cur)
@@ -316,18 +357,36 @@ def test_a_partial_line_holds_a_slot_and_is_reported_rather_than_topped_up(db, m
     assert short["N00.US"]["rank"] == 1
     assert short["N00.US"]["slot"] == 200_000.0 / engine.SLOTS
     assert short["N00.US"]["pct_of_slot"] < 0.10, "a few percent of the weight it should carry"
-    assert "NOT ordered" in desk.render(s) and "Zak's (§0.3)" in desk.render(s)
+    assert "NOT ordered" in desk.render(s) and "it is never topped up" in desk.render(s)
 
 
-def test_a_buy_nets_against_a_line_the_account_already_holds(db, migrated):
-    """The belt, exercised directly. `engine.orders` does not currently hand back a buy for a name
-    the book holds — it keeps it — so this goes at the seam rather than through the sheet: given a
-    buy and a holding, the ORDER is the slot less the line."""
-    px, nav = 90.0, 200_000.0
-    target = engine.position_size(nav, px)
-    assert max(0, int(target - 20)) == target - 20
-    assert max(0, int(target - target)) == 0, "a slot already at weight orders nothing"
-    assert max(0, int(target - (target + 5))) == 0, "and one above it never orders negative"
+def test_a_buy_of_a_line_the_account_already_holds_is_never_emitted(db, migrated, monkeypatch):
+    """The belt, exercised through the sheet. `engine.orders` keeps a held name in the top 12
+    rather than handing it back as a buy, so the rule as written never produces this — which is
+    why it is forced here, by an `engine.orders` that re-buys every line it keeps.
+
+    The belt used to NET such a buy: the slot less the line held. That is a top-up by another name,
+    and v1.1's §3.5 settles it: "A slot filled below weight counts as filled and is reported; it is
+    never topped up." So the buy is no order at all — it is reported, with the reason."""
+    with db.cursor() as cur:
+        days = _world(cur, cash=200_000.0)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','momentum',20,40.0,'open')""")
+    db.commit()
+    real = engine.orders
+
+    def orders_that_rebuy(ranked, held, **kw):
+        sells, buys = real(ranked, held, **kw)
+        return sells, list(held) + list(buys)
+
+    monkeypatch.setattr(engine, "orders", orders_that_rebuy)
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+
+    assert "N00.US" not in [o["ticker"] for o in s["orders"]], "no buy, and no sell"
+    assert [h["ticker"] for h in s["held_below"]] == ["N00.US"]
+    assert "never tops a slot up" in s["held_below"][0]["why"]
+    assert len([o for o in s["orders"] if o["action"] == "buy"]) == engine.SLOTS - 1
 
 
 def test_the_bridge_is_held_until_the_shadow_passes(db, migrated):
@@ -420,35 +479,42 @@ def test_an_account_whose_labels_match_the_plan_is_silent(db, migrated):
         assert desk.sleeve_divergence(cur) == []
 
 
-def test_the_seed_tops_up_the_partial_slots_and_empties_the_park(db, migrated):
-    """Zak, 2026-08-19: *"The strategy should auto suggest the right thing... If it suggests
-    leaving anything in SPMO there is a problem."* That is the ruling §0.3 required, and this is
-    its shape: at seed conditions (gate ON, shadow passed, park held), a kept top-12 name below its
-    weight is bought UP TO NAV/5, funded by the park sell on the same sheet. The dollars must
-    account for the whole park — nothing stays in SPMO.
+def test_a_partial_slot_is_reported_and_the_park_pays_only_the_shortfall(db, migrated):
+    """What the 2026-08-19 seed ruling became under v1.1, and the defect it replaces (QC A6).
+
+    At seed conditions (gate ON, shadow passed, a park held) the sheet used to TOP UP every kept
+    top-12 name below its weight and sell the WHOLE park to pay for it — a rebalance, proposed
+    whenever any park lot sat in the account. v1.1's §3.5 ends both halves: "A slot filled below
+    weight counts as filled and is reported; it is never topped up", and "a shortfall beyond TFSA
+    park and cash is reported as held-below-weight, not funded" — so the park pays the buys'
+    shortfall beyond cash and proceeds, and only that.
+
+    Here N00 sits at 20 shares (rank 1), four slots are free, the cash is 100,000 and the bridge is
+    810 SPMO at 155.5. Four slots need 160,000; the cash covers 100,000; the park draws the other
+    60,000 in whole shares — 386, not 810 — and the four fills land at weight.
     """
     nav = 200_000.0
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=100_000.0)
         _park(cur, days)                                # SPMO 810 @ 155.5 ≈ 125.9k
         _shadow_passed(cur, days)
         cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
                        values ('N00.US','TFSA','momentum',20,40.0,'open')""")
-        cur.execute("select close from prices where ticker='N00.US' and d=%s", (days[-1],))
-        px = float(cur.fetchone()[0])
     db.commit()
     with db.cursor() as cur:
         s = desk.sheet(cur, days[-1], nav)
 
+    assert not [o for o in s["orders"] if o["clause"] == "top_up"], "never topped up"
+    assert not [o for o in s["orders"] if o["ticker"] == "N00.US"], "kept: no buy, and no sell"
+    assert [u["ticker"] for u in s["underweight"]] == ["N00.US"], "reported instead"
     fund = [o for o in s["orders"] if o["clause"] == "fund"]
-    topups = [o for o in s["orders"] if o["clause"] == "top_up"]
-    fills = [o for o in s["orders"] if o["clause"] == "fill"]
-    assert len(fund) == 1 and fund[0]["qty"] == 810, "the whole park sells — nothing stays in SPMO"
+    shortfall = 4 * nav / 5 - 100_000.0                           # 60,000
+    assert len(fund) == 1 and fund[0]["qty"] == math.ceil(shortfall / 155.5) == 386, \
+        "the shortfall in whole shares — never the whole lot because a lot exists"
     assert s["orders"][0] is fund[0], "and the cash leg leads the sheet (§3.5: sells first)"
-    assert len(topups) == 1 and topups[0]["ticker"] == "N00.US"
-    assert topups[0]["qty"] == engine.position_size(nav, px) - 20, "the slot, less the line held"
+    fills = [o for o in s["orders"] if o["clause"] == "fill"]
     assert len(fills) == 4, "the four genuinely free slots fill"
-    assert s["underweight"] == [], "topped up is not underweight — the report empties"
+    assert all(o["qty"] == engine.position_size(nav, o["mark"]) for o in fills), "at weight"
 
 
 def test_topups_never_fire_while_the_shadow_runs(db, migrated):
@@ -481,3 +547,114 @@ def test_topups_cannot_pyramid_winners_once_the_park_is_empty(db, migrated):
         s = desk.sheet(cur, days[-1], 200_000.0)
     assert not [o for o in s["orders"] if o["clause"] in ("top_up", "fund")]
     assert [u["ticker"] for u in s["underweight"]] == ["N00.US"], "still visible, never bought"
+
+
+def test_the_tape_is_read_over_the_window_the_engine_reads_and_decides_as_the_whole_tape(
+        db, migrated, monkeypatch):
+    """QC 2026-10-07, A34. The load read every bar since 2003 — 9.2M rows a call, 73.7 s on average
+    and 117.1 s at worst against the server's 120 s statement timeout — for a decision that reads
+    the last 253 sessions. Both halves have to hold: nothing before the window reaches the arrays,
+    and the sheet is exactly the one the whole tape gives.
+
+    The depth is stated here from §3's constants rather than read back from `desk.reads()`: the
+    deepest reads are §3.3's formation close and its 252-return vol window, and §3.7(3)'s
+    252-return pair test.
+    """
+    import bars
+    deepest = max(engine.FORMATION, engine.SKIP, engine.VOL_WINDOW, engine.SCREEN_WINDOW - 1,
+                  engine.ADDV_WINDOW - 1, bars.TWIN_WINDOW)
+    with db.cursor() as cur:
+        days = _world(cur, held=("N03.US", "N15.US"))     # one kept, one a rank exit
+        # a listed name that stopped printing long ago: it has bars, and none in the window
+        cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                       values ('GONE.US','GONE.US','stock','USD','active')""")
+        for d in days[:200]:
+            cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                           values ('GONE.US',%s,30,30,30,30,30,9000000)""", (d,))
+    db.commit()
+    with db.cursor() as cur:
+        sessions, tickers, adj, raw, dv, _ = desk.load(cur, days[-1])
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    i = len(sessions) - 1
+    first = i - deepest
+    assert first > 0, "the fixture must reach further back than the window, or this proves nothing"
+    for name, a in (("adj", adj), ("raw", raw), ("dv", dv)):
+        assert np.isnan(a[:first]).all(), f"{name}: a bar from before the window was loaded"
+    printing = [j for j, t in enumerate(tickers) if t != "GONE.US"]
+    assert np.isfinite(adj[first:, printing]).all(), "and every bar inside it was"
+    assert "GONE.US" in tickers and s["universe"] == 21, \
+        "a name with no bar in the window keeps its column — universe_count means what it did"
+    assert [o["ticker"] for o in s["orders"] if o["action"] == "sell"] == ["N15.US"]
+
+    # The same code with the window opened to every session: the decision may not move.
+    monkeypatch.setattr(desk, "reads", lambda: {"the whole tape": len(sessions)}, raising=False)
+    with db.cursor() as cur:
+        whole = desk.sheet(cur, days[-1], 200_000.0)
+    assert whole == s
+
+
+def _split(cur, days, ticker, *, ratio, at, turnover, drift=0.0013):
+    """A name stored the way the vendor's per-ticker history stores a split once it is re-pulled:
+    the RAW close on every bar — before `at`, `ratio` times the adjusted close (2.0 for a 2:1, 0.1
+    for a 1:10 reverse) — the adjusted close continuous, and the volume restated in post-split
+    shares. Production's APH.US is this shape. It trades `turnover` dollars every session, straight
+    through the split, and its drift is above the ladder's so that if it is ranked it ranks first.
+    """
+    wiggle = np.cumsum(np.random.default_rng(3).normal(0, 0.006, len(days)))
+    cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                   values (%s,%s,'stock','USD','active')""", (ticker, ticker))
+    for k, d in enumerate(days):
+        a = 50.0 * float(np.exp(drift * k + wiggle[k]))
+        c = a * ratio if k < at else a
+        cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (ticker, d, c, c * 1.01, c * 0.99, c, a, int(round(turnover / a))))
+
+
+def test_a_split_leaves_a_names_liquidity_where_it_was(db, migrated):
+    """QC 2026-10-07, A7. §3.2's floor and pool ask how much a name trades, and a split changes
+    nothing about that. Live ADDV was the raw close times the stored volume, and the stored volume
+    is split-adjusted once a name is re-pulled — so every bar before a split read at the split
+    factor times its turnover (APH.US, 2:1 on 2026-09-03, read 1.67x on 10-05). The code of record
+    prices it on the adjusted close, where the factor cancels.
+
+    This name trades $7M a day through a 2:1 split ten sessions before the decision. Its ADDV is
+    $7M on every session across the split, it sits below §3.2's $10M floor, and it is not ranked —
+    under the raw close it read $14M, ranked first and was bought."""
+    turnover = 7_000_000.0
+    with db.cursor() as cur:
+        days = _world(cur)
+        _split(cur, days, "SPL.US", ratio=2.0, at=len(days) - 10, turnover=turnover)
+    db.commit()
+    with db.cursor() as cur:
+        sessions, tickers, adj, raw, dv, _ = desk.load(cur, days[-1])
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    i, j = len(sessions) - 1, tickers.index("SPL.US")
+    addv = [float(engine.median_addv(dv, k)[j]) for k in range(i - 60, i + 1)]
+    assert max(abs(a / turnover - 1) for a in addv) < 1e-4, \
+        f"ADDV stepped across the split: {min(addv):,.0f} .. {max(addv):,.0f}"
+    assert raw[i, j] >= engine.SCREEN_MIN_PRICE, "the $5 floor still reads the print, and passes"
+    assert "SPL.US" not in [r["ticker"] for r in s["ranks"]], "below the $10M floor: not ranked"
+    assert "SPL.US" not in [o["ticker"] for o in s["orders"]], "and never bought"
+
+
+def test_a_reverse_split_does_not_sell_a_liquid_holding(db, migrated):
+    """The mirror. Before a 1:10 reverse split the raw prints sit at a tenth of the adjusted close
+    beside volume restated in post-split shares, so the raw close read a tenth of the turnover: a
+    $40M name read $4M, failed §3.2's $10M floor, fell out of the rank, and — held — was queued to
+    sell as a rank exit (§3.5) for something that never happened to its trading."""
+    turnover = 40_000_000.0
+    with db.cursor() as cur:
+        days = _world(cur, held=("N00.US",))
+        _split(cur, days, "RVS.US", ratio=0.1, at=len(days) - 10, turnover=turnover)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('RVS.US','TFSA','momentum',100,40.0,'open')""")
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    rank = {r["ticker"]: r for r in s["ranks"]}
+    assert "RVS.US" in rank, "a $40M name passes the $10M floor and is ranked"
+    assert abs(rank["RVS.US"]["addv"] / turnover - 1) < 1e-4
+    assert rank["RVS.US"]["rank"] == 1
+    assert "RVS.US" not in [o["ticker"] for o in s["orders"] if o["action"] == "sell"], \
+        "a held name ranked first is kept, not sold"

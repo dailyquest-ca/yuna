@@ -13,8 +13,8 @@ superseded, and why.
 
 **v1.0, promoted 2026-08-15, replaced the engine.** One momentum sleeve in the TFSA, ranked by a
 single number, gated on SPY's 200-day. The fundamentals machine that came before it — CCN, hurdles,
-the bench, arming, stops and trails — is retired from the schedule and survives only as dispatch-only
-tooling. [`docs/wo-a23-the-engine-takes-production.md`](docs/wo-a23-the-engine-takes-production.md)
+the bench, arming, stops and trails — is retired: its source stays in `src/` for history and no
+workflow runs it (learning 66). [`docs/wo-a23-the-engine-takes-production.md`](docs/wo-a23-the-engine-takes-production.md)
 is the record of that changeover.
 
 ## Architecture (mirror of plan §4)
@@ -22,7 +22,7 @@ is the record of that changeover.
 | Layer | What it is |
 |---|---|
 | **Data** | EODHD **EOD Historical Data — All World** (§4.5): end-of-day bars for US common stocks + SPY, exchange symbol lists, delisted lines. **No fundamentals, news, intraday or calendar feeds are read by any decision** |
-| **Compute** | **ingest → reconcile → score → check → compose → notify.** Three scheduled workflows (`ingest-daily` ×2 · `ingest-universe` · `backup`) and the chain hanging off them by `needs:` in `pipeline.yml`, with §6.4's `shadow` beside `check` — **the chain has no clock; the sessions keep appointments** (2026-08-05). Everything else — `migrate`, `backfill`, `closeout`, both backtests, and every retired legacy job — is **dispatch-only tooling**; nothing joins the schedule without a plan edit |
+| **Compute** | **ingest → reconcile → score → check → compose → notify.** Three scheduled workflows (`ingest-daily` ×2 · `ingest-universe` · `backup`) and the chain hanging off them by `needs:` in `pipeline.yml`, with §6.4's `shadow` beside `check` — **the chain has no clock; the sessions keep appointments** (2026-08-05). Everything else — `migrate`, `backfill`, both backtests — is **dispatch-only tooling**, `closeout` is run once by hand and has no workflow, and the retired legacy jobs have no workflow at all (learning 66); nothing joins the schedule without a plan edit |
 | **Store** | One Supabase Postgres project — universe → tape → `engine_sessions` / `engine_ranks` → tickets → book, plus the `learnings` ledger and human views for browsing |
 | **Judge** | The morning brief and §4.1's Saturday letter, delivered by the Routines in the Yuna chat/cowork project. Judgment happens in chat; arithmetic happens in the pipeline (§5.1) |
 | **Execute** | Zak places every order — at the open, **sells first, then buys** (§3.5) |
@@ -64,19 +64,24 @@ src/          ingest + compute jobs (Python); db.py holds the shared heartbeat c
 | `sheet.py` | the tape, `book`, `config.engine_nav` | `engine_sessions`, `engine_ranks`, and §4.3's tickets in state `proposed` |
 | `gauges.py` | the tape and everything `sheet` wrote | nothing but its own report row — a checker that can edit what it checks is a participant, not a witness |
 | `shadow.py` | the tape, `concentrated.py` | `shadow_attestations` — §6.4's written record |
-| `brief.py` | `v_session_payload`, one read | a composed `briefs` row: §5.1's morning brief, or §4.1's Saturday letter |
+| `brief.py` | `v_session_payload`, one read — plus the accounts' cash anchors (§2.4) and, Saturdays, the household against §1's destination | a composed `briefs` row: §5.1's morning brief, or §4.1's Saturday letter |
 | `notify.py` | composed `briefs`, `config.push_channel` | nothing but its runs row — proves the words exist before the Routines deliver them |
-| `funnel.py` (`ingest-universe`, Saturdays) | the US exchange listing and the bulk last-day tape — two calls, no screener | `universe` membership: who is listed, who is liquid, who has gone |
+| `funnel.py` (`ingest-universe`, Saturdays) | the US exchange listing and the bulk last-day tape — two calls, no screener; `universe_excluded` against the tape | `universe` membership: who is listed, who is liquid, who has gone — and an amber naming any duplicate-listing exclusion whose excluded line prints while its kept line does not (§3.2) |
 | `backup.py` | the decisions — everything but the bars, the research grid and `fundamentals` | a compressed dump, committed from inside the job's own heartbeat |
 
-**Dispatch-only.** `desk.py` (tonight's sheet, read-only) · `closeout.py` (§6.2, once) ·
-`migrate.py` · `backfill.py` · `verify_run.py` · `concentrated.py` and the rest of the research
-grid. The retired legacy machine (`score.py`, `check.py`, `compose.py`, `fills.py`, `signals.py`,
+**Dispatch-only.** `desk.py` (tonight's sheet, read-only) · `migrate.py` · `backfill.py` ·
+`verify_run.py` · `concentrated.py` and the rest of the research grid. **Hand-run, no workflow:**
+`closeout.py` (§6.2, once, from a shell) · `restore.py` (a `backup` dump into a freshly migrated
+database). The retired legacy machine (`score.py`, `check.py`, `compose.py`, `fills.py`,
 `arming.py`, `rank.py`, `fundamentals.py`, `phase0.py`) keeps its source for history and has no
-workflow at all — its buttons were deleted 2026-09-13 (learning 66).
+workflow at all — the last of its buttons were deleted 2026-09-13 (learning 66). **`signals.py` is
+not part of it:** it was the retired engine's formula library, and the nightly `ingest.py` still
+calls three of its functions for quarantine and split handling, while `shadow` reaches it through
+`concentrated.py` → `backtest.py`.
 
 Debug from `runs.detail`, never from Actions log downloads — those 302 to a blob store that
 403s even unauthenticated. Every job embeds its traceback in the heartbeat, and an
-`if: failure()` autopsy step catches deaths that happen before the heartbeat opens.
+autopsy step — run on a failure, and on a cancel or timeout that lands before the work finishes —
+catches deaths that happen before the heartbeat opens and closes rows a killed job left `running`.
 
 *First light: 2026-07-30. The engine took production: 2026-08-16.* 🌙

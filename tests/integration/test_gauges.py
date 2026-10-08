@@ -5,6 +5,7 @@ gauge for it — and ideally only that gauge — notices. The recomputation gaug
 that matters most: the tape is edited underneath a stored decision, which is the failure this
 system is actually exposed to. Nothing crashes, no log records it, and every number changes.
 """
+import json
 import pathlib
 import subprocess
 import sys
@@ -19,6 +20,9 @@ from test_desk import _world                                              # noqa
 
 
 def _score(cur, days, nav=200_000.0, mode="live"):
+    """One pass of `score` without the job around it. Since v1.1 a buy is sized against the TFSA
+    cash the store states as well as against NAV, so a test whose buys must carry quantities builds
+    its world with `_world(cur, cash=...)`; without it every buy is written unsized."""
     s = desk.sheet(cur, days[-1], nav)
     sheet.write_session(cur, s, mode, engine.digest())
     sheet.write_ranks(cur, s, mode)
@@ -32,7 +36,7 @@ def _statuses(gauge_list):
 
 def test_a_clean_night_is_green_on_every_gauge(db, migrated):
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=200_000.0)
         _score(cur, days)
     db.commit()
     verdict, got = gauges.run(db)
@@ -242,7 +246,7 @@ def test_the_sheet_gauge_re_derives_every_quantity_from_the_plan(db, migrated):
     """§3.5's own arithmetic, recomputed. A quantity that does not follow from it is the single
     most expensive defect this repository can produce, because it does not throw."""
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=200_000.0)
         _score(cur, days)
         db.commit()
         assert gauges.sheet_arithmetic(cur, gauges.newest_session(cur))["status"] == "green"
@@ -291,6 +295,145 @@ def test_an_unsized_sheet_is_amber_not_red(db, migrated):
         db.commit()
         g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
     assert g["status"] == "amber" and g["unsized"] == 5
+
+
+FULL_BOOK = ("N00.US", "N01.US", "N02.US", "N03.US", "N04.US")   # the fixture's top five
+
+
+def test_a_quiet_night_with_a_full_book_is_green_not_amber(db, migrated):
+    """The book already matches the rank, so score decides nothing and writes nothing. Before the
+    attestation landed this read amber on 25 of the first 36 live sessions (2026-08-14 to 10-06;
+    64 of 93 check runs), every one gate-ON with a full five-name book."""
+    with db.cursor() as cur:
+        days = _world(cur, held=FULL_BOOK)
+        s = _score(cur, days)
+        db.commit()
+        assert s["orders"] == []
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "green" and g["decided"] == 0 and g["tickets"] == 0
+
+
+def test_a_decided_sheet_that_was_never_written_is_red(db, migrated):
+    """The failure the old amber existed to catch, now wearing its own colour."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        db.commit()
+        cur.execute("delete from tickets where session_date = %s", (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red" and g["decided"] == 5
+    assert "never written" in g["why"]
+    # The sheet is empty, so the brief has no order line to show — the reason has to name them.
+    assert all(f"BUY {t}" in g["why"] for t in FULL_BOOK)
+
+
+def test_a_partly_written_sheet_names_the_exit_that_never_left(db, migrated):
+    """Completeness is checked against what score decided, not against a count. A sheet that
+    carries its buys but lost its sell is the sharpest case: §5.4 makes the exit unblockable, and a
+    sell with no ticket is a position that never leaves."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",))
+        s = _score(cur, days)
+        db.commit()
+        assert {(o["ticker"], o["action"]) for o in s["orders"]} >= {("N15.US", "sell")}
+        cur.execute("delete from tickets where session_date = %s and action = 'sell'", (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red"
+    assert "SELL N15.US: decided by score and never written" in g["failures"]
+    assert "SELL N15.US" in g["why"]
+
+
+def test_a_ticket_cancelled_by_hand_was_still_written(db, migrated):
+    """Zak's own sessions have cancelled engine tickets by hand (2026-08-17: "CANCELLED
+    (superseded…)"). That is his call, and the order WAS written — completeness asks whether score
+    wrote what it decided, not whether Zak kept it. Red here would hold his buys for exercising it."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days)
+        cur.execute("""update tickets set state = 'cancelled', note = note || ' — CANCELLED by hand'
+                        where session_date = %s""", (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "green", g
+    assert "since withdrawn" in g["why"] and g["withdrawn"] == 5
+
+
+def test_a_ticket_beyond_the_decision_is_not_a_failure(db, migrated):
+    """A re-score withdraws only `proposed` tickets, so one Zak already executed survives a pass
+    that no longer decides it. That is the record of a real trade, not a missing order — the
+    completeness check must compare sets, never counts."""
+    with db.cursor() as cur:
+        days = _world(cur, cash=200_000.0)
+        _score(cur, days)
+        cur.execute("""insert into tickets (session_date, ticker, account, sleeve, action, reason,
+                                            clause, order_type, qty, mark, rank, state, note)
+                       values (%s, 'N09.US', 'TFSA', 'momentum', 'sell', 'rank_exit', 'rank_exit',
+                               'market', 10, 50.0, 15, 'executed', 'an earlier pass, executed')""",
+                    (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "green", g
+    assert g["tickets"] == 6
+
+
+def test_the_job_attests_what_it_writes_under_a_freeze(db, migrated):
+    """The attestation is only worth something if `score` itself — not a test helper — counts the
+    sheet AFTER the freeze drops its buys. Run the real job under a freeze with one exit due, and
+    the record must say one sell, no buys, and match the tickets on the table."""
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",))
+        cur.execute("""insert into config (key, value, set_by) values ('freeze', %s, 'zak')""",
+                    (json.dumps({"on": True, "words": "hold the buys"}),))
+    db.commit()
+    out = subprocess.run([sys.executable, str(ROOT / "src" / "sheet.py")],
+                         capture_output=True, text=True,
+                         env={"DATABASE_URL": migrated, "DB_SSLMODE": "disable",
+                              "AS_OF": days[-1].isoformat(), "ENGINE_NAV": "200000",
+                              "PATH": "/usr/bin:/bin"})
+    assert out.returncode == 0, out.stdout + out.stderr
+    with db.cursor() as cur:
+        cur.execute("""select detail from engine_sessions
+                        where session_date = %s and mode = 'live'""", (days[-1],))
+        detail = cur.fetchone()[0]
+        cur.execute("""select ticker, action from tickets
+                        where session_date = %s and state not in ('cancelled', 'void')""",
+                    (days[-1],))
+        written = cur.fetchall()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert detail["orders"] == 1 and detail["sells"] == ["N15.US"] and detail["buys"] == []
+    assert written == [("N15.US", "sell")]
+    assert g["status"] == "green", g
+
+
+def test_a_shadow_session_reads_green_and_is_not_held_to_tickets(db, migrated):
+    """Shadow mode writes no tickets by design (sheet.write_tickets), so its decided orders have no
+    sheet to be compared with — and the gauge must not borrow the live one for the same close."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        s = desk.sheet(cur, days[-1], 200_000.0)
+        sheet.write_session(cur, s, "shadow", engine.digest())
+        sheet.write_ranks(cur, s, "shadow")
+        assert sheet.write_tickets(cur, s, "shadow") == (0, 0)
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur, "shadow"))
+    assert g["status"] == "green"
+    assert "shadow mode writes no tickets" in g["why"]
+    assert g["decided"] == 5 and g["tickets"] == 0
+
+
+def test_a_session_without_the_attestation_keeps_the_old_amber(db, migrated):
+    """Sessions stored before the attestation carry no `orders` key. The gauge still cannot tell a
+    quiet night from a failed write for those, so it must not call them green."""
+    with db.cursor() as cur:
+        days = _world(cur, held=FULL_BOOK)
+        _score(cur, days)
+        cur.execute("update engine_sessions set detail = detail - 'orders' - 'sells' - 'buys'")
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "amber"
+    assert "no attestation" in g["why"]
 
 
 def test_the_reconciliation_gauge_reddens_when_an_approval_outlives_a_session(db, migrated):
@@ -397,6 +540,27 @@ def test_a_red_reconcile_today_holds_the_buys_even_after_a_green_yesterday(db, m
     assert g["last_attested"] is not None, "yesterday's success is still reported, just not trusted"
 
 
+def test_a_red_reconcile_names_the_receipt_the_ledger_refused(db, migrated):
+    """QC 2026-10-07, A21. A receipt the ledger refuses — the true post-split sale, a mistyped
+    quantity — holds the buys every night until the history is repaired, and the gauge is the line
+    of the brief that says why. It used to print "went red on 0 position break(s):" and nothing
+    else, because it read only the broker breaks; the refusal's ticker and the ledger's reason are
+    what Zak needs to act on."""
+    import json
+    refused = [{"account": "TFSA", "ticker": "N01.US", "ticket": 7,
+                "receipt": "sell 200 @ 30 on 2026-08-17",
+                "why": "ledger drives TFSA N01.US to -100 shares — the history for this name is "
+                       "incomplete"}]
+    with db.cursor() as cur:
+        cur.execute("""insert into runs (job, status, finished_at, detail)
+                       values ('reconcile','red', now(), %s)""",
+                    (json.dumps({"breaks": [], "refused": refused}),))
+        db.commit()
+        g = gauges.reconciliation_age(cur)
+    assert g["status"] == "red"
+    assert "TFSA N01.US: ledger drives TFSA N01.US to -100 shares" in g["why"]
+
+
 def test_a_green_reconcile_after_a_red_one_clears_the_gauge(db, migrated):
     """The newest run is what governs, in both directions — a gauge that latched red would need a
     hand to clear it, and §4.4's suite has no such state."""
@@ -423,7 +587,7 @@ def test_a_withdrawn_ticket_is_not_counted_as_an_order(db, migrated):
     a withdrawn ticket would go RED for failing to match §3.5's arithmetic.
     """
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=200_000.0)
         _score(cur, days)
         cur.execute("""select count(*) from tickets where session_date = %s""", (days[-1],))
         before = cur.fetchone()[0]
@@ -444,7 +608,7 @@ def test_a_stale_quantity_on_a_withdrawn_ticket_does_not_go_red(db, migrated):
     engine has already retracted. Red holds the buys (§4.4), so this would hold a correct sheet on
     the strength of an incorrect one nobody is being asked to execute."""
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=200_000.0)
         _score(cur, days)
         cur.execute("""update tickets set state = 'cancelled', qty = 999999
                         where session_date = %s and ticker = 'N00.US'""", (days[-1],))
@@ -454,29 +618,178 @@ def test_a_stale_quantity_on_a_withdrawn_ticket_does_not_go_red(db, migrated):
     assert sheet_gauge["status"] == "green", sheet_gauge["why"]
 
 
-def test_the_gauge_re_derives_a_seed_sheet_fund_and_topups_included(db, migrated):
-    """The first real seed sheet must not be held by its own arithmetic check. A `fund` sell's
-    quantity is the park position, not NAV/5; a `top_up` buy is the slot LESS the line held. The
-    gauge validates each by its own rule — and still goes red when a top-up quantity is wrong,
-    because a wrong size on the one sheet that deploys everything is the most expensive number
-    this system can produce."""
+def test_the_gauge_re_derives_a_seed_sheet_park_draw_included(db, migrated):
+    """The first real seed sheet must not be held by its own arithmetic check, and a wrong size on
+    the one sheet that deploys everything is the most expensive number this system can produce.
+
+    Since v1.1 a `fund` sell is the park's draw for the buys' shortfall (§3.5) — here 386 of 810
+    SPMO, for four slots of 40,000 against 100,000 of cash — and the partial line at rank 1 is
+    reported, never topped up. The gauge re-derives the draw from the recorded shortfall and each
+    fill from its share of the cash, so the sheet reads green; a fill one share off reads red, and
+    so does a draw of the whole lot — the sell the gauge used to pass at any quantity (QC A6)."""
     from test_desk import _park, _shadow_passed
     with db.cursor() as cur:
-        days = _world(cur)
+        days = _world(cur, cash=100_000.0)
         _park(cur, days)
         _shadow_passed(cur, days)
         cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
                        values ('N00.US','TFSA','momentum',20,40.0,'open')""")
-        _score(cur, days)
+        s = _score(cur, days)
     db.commit()
+    assert [o["qty"] for o in s["orders"] if o["clause"] == "fund"] == [386]
+    assert not [o for o in s["orders"] if o["clause"] == "top_up"]
     verdict, got = gauges.run(db)
     sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
     assert sheet_gauge["status"] == "green", sheet_gauge
 
-    with db.cursor() as cur:                            # now break the top-up's size
-        cur.execute("""update tickets set qty = qty + 7
-                        where clause = 'top_up' and session_date = %s""", (days[-1],))
+    with db.cursor() as cur:                            # a fill one share off
+        cur.execute("""update tickets set qty = qty + 1
+                        where ticker = 'N01.US' and session_date = %s""", (days[-1],))
     db.commit()
     verdict, got = gauges.run(db)
     sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
-    assert sheet_gauge["status"] == "red", "a mis-sized top-up must hold the buys"
+    assert sheet_gauge["status"] == "red", "a mis-sized fill must hold the buys"
+
+    with db.cursor() as cur:                            # the fill back, and the whole lot drawn
+        cur.execute("""update tickets set qty = qty - 1
+                        where ticker = 'N01.US' and session_date = %s""", (days[-1],))
+        cur.execute("""update tickets set qty = 810
+                        where clause = 'fund' and session_date = %s""", (days[-1],))
+    db.commit()
+    verdict, got = gauges.run(db)
+    sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
+    assert sheet_gauge["status"] == "red", "the whole lot is not the shortfall"
+    assert any("fund sell 810" in f for f in sheet_gauge["failures"])
+
+
+def test_a_tape_that_advanced_past_the_newest_session_is_red(db, migrated):
+    """The suite's currency check (QC 2026-10-07, A46). Tonight's bars landed and no session was
+    scored on them — score never ran, ran dry, or was cancelled — so every recomputation gauge would
+    re-prove yesterday's sheet against itself, and on a quiet night all six read green. The gate
+    gauge already reddened a decision stamped AFTER the newest bar; this is the other direction."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        _score(cur, days[:-1])                      # the tape runs to days[-1]; the desk stopped a day short
+        db.commit()
+        stored = gauges.newest_session(cur)
+        assert stored["session_date"] == days[-2]
+        g = gauges.gate_reproduces(cur, stored)
+    assert g["status"] == "red", g
+    assert "no session was scored on it" in g["why"] and g["newest_bar"] == str(days[-1])
+    verdict, _ = gauges.run(db)
+    assert verdict == "red", "a stale sheet holds the buys (§0.4)"
+
+
+def test_a_fractionally_held_name_below_weight_reads_green(db, migrated):
+    """QC A8: the desk topped a fractionally held name up as int(slot - held) — ASX.US is 512.4837
+    shares — and the gauge truncated the held line first and asked for one share more, so every
+    top-up of a fractional holding read RED and held the night's buys. v1.1 removes the top-up
+    itself (§3.5: a slot filled below weight "is never topped up"), so the same book is reported
+    below weight, orders nothing for the name, and the sheet reads green."""
+    from test_desk import _park, _shadow_passed
+    with db.cursor() as cur:
+        days = _world(cur, cash=200_000.0)
+        _park(cur, days)
+        _shadow_passed(cur, days)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','momentum',20.5,40.0,'open')""")
+        s = _score(cur, days)
+    db.commit()
+    assert not [o for o in s["orders"] if o["ticker"] == "N00.US"], "never topped up"
+    assert [u["ticker"] for u in s["underweight"]] == ["N00.US"], "reported instead"
+    verdict, got = gauges.run(db)
+    sheet_gauge = next(g for g in got if g["gauge"] == "sheet")
+    assert sheet_gauge["status"] == "green", sheet_gauge
+
+
+def test_an_order_over_the_participation_cap_is_red(db, migrated):
+    """§3.5: "an order may not exceed 0.98 of the name's ADDV — a correctness check, not a live
+    constraint at current size". The docstring always claimed this gauge checked it; nothing did
+    (QC 2026-10-07, A64). At a NAV large enough that a fifth of it outweighs a day's trading in the
+    name, every fill breaks the cap, and the sheet must not read green."""
+    with db.cursor() as cur:
+        days = _world(cur, cash=1e12)
+        s = _score(cur, days, nav=1e12)
+    db.commit()
+    assert all(o["participation_ok"] is False for o in s["orders"] if o["action"] == "buy")
+    with db.cursor() as cur:
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red", g
+    assert sum("ADDV" in f for f in g["failures"]) == 5
+
+
+# ---- §3.5 as v1.1 amended it -----------------------------------------------------------------
+
+def test_an_attested_share_its_parts_do_not_give_is_red(db, migrated):
+    """The share every fill is re-derived against is attested by `score`, so the gauge adds it up
+    again: the cash's own legs, tonight's sell tickets at quantity × decision close, the park's
+    draw. An attested share its parts do not give sizes every buy on the sheet wrong at once — and
+    reads red even when each ticket agrees with it, which is the case a per-ticket check alone
+    cannot see."""
+    from test_desk_v11 import _close, _ten_oh_five
+    with db.cursor() as cur:
+        days, deployable = _ten_oh_five(cur)
+        _score(cur, days)
+        db.commit()
+        assert gauges.sheet_arithmetic(cur, gauges.newest_session(cur))["status"] == "green"
+
+        inflated = deployable * 1.05                     # a share the parts do not give
+        px = _close(cur, "N04.US", days[-1])
+        cur.execute("""update engine_sessions
+                          set detail = jsonb_set(jsonb_set(detail, '{sizing,alloc}', %s::jsonb),
+                                                 '{sizing,deployable}', %s::jsonb)
+                        where session_date = %s""",
+                    (json.dumps(inflated), json.dumps(inflated), days[-1]))
+        cur.execute("""update tickets set qty = %s where ticker = 'N04.US' and session_date = %s""",
+                    (min(int(200_000.0 / 5 // px), int(inflated // px)), days[-1]))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red", g
+    assert any("re-add to" in f for f in g["failures"])
+
+
+def test_a_top_up_is_no_longer_a_clause(db, migrated):
+    """v1.1's §3.5: a slot filled below weight "is never topped up". A top-up on tonight's sheet is
+    a clause the plan no longer has, and reads red however its quantity was worked out (QC A6, A8)
+    — even the one the old gauge accepted, the slot less the line held."""
+    from test_desk_v11 import _close
+    with db.cursor() as cur:
+        days = _world(cur, cash=200_000.0)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('N00.US','TFSA','momentum',20,40.0,'open')""")
+        _score(cur, days)
+        px = _close(cur, "N00.US", days[-1])
+        cur.execute("""insert into tickets (session_date, ticker, account, sleeve, action, reason,
+                                            clause, order_type, qty, mark, rank, state, note)
+                       values (%s, 'N00.US', 'TFSA', 'momentum', 'buy', 'top_up', 'top_up',
+                               'market', %s, %s, 1, 'proposed', 'a top-up to weight')""",
+                    (days[-1], engine.position_size(200_000.0, px) - 20, px))
+        cur.execute("""update engine_sessions
+                          set detail = jsonb_set(jsonb_set(detail, '{buys}',
+                                                           (detail->'buys') || '["N00.US"]'),
+                                                 '{orders}', to_jsonb((detail->>'orders')::int + 1))
+                        where session_date = %s""", (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red", g
+    assert any("clause 'top_up' is not a recognised clause" in f for f in g["failures"])
+
+
+def test_a_proposal_score_never_decided_is_red(db, migrated):
+    """Item 7's other direction. write_tickets withdraws every proposal its own pass did not make,
+    so a `proposed` line on the sheet the attestation does not carry has nothing behind it — and it
+    is in front of Zak. Red. One he already acted on stays his, and green (see
+    `test_a_ticket_beyond_the_decision_is_not_a_failure`)."""
+    with db.cursor() as cur:
+        days = _world(cur, cash=200_000.0)
+        _score(cur, days)
+        cur.execute("""insert into tickets (session_date, ticker, account, sleeve, action, reason,
+                                            clause, order_type, qty, mark, rank, state, note)
+                       values (%s, 'N09.US', 'TFSA', 'momentum', 'sell', 'rank_exit', 'rank_exit',
+                               'market', 10, 50.0, 15, 'proposed', 'nobody decided this')""",
+                    (days[-1],))
+        db.commit()
+        g = gauges.sheet_arithmetic(cur, gauges.newest_session(cur))
+    assert g["status"] == "red", g
+    assert any("SELL N09.US: proposed on the sheet and never decided by score" == f
+               for f in g["failures"])

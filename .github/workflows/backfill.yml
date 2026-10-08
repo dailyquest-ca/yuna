@@ -1,14 +1,15 @@
 name: backfill
-# Dispatch-only tooling (§4.2) for the one-time deepening §4.1 sanctions: ten years of bars, a
-# trailing year of dividends, and the raw filing documents. Per-ticker history calls are the cold
-# -start exception, never the routine — the job meters the vendor's quota before spending and
-# truncates rather than dying two-thirds of the way through.
+# Dispatch-only tooling (§4.2) for the one-time deepening §4.1 sanctions: ten years of bars and a
+# trailing year of dividends. Per-ticker history calls are the cold-start exception, never the
+# routine — the job meters the vendor's quota before spending and truncates rather than dying
+# two-thirds of the way through. The filing-documents pass (`fundamentals`) is retired: §4.5's
+# product does not carry that endpoint, so it answers 403 and the run goes red naming it (A74).
 on:
   workflow_dispatch:
     inputs:
       what:
-        description: 'passes to run: bars,dividends,fundamentals,delisted'
-        default: 'bars,dividends,fundamentals'
+        description: 'passes to run: bars,dividends,delisted (fundamentals is retired: 403 on the All World plan)'
+        default: 'bars,dividends'
       years:
         description: 'bar depth in years (§4.1 window is 10)'
         default: '10'
@@ -40,12 +41,24 @@ on:
         description: 'redo names that already hold the full window (default skips them)'
         default: 'false'
 
-# §4.2, added 2026-08-03: every job that writes shares ONE concurrency group, so Actions serialises
-# them. `ingest-daily` and `backfill` overlapped once and deadlocked on the prices index — Postgres
-# caught it and killed a transaction, which is the good outcome, but two writers on one table is a
-# race the schedule should make impossible rather than one the database has to survive.
+# Every job that writes shares ONE concurrency group (added 2026-08-03). `ingest-daily` and
+# `backfill` overlapped once and deadlocked on the prices index — Postgres caught it and killed a
+# transaction, which is the good outcome, but two writers on one table is a race the schedule
+# should make impossible rather than one the database has to survive.
+#
+# **The group is a queue because it says `queue: max`** (QC 2026-10-07, A48 — this comment used to
+# say "Actions serialises them", and without that line it did not). By default GitHub runs one
+# member and holds ONE more pending; a run that joins while one is already pending CANCELS that
+# pending run, whatever `cancel-in-progress` says — so a long dispatch held through the night could
+# drop both ingest firings, and a run dropped while pending never starts, writes no `runs` row and
+# runs no autopsy. `queue: max` (GitHub, 2026-05) keeps up to 100 waiting, first in first out, so a
+# writer behind another waits its turn. Every member of the group must say it, and
+# `cancel-in-progress` must stay false (GitHub refuses the pair). A run can still be cancelled — by
+# hand, by a timeout, past the hundredth — so `pipeline.yml`'s `slot` job still records a cancelled
+# scheduled ingest red.
 concurrency:
   group: yuna-writes
+  queue: max
   cancel-in-progress: false
 
 jobs:
@@ -57,8 +70,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/backfill.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/backfill.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
@@ -74,7 +90,8 @@ jobs:
           PROBE_FROM: ${{ inputs.probe_from }}
           PROBE_TO: ${{ inputs.probe_to }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py backfill /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}

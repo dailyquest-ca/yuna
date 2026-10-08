@@ -30,9 +30,10 @@ name: pipeline
 # as §4.7 and v1.0 does not carry it at all. It is honoured here because the reasoning survives
 # the plan that stated it — flagged to Zak 2026-08-16 as a candidate for re-promotion.
 #
-# Retired from this chain by §6.3, and dispatch-only from here: the fundamentals-and-arming `score`
-# (`src/score.py`), its `check` (`src/check.py`), its `compose` (`src/compose.py`) and the fill
-# loop (`src/fills.py`). §3.3 replaced the whole apparatus with one number.
+# Retired from this chain by §6.3, and run by no workflow at all (learning 66): the
+# fundamentals-and-arming `score` (`src/score.py`), its `check` (`src/check.py`), its `compose`
+# (`src/compose.py`) and the fill loop (`src/fills.py`). §3.3 replaced the whole apparatus with
+# one number.
 on:
   workflow_run:
     workflows: [ingest-daily, ingest-universe]
@@ -67,6 +68,47 @@ jobs:
           fi
           echo "slot=$want" >> "$GITHUB_OUTPUT"
           echo "chain slot: $want (triggered by ${trigger:-dispatch})"
+      # A cancelled ingest is a red, never a silence (QC 2026-10-07, A48). `workflow_run:
+      # completed` fires on EVERY conclusion, so this chain also runs behind a cancelled ingest —
+      # and a firing cancelled before it started wrote no row and ran no autopsy: the chain
+      # re-scored yesterday's tape under a green freshness line, with the buys released. GitHub
+      # dropped pending writers that way until the `yuna-writes` group said `queue: max`; a hand,
+      # a timeout or a hundred-deep queue can still cancel one. That run is recorded here
+      # instead: report_fail.py closes or writes its row red — unless the night is already green
+      # by the retry's own test — and the freshness gauge holds the buys on it. Scheduled firings
+      # only: whoever cancels a dispatch watched it happen, and a dispatch may have been a
+      # rehearsal (learning 67). Every other night these four steps are skipped.
+      - if: >-
+          github.event.workflow_run.conclusion == 'cancelled' &&
+          github.event.workflow_run.event == 'schedule'
+        uses: actions/checkout@v4
+      - if: >-
+          github.event.workflow_run.conclusion == 'cancelled' &&
+          github.event.workflow_run.event == 'schedule'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+      - if: >-
+          github.event.workflow_run.conclusion == 'cancelled' &&
+          github.event.workflow_run.event == 'schedule'
+        run: pip install -r requirements.txt
+      - name: a cancelled scheduled ingest is recorded red
+        if: >-
+          github.event.workflow_run.conclusion == 'cancelled' &&
+          github.event.workflow_run.event == 'schedule'
+        run: |
+          echo "the scheduled $TRIGGER run $AUTOPSY_RUN_ID (attempt $AUTOPSY_RUN_ATTEMPT) ended" \
+               "cancelled, so its work never finished; this chain reads whatever the store holds" \
+               > /tmp/trigger.out
+          python src/report_fail.py "$TRIGGER" /tmp/trigger.out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TRIGGER: ${{ github.event.workflow_run.name }}
+          AUTOPSY_RUN_ID: ${{ github.event.workflow_run.id }}
+          AUTOPSY_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          AUTOPSY_CANCELLED: 'true'
 
   reconcile:
     needs: slot
@@ -77,22 +119,35 @@ jobs:
     timeout-minutes: 15
     concurrency:
       group: yuna-writes
+      queue: max
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/reconcile.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/reconcile.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      # Every autopsy gets the DRY_RUN its job got (QC 2026-10-07, A24): a rehearsal that dies
+      # before its heartbeat leaves a rehearsal's row, never a live red that holds the desk.
+      #
+      # And every autopsy runs on a CANCEL as well as a failure (A45). A cancel — by hand, by
+      # `timeout-minutes`, by a runner GitHub lost track of — is not a failure() to GitHub, so
+      # the job's row stayed `running` for ever (production's run 905, since 2026-09-14) and the
+      # freshness line read it as ✓. A cancel that lands after the work finished green is not a
+      # death, so the work step's own outcome decides; a failure() always autopsies, as before.
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py reconcile /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   score:
     # §4.1's second verb: "§3.2–3.5 logic: screen, rank, gate, queue, order decisions". A pure
@@ -107,14 +162,18 @@ jobs:
     timeout-minutes: 45
     concurrency:
       group: yuna-writes
+      queue: max
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/sheet.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/sheet.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
@@ -123,10 +182,11 @@ jobs:
           # `config.engine_nav`, which is a logged row with a timestamp, so a change to the number
           # the book is sized against is auditable rather than a secret that moved.
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py score /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   shadow:
     # §6.4's attestation: the live engine against the sim, on the same bars, written down. Ten
@@ -144,16 +204,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/shadow.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/shadow.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py shadow /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   check:
     # §4.4's six gauges. Writes nothing but its own report row — a checker that can edit what it
@@ -167,16 +231,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/gauges.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/gauges.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Like every job beside it (QC 2026-10-07, A9): a dry dispatch's check is a rehearsal,
+          # and its row must say so rather than stand as the newest live verdict.
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
           ENGINE_MODE: ${{ inputs.engine_mode || 'live' }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py check /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   compose:
     # §5.1's morning brief, rendered from the one payload read. It renders and does not decide:
@@ -188,23 +259,28 @@ jobs:
     timeout-minutes: 15
     concurrency:
       group: yuna-writes
+      queue: max
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/brief.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/brief.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
           COMPOSE_SLOT: ${{ needs.slot.outputs.slot }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py compose /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
   notify:
     # Prove the composed rows exist and are deliverable. The one thing this job may never do is
@@ -218,14 +294,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
-      - run: set -o pipefail; python src/notify.py 2>&1 | tee /tmp/job.out
+      - id: work
+        run: set -o pipefail; python src/notify.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
           PUSH_WEBHOOK_URL: ${{ secrets.PUSH_WEBHOOK_URL }}
           NOTIFY_SLOT: ${{ needs.slot.outputs.slot }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py notify /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}

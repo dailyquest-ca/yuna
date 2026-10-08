@@ -138,13 +138,24 @@ def get(path, calls, tries=3, timeout=90, **params):
             raise
 
 
-def cash_by_account(cur):
-    """Per-account cash by currency: Sunday's anchor, carried forward by the ledger.
+# When a session opens, as a fact of the market rather than a parameter: 09:30 New York time on
+# every exchange this book trades — NYSE and Nasdaq for the `.US` names, the TSX for VXC.TO — with
+# America/New_York carrying the DST change (13:30 UTC in summer, 14:30 UTC in winter). §4.3 has Zak
+# execute market orders at the open, and a market order does not fill before it. That makes the open
+# the one LOWER bound the store holds on when a fill happened, and `cash_by_account` orders an
+# anchor against a same-day fill by it.
+SESSION_OPEN = "09:30"
+SESSION_TZ = "America/New_York"
 
-    §2.0 — **balances are truth, prices are the extrapolation** — and §2.0 again, on the other
-    side of the same coin: a ticket "is only written if that account holds the cash", and cash
-    "includes unsettled proceeds of same-account sells". Money moves when a fill happens. The
-    anchor is a Sunday reading, so a fill after it has already moved the real cash and the anchor
+
+def cash_by_account(cur):
+    """Per-account cash by currency: the newest anchor, carried forward by the ledger.
+
+    **Balances are truth, prices are the extrapolation** — the retired plan's §2.0, which v1.0
+    does not carry; a standing design decision since Zak's 2026-08-19 ruling derived engine NAV
+    from it (roadmap-2026-08-16, critical path 3). §3.5 buys "the same morning on unsettled
+    proceeds", so money moves when a fill happens. The anchor is the newest reading Zak has
+    given — no cadence is ruled — so a fill after it has already moved the real cash and the anchor
     has not caught up: the ledger is what carries it forward.
 
     Found the day four 2026-08-04 fills were reconciled. The book gained NUE and RS while the cash
@@ -153,43 +164,78 @@ def cash_by_account(cur):
     reconciliation the two errors cancelled, which is the least comfortable way for a number to be
     right.
 
+    **Which fills are after the reading** (A30). A fill dated after the anchor's `as_of` is after
+    it; one dated before is inside it. A fill dated ON the anchor's date is the hard case, because
+    the question needs a time and neither side carries the one it needs: `trade_date` is a date,
+    `confirmed_at` and `applied_at` are when the ROW was written (the 2026-08-17 SPMO buys were
+    recorded on the 20th), and `recorded_at` is when the reading was written, not when it was
+    taken. Two upper bounds cannot order two events. One lower bound exists — no fill precedes its
+    session's open (SESSION_OPEN) — so a reading WRITTEN before its own date's open was TAKEN
+    before every fill of that date, and those fills count. That is the case that costs money: cash
+    stated before the open and spent at it, where the date alone took the buy to be inside the
+    reading — so the money counted twice, once as cash and once as the stock it bought.
+
+    Any other same-day fill cannot be ordered from the store. It is taken as inside the reading,
+    as it always was — a post-trade screenshot dated the day of the trades is right that way, and
+    the 2026-08-17 anchor is one — but it is no longer assumed in silence: `same_day_assumed_inside`
+    names how many fills rest on that reading of the date and what they move, per currency.
+
     A buy takes its own currency out, a sell puts it back, fees on both. Nothing else is modelled:
-    deposits, dividends and interest keep being absorbed at the next anchor, exactly as §2.0 says.
+    deposits, dividends and interest are absorbed at the next anchor, as the retired §2.0 had it.
     A levered buy can drive an account's cash negative between anchors — that is the undrawn
     facility showing through, and NAV lands in the same place either way, because borrowing is
-    NAV-neutral at the moment of use.
+    NAV-neutral at the moment of use. The TFSA has no facility to show through (§2.3 draws the LOC
+    into the NONREG), which is why `desk.derived_engine_nav` refuses a negative TFSA balance.
     """
     cur.execute("""select distinct on (b.account) b.account, a.kind, b.cash, b.cash_cad,
-                          b.cash_usd, b.drawn, b.credit_limit, b.total_value, b.as_of
+                          b.cash_usd, b.drawn, b.credit_limit, b.total_value, b.as_of,
+                          b.recorded_at
                    from balances b join accounts a on a.code=b.account
                    order by b.account, b.as_of desc, b.id desc""")
     bal = {r[0]: dict(kind=r[1], cash=r[2], cad=r[3], usd=r[4], drawn=r[5], limit=r[6],
-                      total=r[7], as_of=r[8]) for r in cur.fetchall()}
+                      total=r[7], as_of=r[8], recorded_at=r[9]) for r in cur.fetchall()}
 
-    # only movement the anchor cannot already contain — strictly after its date, and only the two
-    # sides that are cash. `confirm` rows are R4 restating a share count and move no money.
+    # Only movement the anchor cannot already contain, and only the two sides that are cash.
+    # `confirm` rows are R4 restating a share count and move no money. `after_reading` is the
+    # ordering in the docstring: a later date, or the anchor's own date when the reading was
+    # written before that date's open. Same-day rows it cannot order are returned too — they are
+    # reported, never counted.
     #
     # `superseded_by is null` since migration 059. When the bank's export lands for a trade Zak had
     # already described in chat, the stated row STAYS (§0.6) and stops counting — counting both
     # would take the cost of one purchase out of the account twice, which is a NAV error in the
     # direction that blocks a real trade for want of funds that are there.
     cur.execute("""with anchor as (
-                     select distinct on (account) account, as_of from balances
+                     select distinct on (account) account, as_of,
+                            recorded_at < ((as_of + %s::time) at time zone %s) as before_open
+                       from balances
                       order by account, as_of desc, id desc)
                    select t.account, coalesce(t.currency, 'USD'),
+                          t.trade_date > a.as_of or a.before_open as after_reading,
+                          count(*) filter (where t.side in ('buy', 'sell')),
                           sum(case when t.side = 'sell'
                                      then  t.qty * t.price - coalesce(t.fees, 0)
                                    when t.side = 'buy'
                                      then -t.qty * t.price - coalesce(t.fees, 0)
-                                   else 0 end)
+                                   -- a confirm restates a share count and a split restates the
+                                   -- shares (migration 075); neither moves money. Any other verb
+                                   -- is NaN, not 0 (learning 51), and the vocabulary constraint
+                                   -- makes it unreachable.
+                                   when t.side in ('confirm', 'split') then 0
+                                   else 'NaN'::double precision end)
                      from transactions t
                      join anchor a on a.account = t.account
-                    where t.trade_date > a.as_of
+                    where t.trade_date >= a.as_of
                       and t.superseded_by is null
-                    group by 1, 2""")
-    since = {}
-    for acct, ccy, delta in cur.fetchall():
-        since.setdefault(acct, {})[ccy] = float(delta or 0)
+                    group by 1, 2, 3""", (SESSION_OPEN, SESSION_TZ))
+    since, unordered = {}, {}
+    for acct, ccy, after_reading, fills, delta in cur.fetchall():
+        if after_reading:
+            since.setdefault(acct, {})[ccy] = float(delta or 0)
+        elif fills:
+            u = unordered.setdefault(acct, dict(fills=0, net={}))
+            u["fills"] += fills
+            u["net"][ccy] = round(float(delta or 0), 2)
 
     out = {}
     for acct, b in bal.items():
@@ -199,16 +245,17 @@ def cash_by_account(cur):
         else:
             # the deprecated single column, kept readable for rows written before migration 016
             cad, usd = float(b.get("cash") or 0), 0.0
-        out[acct] = dict(kind=b["kind"], as_of=b["as_of"], drawn=b["drawn"], limit=b["limit"],
-                         total=b["total"],
+        out[acct] = dict(kind=b["kind"], as_of=b["as_of"], recorded_at=b["recorded_at"],
+                         drawn=b["drawn"], limit=b["limit"], total=b["total"],
                          cad=cad + moved.get("CAD", 0.0), usd=usd + moved.get("USD", 0.0),
                          anchored_cad=cad, anchored_usd=usd,
-                         moved_since_anchor={k: round(v, 2) for k, v in moved.items() if v})
+                         moved_since_anchor={k: round(v, 2) for k, v in moved.items() if v},
+                         same_day_assumed_inside=unordered.get(acct))
     return out
 
 
 def nav_cad(cur):
-    """NAV per §2.0 — balances are truth, prices are the extrapolation.
+    """Household NAV in CAD, the retired plan's §2.0 model; only the retired engine calls this.
 
     An account's stated total wins when we have one; otherwise we build it from recorded cash
     plus what the book says it holds. Facilities contribute their drawn balance as debt only —
@@ -233,7 +280,7 @@ def nav_cad(cur):
         per_account[acct] = per_account.get(acct, 0.0) + cad
     book_equities = sum(per_account.values())
 
-    bal = cash_by_account(cur)          # the anchor, carried forward by the ledger (§2.0)
+    bal = cash_by_account(cur)          # the anchor, carried forward by the ledger
 
     assets = cash = debt = 0.0
     accounts = {}
@@ -245,7 +292,7 @@ def nav_cad(cur):
         # cash per currency, so the USD sleeve reprices with FX daily
         c_cad, c_usd = float(b.get("cad") or 0), float(b.get("usd") or 0)
         c = c_cad + c_usd * fx
-        value = c + per_account.get(acct, 0.0)      # §2.0: balances anchor, prices extrapolate
+        value = c + per_account.get(acct, 0.0)      # balances anchor, prices extrapolate
         stated = b.get("total")
         accounts[acct] = dict(value_cad=round(value, 2), cash_cad=round(c, 2),
                               cash_native={"CAD": round(c_cad, 2), "USD": round(c_usd, 2)},
@@ -311,8 +358,9 @@ def quantity_canary(cur, *, stale_days=9):
 
     The AVGO alarm that started this work was reported as a stale price. It was not: the price was
     correct to the penny and the *quantity* in the report was wrong. A price check would have passed
-    it, and would pass it again. §4.5 step 5 has Zak confirm settled positions every Sunday, so a
-    book quantity whose last confirmation is older than that is the thing to name.
+    it, and would pass it again. The retired plan's §4.5 step 5 had Zak confirm settled positions
+    every Sunday, so a book quantity whose last confirmation was older than that was the thing to
+    name. v1.0 has no such step, and only the retired engine calls this.
 
     Returns positions with no confirming transaction inside the window. Amber, not red: an
     unconfirmed quantity is a reason to distrust NAV, not a reason to stop protecting the book.
@@ -554,6 +602,13 @@ PRICE_CRITICAL = ("ingest-daily", "nightly-ingest", "nightly-retry") + VERBS["sc
 # now the drift that gets named and ignored. Operating constant of record (§5.6, 2026-09-13).
 LATE_MINUTES_FLOOR = 30
 
+# Operating constant of record (§5.6, 2026-09-13): "bars older than **4 days** hold buys (one long
+# weekend, measured in UTC)". `freshness` applies it to the stock bars; `desk.gate_unevaluable`
+# applies it to §3.4's own series, because a gate read off a tape that old is not evaluated on fresh
+# data (Zak's ruling, 2026-10-07). One number with two readers — `freshness`'s `stale_days` default
+# must stay equal to it, and `tests/test_v11_sizing.py` holds them together.
+STALE_DAYS = 4
+
 
 def late_minutes(detail):
     """Minutes past slot recorded on a runs row, or None. Reads both shapes: `late_minutes` as
@@ -570,7 +625,21 @@ def late_minutes(detail):
     return m if m > 0 else None
 
 
-def freshness(conn, *, stale_days=4):
+# The newest STOCK bar — what `freshness` and `data_date` both ask — as an ordered probe rather
+# than an aggregate (QC 2026-10-07, A35). `max(p.d)` over the join with `universe` read every price
+# row: Postgres rewrites a bare max() into an index probe but not across a join, so the question
+# cost 9.3 s on average, 30.7 s at worst and ~0.9 GB of reads, growing with the tape. Walking
+# `prices_d_idx` backwards and stopping at the first row whose ticker is a stock gives the same
+# date — `d` is NOT NULL (it is in the primary key) and `universe.ticker` is unique, so the newest
+# qualifying row's date IS the max — in milliseconds (planned cost 1.42 against 271,106 on
+# production). The outer scalar select keeps an empty store's answer NULL, as max() gave.
+NEWEST_STOCK_BAR = """select (select p.d from prices p
+                               where exists (select 1 from universe u
+                                              where u.ticker = p.ticker and u.kind = 'stock')
+                               order by p.d desc limit 1)"""
+
+
+def freshness(conn, *, stale_days=4, own_run=None):
     """The one-line answer to "is it safe to speak" (§4.2): `ingest ✓ score ✓ check ✓`.
 
     `stale_days=4` and the 36-hour window below are operating constants of record (§5.6,
@@ -579,12 +648,24 @@ def freshness(conn, *, stale_days=4):
     lets Saturday's rows fall out by Monday night.
 
     Returns (line, tickets_allowed). §5.6, ruled 2026-08-05 — **stale means the bars, not the
-    clock**. Tickets are held on exactly three conditions:
+    clock**. Tickets are held on exactly four conditions:
 
       * the bars are old,
       * a price-critical job failed (red, or the half-failure the 2026-08-05 ruling calls amber),
+      * a price-critical job's newest run has not FINISHED — see below,
       * the chain ran **out of order** — an ingest landed rows after the `score` beside it, so the
         derived numbers ranked yesterday's world.
+
+    **A run still reading `running` is not a result** (QC 2026-10-07, A45). It is an ingest still
+    landing bars or a score still rewriting the sheet, or it is a job that died without closing
+    its row: a runner GitHub lost, and — until the autopsy steps learned to run on a cancel the
+    same day — any cancel or timeout (production's run 905 has read `running` since 2026-09-14).
+    This line used to print either as ✓ and release the buys. Neither can vouch for the prices, so a price-critical one holds buys
+    the way that job's amber does (§4.3 as amended 2026-09-14), and the line says what is known —
+    "still running or died". No age decides between the two: the question is whether a result
+    exists, and a running row has none. `own_run` is the asking job's own runs id; a run that asks
+    from inside itself is not waiting on itself. Everything else running — `check` asking this
+    very question, compose, the census — prints as it always did.
 
     **Lateness alone holds nothing.** It rides the line as `late: <job> +NNNm` and decides nothing:
     a job queued three hours behind its slot with current bars is a punctuality note, not a data
@@ -594,21 +675,23 @@ def freshness(conn, *, stale_days=4):
         # stock bars only. FX and the index come from the same nightly pull, so in a clean run this
         # is the same date — but a half-failed ingest that landed USDCAD and no equities would
         # otherwise read as fresh, and "stale data ⇒ no new tickets" would quietly not apply.
-        cur.execute("""select max(p.d) from prices p join universe u on u.ticker = p.ticker
-                       where u.kind = 'stock'""")
+        cur.execute(NEWEST_STOCK_BAR)
         last_bar = cur.fetchone()[0]
         # `not dry_run`, as the timeline query below always had: a DRY_RUN dispatch of the chain
         # that ended red was the newest row for its job and held the live desk (2026-09-13)
-        cur.execute("""select distinct on (job) job, status, detail from runs
+        cur.execute("""select distinct on (job) job, status, detail, id from runs
                        where started_at > now() - interval '36 hours' and not dry_run
                        order by job, id desc""")
-        recent = [(j, s, d) for j, s, d in cur.fetchall()]
+        recent = cur.fetchall()
         # every non-dry run in the window — the ordering question is about runs, not jobs
         cur.execute("""select job, started_at, finished_at, coalesce(rows_written, 0) from runs
                        where started_at > now() - interval '36 hours' and not dry_run""")
         timeline = cur.fetchall()
 
-    status = {j: s for j, s, _ in recent}
+    status = {j: s for j, s, _, _ in recent}
+    # a price-critical run with no result yet (see the docstring): amber-equivalent, never ✓
+    unfinished = sorted(j for j, s, _, i in recent
+                        if s == "running" and j in PRICE_CRITICAL and i != own_run)
     marks = []
     for verb, jobs in VERBS.items():
         seen = [status[j] for j in jobs if j in status]
@@ -616,13 +699,13 @@ def freshness(conn, *, stale_days=4):
             marks.append(f"{verb} —")
         elif any(s == "red" for s in seen):
             marks.append(f"{verb} ✗")
-        elif any(s == "amber" for s in seen):
+        elif any(s == "amber" for s in seen) or any(j in unfinished for j in jobs):
             marks.append(f"{verb} ⚠")
         else:
             marks.append(f"{verb} ✓")
     line = " · ".join(marks)
 
-    late = sorted(f"late: {j} +{m:.0f}m" for j, _, d in recent
+    late = sorted(f"late: {j} +{m:.0f}m" for j, _, d, _ in recent
                   if (m := late_minutes(d)) and m >= LATE_MINUTES_FLOOR)
     if late:
         line += " · " + " · ".join(late)
@@ -641,14 +724,14 @@ def freshness(conn, *, stale_days=4):
     score_start = max((s for j, s, _, _ in timeline if j in VERBS["score"]), default=None)
     out_of_order = bool(ingest_end and score_start and ingest_end > score_start)
 
-    bad = [f"{j} {s}" for j, s, _ in recent if s in ("red", "amber")]
+    bad = [f"{j} {s}" for j, s, _, _ in recent if s in ("red", "amber")]
     price_bad = [x for x in bad if x.split()[0] in PRICE_CRITICAL]
     stale = (dt.date.today() - last_bar).days if last_bar else 999
     if stale > stale_days:
         return f"⚠️ bars stale — last close {last_bar} ({stale}d) · {line}", False
-    if price_bad:
-        return (f"⚠️ {', '.join(sorted(set(price_bad)))} — data {last_bar}, tickets held · {line}",
-                False)
+    if price_bad or unfinished:
+        why = sorted(set(price_bad)) + [f"{j} still running or died" for j in unfinished]
+        return f"⚠️ {', '.join(why)} — data {last_bar}, tickets held · {line}", False
     if out_of_order:
         return (f"⚠️ chain out of order — an ingest landed rows after the score beside it "
                 f"({ingest_end.astimezone(dt.timezone.utc):%H:%M} > "
@@ -667,8 +750,7 @@ def data_date(cur):
     nightly pull, so a half-failed ingest that landed USDCAD and no equities would otherwise report
     a date the equities never reached.
     """
-    cur.execute("""select max(p.d) from prices p join universe u on u.ticker = p.ticker
-                   where u.kind = 'stock'""")
+    cur.execute(NEWEST_STOCK_BAR)
     return cur.fetchone()[0]
 
 
@@ -772,7 +854,13 @@ def chain_already_current(conn, hb, job, *, must_match=()):
 
 class Heartbeat:
     """with Heartbeat(conn, 'daily') as hb: ...  — opens a running row, closes it green,
-    or red with the traceback if the body raises. hb.detail / hb.calls / hb.rows are yours."""
+    or red with the traceback if the body raises. hb.detail / hb.calls / hb.rows are yours.
+
+    **A body that raises leaves nothing behind but its red.** Whatever it had not committed is
+    rolled back before the red is written, so a job that crashed, refused, or was interrupted
+    half-way through its writes cannot leave the half it reached looking like a result. A job
+    whose earlier work must survive a later failure commits that work itself, at the point it
+    stands on (`ingest` per stage, `reconcile` after the chat route)."""
 
     def __init__(self, conn, job, dry_run=None, scheduled_utc=None):
         self.conn, self.job = conn, job
@@ -844,11 +932,16 @@ class Heartbeat:
         self.detail.setdefault("red", []).append(why)
 
     def __exit__(self, et, ev, tb):
+        # `clock_timestamp()`, never `now()`, on both closing writes (QC 2026-10-07, A37). `now()`
+        # is the start of the current TRANSACTION, and a job that reads without committing — check,
+        # compose, notify, backup, a quiet reconcile — is still inside the one its first query
+        # opened: check's 115-second run was recorded as 0.015 seconds, and every duration and
+        # finish time read off this table was the moment the job began.
         if et is None:
             self.detail["dry_run"] = self.dry_run
             with self.conn.cursor() as cur:
-                cur.execute("""update runs set finished_at=now(), status=%s, calls_used=%s,
-                               rows_written=%s, detail=%s where id=%s""",
+                cur.execute("""update runs set finished_at=clock_timestamp(), status=%s,
+                               calls_used=%s, rows_written=%s, detail=%s where id=%s""",
                             (self.status, self.calls[0], 0 if self.dry_run else self.rows,
                              json.dumps(self.detail, default=str), self.id))
             self.conn.commit()
@@ -856,12 +949,28 @@ class Heartbeat:
         else:
             self.detail["fatal"] = f"{et.__name__}: {ev}"
             self.detail["trace"] = "".join(traceback.format_exception(et, ev, tb))[-1200:]
+            # Roll back FIRST, then write the red on a clean transaction (QC 2026-10-07, A49 and
+            # A75). The red used to ride the job's own transaction, which went wrong both ways:
+            #   * on a Python exception — a SystemExit refusal, an interrupt, a bug — the commit
+            #     that recorded the red also committed every write the job had half-done, so
+            #     reconcile could "refuse" a manifest after folding half of it;
+            #   * on a database error the transaction was already aborted, the red UPDATE failed
+            #     inside it, and `except: pass` hid that, leaving the run `running` with its
+            #     traceback lost.
             try:
+                self.conn.rollback()
                 with self.conn.cursor() as cur:
-                    cur.execute("""update runs set finished_at=now(), status='red', calls_used=%s,
-                                   detail=%s where id=%s""",
+                    cur.execute("""update runs set finished_at=clock_timestamp(), status='red',
+                                   calls_used=%s, detail=%s where id=%s""",
                                 (self.calls[0], json.dumps(self.detail, default=str), self.id))
                 self.conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                # Never raised: the job's own exception is the one the autopsy and the reader need,
+                # and an exception from here would replace it. Never silent either — this line
+                # lands in the output tail the workflow's autopsy step (report_fail.py) writes
+                # into the row it closes. A dead connection ends here, and only a fresh one could
+                # do better.
+                print(f"{self.job}: could not record the red on run {self.id} — "
+                      f"{type(e).__name__}: {e}. The job's own error follows; the autopsy step "
+                      f"closes the row.", file=sys.stderr)
         return False

@@ -79,6 +79,28 @@ def test_a_freeze_drops_every_buy_and_keeps_every_sell(db, migrated):
         assert cur.fetchall() == [("sell", 1)], "no buy ticket is written at all"
 
 
+def test_a_freeze_drops_the_parks_draw_with_the_buys_it_pays_for(db, migrated):
+    """§5.5 beside v1.1's §3.5. A `fund` sell is the cash leg of tonight's buys — the park's draw
+    for their shortfall — not an exit, so the freeze that halts the buys drops it with them and
+    names it: §5.5 sends proceeds to the park, and does not empty it. Nothing is proposed to buy, so
+    the attestation sizes nothing, and the exit still ships."""
+    from test_desk import _park, _shadow_passed
+    with db.cursor() as cur:
+        days = _world(cur, held=("N15.US",), cash=100_000.0)       # rank 16 — a queued exit
+        _park(cur, days)
+        _shadow_passed(cur, days)
+        _freeze(cur, True)
+        db.commit()
+        s = _score(cur, days)
+        db.commit()
+        cur.execute("select detail from engine_sessions where session_date = %s", (days[-1],))
+        att = cur.fetchone()[0]
+
+    assert [(o["ticker"], o["clause"]) for o in s["orders"]] == [("N15.US", "rank_exit")]
+    assert "SPMO.US" in s["frozen_buys"], "the draw is halted, and named with the buys"
+    assert att.get("sizing") is None and att["sells"] == ["N15.US"] and att["buys"] == []
+
+
 def test_the_halted_buys_are_named_rather_than_silently_absent(db, migrated):
     """A freeze that produced a shorter sheet with no explanation would read as a quiet night."""
     with db.cursor() as cur:
@@ -150,16 +172,22 @@ def test_the_brief_leads_with_the_freeze_and_quotes_it(db, migrated):
 
 
 def test_a_freeze_holds_the_levered_tranches_too(db, migrated):
-    """§5.5 names them explicitly: "entries, refills, displacement buys, levered tranches"."""
+    """§5.5 names them explicitly: "entries, refills, displacement buys, levered tranches".
+
+    The tranche is planned in the session's own week, the one week §2.3 lets the gate open it;
+    until 2026-10-07 (A71) the open half asserted "gate ON this week" against a tranche planned
+    for 2026 and a session in 2024."""
     with db.cursor() as cur:
         days = _world(cur)                            # gate ON — so only the freeze can hold them
         _score(cur, days)
+        cur.execute("update levered_tranches set planned_on = %s where seq = 3", (days[-1],))
         db.commit()
         p = brief.payload(cur)
     frozen_text = "\n".join(brief.tranche_lines(p, frozen=True))
     open_text = "\n".join(brief.tranche_lines(p, frozen=False))
     assert "FROZEN — §5.5 halts levered tranches" in frozen_text
-    assert "gate ON this week" in open_text
+    assert "this is its planned week and the gate is ON" in open_text
+    assert "FROZEN" not in open_text
 
 
 def test_the_brief_warns_when_the_ramp_would_breach_the_cap(db, migrated):

@@ -19,12 +19,24 @@ on:
         description: 'rebuild even if this month is already built'
         default: 'false'
 
-# §4.2, added 2026-08-03: every job that writes shares ONE concurrency group, so Actions serialises
-# them. `ingest-daily` and `backfill` overlapped once and deadlocked on the prices index — Postgres
-# caught it and killed a transaction, which is the good outcome, but two writers on one table is a
-# race the schedule should make impossible rather than one the database has to survive.
+# Every job that writes shares ONE concurrency group (added 2026-08-03). `ingest-daily` and
+# `backfill` overlapped once and deadlocked on the prices index — Postgres caught it and killed a
+# transaction, which is the good outcome, but two writers on one table is a race the schedule
+# should make impossible rather than one the database has to survive.
+#
+# **The group is a queue because it says `queue: max`** (QC 2026-10-07, A48 — this comment used to
+# say "Actions serialises them", and without that line it did not). By default GitHub runs one
+# member and holds ONE more pending; a run that joins while one is already pending CANCELS that
+# pending run, whatever `cancel-in-progress` says — so a long dispatch held through the night could
+# drop both ingest firings, and a run dropped while pending never starts, writes no `runs` row and
+# runs no autopsy. `queue: max` (GitHub, 2026-05) keeps up to 100 waiting, first in first out, so a
+# writer behind another waits its turn. Every member of the group must say it, and
+# `cancel-in-progress` must stay false (GitHub refuses the pair). A run can still be cancelled — by
+# hand, by a timeout, past the hundredth — so `pipeline.yml`'s `slot` job still records a cancelled
+# scheduled ingest red.
 concurrency:
   group: yuna-writes
+  queue: max
   cancel-in-progress: false
 
 jobs:
@@ -36,15 +48,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
       - name: L0 census
+        id: work
         run: set -o pipefail; python src/funnel.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
           FORCE: ${{ inputs.force || 'false' }}
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py ingest-universe /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

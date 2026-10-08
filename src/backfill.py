@@ -20,7 +20,9 @@ Per-ticker history calls are the §4.1 cold-start exception, not the routine. Bu
 against the vendor's own usage endpoint before spending, and the run truncates rather than dying
 two-thirds through — the same discipline the fundamentals sweep learned the hard way.
 
-    WHAT=bars,dividends,fundamentals   which passes to run (default all three)
+    WHAT=bars,dividends                which passes to run (the default)
+    WHAT=fundamentals                  RETIRED with the 2026-09 downgrade: §4.5's product does not
+                                       carry the endpoint, so it answers 403 and the run goes red
     WHAT=delisted                      the dead census + their bars, screened to L0's own floor
     YEARS=10                           bar depth
     TICKERS=A.US,B.US                  limit the target set
@@ -39,7 +41,10 @@ WORKERS = int(os.environ.get("WORKERS", "8"))
 YEARS = int(os.environ.get("YEARS", "10"))
 RESERVE = int(os.environ.get("QUOTA_RESERVE", "3000"))
 SWEEP_LIMIT = int(os.environ.get("SWEEP_LIMIT", "0"))
-WHAT = {w.strip() for w in os.environ.get("WHAT", "bars,dividends,fundamentals").split(",") if w.strip()}
+# Not fundamentals (A74): §4.5's product, EOD Historical Data — All World, does not carry that
+# endpoint, so every call answers 403. Learning 63: when the plan retires a data product, its
+# endpoints leave the jobs the same day — a call that decides nothing still decides the colour.
+WHAT = {w.strip() for w in os.environ.get("WHAT", "bars,dividends").split(",") if w.strip()}
 BATCH = 500
 # §4.1 tooling discipline, added after the 2026-08-03 outage: a bulk writer must pace itself.
 # The database was under 1 GB when it died; what filled the volume was pg_wal, generated faster
@@ -88,6 +93,23 @@ def targets(cur, since=None):
     return got[:SWEEP_LIMIT] if SWEEP_LIMIT else got
 
 
+def surface(hb, endpoint, failures, asked):
+    """Say what a pass could not fetch, in the run's colour and not only in its detail (A74).
+
+    `failures` is {ticker: exception} for every name that failed. A 403 is the vendor saying the
+    plan does not carry the endpoint — every call will answer the same, so it is red, named. Any
+    other failure is amber with its count. Before this, every pass swallowed its errors into the
+    detail and the run closed green with nothing written: learning 19's "green is not a result".
+    """
+    forbidden = sum(1 for e in failures.values() if getattr(e, "code", None) == 403)
+    if forbidden:
+        hb.red(f"{endpoint} answered 403 Forbidden for {forbidden} of {asked} name(s) — the plan "
+               f"does not carry it (§4.5: EOD Historical Data — All World); nothing was written "
+               f"from it")
+    elif failures:
+        hb.amber(f"{endpoint} failed for {len(failures)} of {asked} name(s) — see the detail")
+
+
 def budget(hb, needed_units):
     """Ask before spending. Returns the number of names affordable today."""
     try:
@@ -112,14 +134,15 @@ def backfill_bars(conn, hb, names, since):
                        **{"from": since.isoformat(), "period": "d"})
             return t, (rows if isinstance(rows, list) else []), None
         except Exception as e:
-            return t, [], f"{type(e).__name__}: {e}"
+            return t, [], e
 
-    buf, errors = [], {}
+    buf, errors, failures = [], {}, {}
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         for t, rows, err in pool.map(one, names):
             if err:
+                failures[t] = err
                 if len(errors) < 40:
-                    errors[t] = err
+                    errors[t] = f"{type(err).__name__}: {err}"
                 continue
             for b in rows:
                 d = b.get("date")
@@ -140,6 +163,7 @@ def backfill_bars(conn, hb, names, since):
                     break
     written += _flush_bars(conn, buf)
     hb.detail["bar_errors"] = errors
+    surface(hb, "eod/", failures, len(names))
     return written
 
 
@@ -348,21 +372,22 @@ def backfill_dividends(conn, hb, names, since):
     """§2.6's trailing-12-month yield needs twelve months of payments. The per-ticker history keys
     the amount as `value`; the nightly bulk feed keys it as `dividend`. `v_dividend_ttm` reads both,
     so the ledger means one thing whichever job wrote the row."""
-    written, errors = 0, {}
+    written, errors, failures = 0, {}, {}
 
     def one(t):
         try:
             rows = get(f"div/{t}", hb.calls, tries=2, timeout=60, **{"from": since.isoformat()})
             return t, (rows if isinstance(rows, list) else []), None
         except Exception as e:
-            return t, [], f"{type(e).__name__}: {e}"
+            return t, [], e
 
     buf = []
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         for t, rows, err in pool.map(one, names):
             if err:
+                failures[t] = err
                 if len(errors) < 40:
-                    errors[t] = err
+                    errors[t] = f"{type(err).__name__}: {err}"
                 continue
             for r in rows:
                 if r.get("date"):
@@ -371,6 +396,7 @@ def backfill_dividends(conn, hb, names, since):
                 written += _flush_actions(conn, buf); buf = []
     written += _flush_actions(conn, buf)
     hb.detail["dividend_errors"] = errors
+    surface(hb, "div/", failures, len(names))
     return written
 
 
@@ -388,6 +414,10 @@ def _flush_actions(conn, rows):
 def backfill_fundamentals(conn, hb, names):
     """Re-serve the filing documents so `raw_doc` holds what the vendor actually sent (§4.1).
 
+    RETIRED with the 2026-09 downgrade and out of the default passes (A74): §4.5's product does not
+    carry the endpoint, every call answers 403, and the run goes red saying so rather than closing
+    green with `written.fundamentals = 0`. Kept for a plan that buys the feed again.
+
     This reuses the sweep's own extractor, so the derived fields are refreshed by the same code path
     that writes them nightly — there is no second definition of a fundamentals row in the system.
     """
@@ -399,14 +429,15 @@ def backfill_fundamentals(conn, hb, names):
         try:
             return t, get(f"fundamentals/{t}", hb.calls, tries=2, timeout=120), None
         except Exception as e:
-            return t, None, f"{type(e).__name__}: {e}"
+            return t, None, e
 
-    errors, buf, done = {}, [], 0
+    errors, failures, buf, done = {}, {}, [], 0
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         for t, doc, err in pool.map(one, names):
             if err or not isinstance(doc, dict):
+                failures[t] = err or ValueError("unexpected payload")
                 if len(errors) < 40:
-                    errors[t] = err or "unexpected payload"
+                    errors[t] = f"{type(err).__name__}: {err}" if err else "unexpected payload"
                 continue
             try:
                 row = fu.extract(t, doc, quote.get(t))
@@ -421,6 +452,7 @@ def backfill_fundamentals(conn, hb, names):
                 done += fu.flush(conn, buf, errors); buf = []
     done += fu.flush(conn, buf, errors)
     hb.detail["fundamentals_errors"] = errors
+    surface(hb, "fundamentals/", failures, len(names))
     return done
 
 

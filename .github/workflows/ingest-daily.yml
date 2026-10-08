@@ -37,11 +37,12 @@ name: ingest-daily
 # The cost is a new failure mode, and it is guarded: a firing that beats the vendor's bulk file
 # would land YESTERDAY's tape and go green, and the retry would then exit on "already green" —
 # a silent stale day. So a scheduled run whose newest tape is not newer than the store's
-# `data_date` writes nothing and records `awaiting_vendor`; the retry ignores that row and fetches
+# `data_date` — or carries no SPY.US bar, the engine's calendar, as the 311-row Labor Day file did
+# (A47) — writes nothing and records `awaiting_vendor`; the retry ignores that row and fetches
 # again, and if it finds the same — and no run landed that tape this night, since the two firings
 # drift independently — it fails red, because a night with no tape has to have a reader
-# (`ingest.py`). The repair is the `date` input below. A hand dispatch is never guarded: pressing
-# the button means fetch.
+# (`ingest.py`). The repair is the `date` input below. A hand dispatch is never left waiting:
+# pressing the button means fetch — though it too refuses to land a file with no SPY.US bar.
 #
 # The retry stays 60 minutes behind the first firing, and it identifies itself by matching
 # `github.event.schedule` against its own cron string — so the retry's cron is written three
@@ -62,12 +63,24 @@ on:
         description: 'ingest ONE named tape date, YYYY-MM-DD, instead of the newest — closes a missed session (learning 59). Blank = newest.'
         default: ''
 
-# §4.2, added 2026-08-03: every job that writes shares ONE concurrency group, so Actions serialises
-# them. `ingest-daily` and `backfill` overlapped once and deadlocked on the prices index — Postgres
-# caught it and killed a transaction, which is the good outcome, but two writers on one table is a
-# race the schedule should make impossible rather than one the database has to survive.
+# Every job that writes shares ONE concurrency group (added 2026-08-03). `ingest-daily` and
+# `backfill` overlapped once and deadlocked on the prices index — Postgres caught it and killed a
+# transaction, which is the good outcome, but two writers on one table is a race the schedule
+# should make impossible rather than one the database has to survive.
+#
+# **The group is a queue because it says `queue: max`** (QC 2026-10-07, A48 — this comment used to
+# say "Actions serialises them", and without that line it did not). By default GitHub runs one
+# member and holds ONE more pending; a run that joins while one is already pending CANCELS that
+# pending run, whatever `cancel-in-progress` says — so a long dispatch held through the night could
+# drop both ingest firings, and a run dropped while pending never starts, writes no `runs` row and
+# runs no autopsy. `queue: max` (GitHub, 2026-05) keeps up to 100 waiting, first in first out, so a
+# writer behind another waits its turn. Every member of the group must say it, and
+# `cancel-in-progress` must stay false (GitHub refuses the pair). A run can still be cancelled — by
+# hand, by a timeout, past the hundredth — so `pipeline.yml`'s `slot` job still records a cancelled
+# scheduled ingest red.
 concurrency:
   group: yuna-writes
+  queue: max
   cancel-in-progress: false
 
 jobs:
@@ -79,8 +92,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
       - name: ingest the day
+        id: work
         run: set -o pipefail; python src/ingest.py 2>&1 | tee /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -91,8 +107,14 @@ jobs:
           # the 23:23 firing is the retry: same job, same row shape, exits if the night is green
           SKIP_IF_GREEN: ${{ github.event.schedule == '23 23 * * 1-5' && 'true' || 'false' }}
           SCHEDULED_UTC: ${{ github.event.schedule == '23 23 * * 1-5' && '23:23' || '22:23' }}
+      # On a cancel too (QC 2026-10-07, A45): a firing killed by `timeout-minutes` or by hand is
+      # not a failure() to GitHub, and its row stayed `running` — which the freshness line read as
+      # ✓ over a tape whose corporate-action repairs never landed. See pipeline.yml.
       - name: autopsy on failure
-        if: failure()
+        if: failure() || (cancelled() && steps.work.outcome != 'success')
         run: python src/report_fail.py ingest-daily /tmp/job.out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # the DRY_RUN the job got (QC 2026-10-07, A24): a dry dispatch that dies before its
+          # heartbeat must not leave a live price-critical red that holds the chain it triggers
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}

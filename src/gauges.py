@@ -18,8 +18,10 @@ protective-direction and never blocked, so the verdict this job writes is `block
 `blocks_dispatch` — the sheet always ships, and the buy half of it is what a red withdraws.
 
 On thresholds. §4.4 names six gauges and gives no tolerances, and this file invents none. Where a
-gauge needs a comparison it comes from the plan's own arithmetic (§3.5's NAV/5, §3.2's screen,
-§3.4's SMA) or from the stored history itself. The one gauge that reads as if it needs a constant
+gauge needs a comparison it comes from the plan's own arithmetic (§3.5's size — since v1.1 NAV/5
+or a share of deployable cash, the lesser — §3.2's screen, §3.4's SMA) or from the stored history
+itself; a dollar figure derived twice is compared to the cent, money's own unit (half a cent,
+`db.VALUATION_TOLERANCE`). The one gauge that reads as if it needs a constant
 — "within historical band" — takes the band from the history itself: the observed range of every
 prior session-to-session CHANGE in the count (ruled 2026-09-14, §5.6; it was the range of levels,
 and a level band can never admit a new low). A tighter band would be a better gauge and it would
@@ -34,7 +36,7 @@ import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import desk                                                                # noqa: E402
 import engine                                                              # noqa: E402
-from db import connect, dry, freshness, Heartbeat                          # noqa: E402
+from db import VALUATION_TOLERANCE, connect, dry, freshness, Heartbeat     # noqa: E402
 
 
 def _gauge(name, status, why, **detail):
@@ -43,14 +45,16 @@ def _gauge(name, status, why, **detail):
 
 def newest_session(cur, mode="live"):
     cur.execute("""select session_date, gate_on, gate_green, index_close, index_sma,
-                          universe_count, ranked_count, screen_count, nav, param_digest
+                          universe_count, ranked_count, screen_count, nav, param_digest,
+                          detail, mode
                      from engine_sessions where mode = %s
                     order by session_date desc limit 1""", (mode,))
     row = cur.fetchone()
     if not row:
         return None
     keys = ("session_date", "gate_on", "gate_green", "index_close", "index_sma",
-            "universe_count", "ranked_count", "screen_count", "nav", "param_digest")
+            "universe_count", "ranked_count", "screen_count", "nav", "param_digest",
+            "detail", "mode")
     return dict(zip(keys, row))
 
 
@@ -62,7 +66,20 @@ def gate_reproduces(cur, stored):
     RED on a mismatch, and this is the one gauge where red is obviously right: the gate decides
     whether the entire book sells. A stored ON against a recomputed OFF means either the tape moved
     or the latch was carried wrong, and both of those are answered by looking, not by trading.
+
+    It is also the suite's currency check, in both directions. A decision stamped AFTER the newest
+    bar was decided on bars that are gone; a newest bar LATER than the newest decision means the
+    tape advanced and no session was scored on it, so every gauge below is re-proving an old sheet
+    against itself — and with the sheet gauge green on a quiet night, nothing else would say so
+    (QC 2026-10-07, A46). Both are red: §0.4, a stale pipeline means no new tickets.
     """
+    cur.execute("select max(d) from prices where ticker = %s", (engine.REGIME_SOURCE,))
+    newest = cur.fetchone()[0]
+    if newest is not None and newest > stored["session_date"]:
+        return _gauge("gate", "red", f"the newest {engine.REGIME_SOURCE} bar is {newest}, but the "
+                                     f"newest scored session is {stored['session_date']} — the "
+                                     f"tape advanced and no session was scored on it, so this "
+                                     f"check is proving an old sheet", newest_bar=str(newest))
     cur.execute("""select d, coalesce(adj_close, close) from prices
                     where ticker = %s and d <= %s order by d""",
                 (engine.REGIME_SOURCE, stored["session_date"]))
@@ -209,47 +226,219 @@ def rank_reproduces(cur, stored, mode="live"):
 
 # ---- 4. order sheet completeness & sizing arithmetic --------------------------------------------
 
+def _attested(stored):
+    """The decision `score` attested for this session, as {(ticker, action)} — or None when the
+    session carries no attestation (stored before 2026-10-06) or was scored outside live mode.
+
+    A shadow session is never compared with tickets: tickets carry no mode, so the rows for its
+    close belong to the live sheet, not to it (sheet.write_tickets).
+    """
+    detail = stored.get("detail") or {}
+    if detail.get("orders") is None or stored.get("mode") not in (None, "live"):
+        return None
+    return ({(t, "sell") for t in detail.get("sells") or ()}
+            | {(t, "buy") for t in detail.get("buys") or ()})
+
+
+def _named(pairs):
+    """Orders as Zak reads them, sells first — §3.5 executes them first."""
+    return ", ".join(f"{a.upper()} {t}"
+                     for t, a in sorted(pairs, key=lambda p: (p[1] != "sell", p[0])))
+
+
+def _sheet_without_tickets(stored):
+    """No ticket on the newest sheet. Three different facts produce that row count, and until
+    2026-10-06 this gauge could not tell them apart — so it read amber on 25 of the first 36 live
+    sessions (2026-08-14 to 10-06; 64 of 93 check runs), every one of them gate-ON with a full
+    five-name book, and the colour stopped carrying information. An amber that fires on most nights
+    is one everyone learns to read past (learning 68).
+
+    `score` now attests its decision in `engine_sessions.detail` (sheet.write_session, counted
+    after apply_freeze, so in live mode it is what write_tickets will write). Then:
+
+      decided none      green — a full book that matches the rank is the ordinary night
+      decided some      red   — the sheet was decided and never written. This is the failure the
+                               old amber existed to catch, and it deserves its own colour. The
+                               reason names the orders, because the sheet that should carry them
+                               is empty and the brief has nothing else to show.
+      shadow mode       green — sheet.write_tickets writes no tickets outside live mode, by design
+      no attestation    amber — a session stored before the attestation existed; the old wording
+                               stands, because the gauge still cannot tell.
+    """
+    detail = stored.get("detail") or {}
+    decided = detail.get("orders")
+    if stored.get("mode") not in (None, "live"):
+        return _gauge("sheet", "green", f"{stored.get('mode')} mode writes no tickets "
+                                        f"(sheet.write_tickets); score decided "
+                                        f"{'?' if decided is None else decided} order(s)",
+                      tickets=0, decided=decided)
+    if decided is None:
+        return _gauge("sheet", "amber", f"no tickets for {stored['session_date']} — a session with "
+                                        f"no orders is ordinary, but so is a score that failed to "
+                                        f"write them, and this session carries no attestation "
+                                        f"either way")
+    if decided == 0:
+        return _gauge("sheet", "green", f"no orders for {stored['session_date']}: score ranked "
+                                        f"{stored.get('ranked_count')} name(s) and decided none — "
+                                        f"by rule", tickets=0, decided=0)
+    return _gauge("sheet", "red", f"score decided {decided} order(s) for {stored['session_date']} "
+                                  f"— {_named(_attested(stored))} — but no ticket exists for any "
+                                  f"of them: the sheet was decided and never written",
+                  tickets=0, decided=decided,
+                  sells=detail.get("sells"), buys=detail.get("buys"))
+
+
+def _score_hold(cur, stored):
+    """The holds tonight's `score` declared — Zak's 2026-10-07 R1 (a gate that cannot be evaluated
+    on fresh data) and R2 (a held name with no bar on the decision session), worded by the desk.
+
+    Read from the newest `score` run of this mode rather than from the stored session, because R1
+    writes no session at all: its whole point is that nothing new is proposed, so the newest
+    session on record is the last one decided on fresh data, and the only place the hold is
+    written down is the run that declared it. Dry runs are not facts (learning 67).
+    """
+    cur.execute("""select detail from runs
+                    where job = 'score' and not dry_run
+                      and coalesce(detail->>'mode', 'live') = %s
+                    order by id desc limit 1""", (stored.get("mode") or "live",))
+    row = cur.fetchone()
+    return ((row[0] if row else None) or {}).get("hold") or []
+
+
 def sheet_arithmetic(cur, stored):
     """Every ticket on the newest sheet, re-derived: does its quantity follow from §3.5?
 
     Three separate claims, and they fail in different ways:
 
-      completeness  a sell whose ticket is missing is a position that never leaves
-      sizing        `int(nav / 5 // price)` — §3.5's own arithmetic, §3.7(4)'s rounding
+      completeness  a sell whose ticket is missing is a position that never leaves — checked
+                    against what `score` attested it decided (detail.sells / detail.buys)
+      sizing        §3.5 as v1.1 amended it, from the inputs `score` attested (detail.sizing): a
+                    fill is `min(NAV / 5 // price, share // price)`, the share being deployable
+                    TFSA cash over the night's buys; a park's `fund` sell is the whole shares that
+                    cover the recorded shortfall, never more than the lot; and the deployable cash
+                    itself is re-added from its parts — tonight's sell tickets at their quantity ×
+                    decision close, the park's draw likewise, and the cash. A session stored before
+                    the attestation carried sizing is held to `NAV / 5 // price` alone, the rule it
+                    was sized by.
       participation §3.5's 0.98 ADDV cap, "a correctness check, not a live constraint at
                     current size", which is exactly why it needs a gauge: a check that never
                     fires at $200k is the one that fires silently at $2M
 
     A sizing error is RED. A quantity that does not follow from the plan's arithmetic is the single
     most expensive class of defect this repository can produce, because it does not throw.
-    """
-    # Withdrawn tickets are excluded, and that is §4.3's own definition rather than a convenience.
-    # "The nightly sheet is the only source of engine orders", and a re-score that no longer stands
-    # behind a proposal cancels it — so a `cancelled` row is a record of an order that is NOT one.
-    # Counting them inflated this gauge the day the account filter landed (5 unsized buys reported
-    # against 3 real ones), and the sizing check below is worse: a stale quantity on a withdrawn
-    # ticket would go RED for failing to match §3.5's arithmetic for a sheet nobody is executing.
-    cur.execute("""select ticker, action, qty, mark, rank, state, clause from tickets
-                    where session_date = %s and state not in ('cancelled', 'void')
-                    order by action, ticker""", (stored["session_date"],))
-    rows = cur.fetchall()
-    if not rows:
-        return _gauge("sheet", "amber", f"no tickets for {stored['session_date']} — a session with "
-                                        f"no orders is ordinary, but so is a score that failed to "
-                                        f"write them")
 
-    bad, unsized = [], 0
+    And two things it reports rather than checks, as an amber that holds nothing by itself (§4.3:
+    the check suite's own amber warns): a hold `score` declared (`_score_hold`) — the hold proper
+    is `score`'s amber, which the freshness gauge turns into held buys — and a buy the cash could
+    not reach, which is no ticket and so appears on no sheet. The brief prints the check's reasons
+    and nothing of `score`'s, and both are things Zak is to be told: his ruling is that the brief
+    names the stale bar and the held name, and v1.1's that a shortfall "is reported".
+    """
+    g = _sheet_verdict(cur, stored)
+    hold = _score_hold(cur, stored)
+    short = (stored.get("detail") or {}).get("held_below") or []
+    said = []
+    if hold:
+        said.append("score held the buys — " + "; ".join(hold))
+    if short:
+        said.append(f"{len(short)} buy(s) held below weight, no ticket (§3.5, v1.1): "
+                    + "; ".join(f"{h['ticker']} — {h['why']}" for h in short))
+    if not said:
+        return g
+    said = " · ".join(said)
+    return dict(g, status="red" if g["status"] == "red" else "amber", held=hold,
+                held_below=[h["ticker"] for h in short],
+                why=said if g["status"] == "green" else f"{g['why']} · {said}")
+
+
+def _sheet_verdict(cur, stored):
+    cur.execute("""select ticker, action, qty, mark, rank, state, clause from tickets
+                    where session_date = %s order by action, ticker""", (stored["session_date"],))
+    written = cur.fetchall()
+    if not written:
+        return _sheet_without_tickets(stored)
+
+    # Withdrawn tickets are excluded from the ARITHMETIC, and that is §4.3's own definition rather
+    # than a convenience. "The nightly sheet is the only source of engine orders", and a re-score
+    # that no longer stands behind a proposal cancels it — so a `cancelled` row is a record of an
+    # order that is NOT one. Counting them inflated this gauge the day the account filter landed (5
+    # unsized buys reported against 3 real ones), and the sizing check below is worse: a stale
+    # quantity on a withdrawn ticket would go RED for failing to match §3.5's arithmetic for a
+    # sheet nobody is executing.
+    rows = [r for r in written if r[5] not in ("cancelled", "void")]
+
+    # Completeness, against the decision itself rather than a count: every (ticker, action) score
+    # attested must have been WRITTEN. A ticket in any state counts — a withdrawn one was written,
+    # and Zak's own sessions have cancelled tickets by hand (2026-08-17), which is his call and not
+    # a missing order. One with no row at all was decided and never written; on the sell side that
+    # is a position that never leaves. Tickets BEYOND the attestation are not failures either:
+    # write_tickets withdraws only `proposed` rows, so a ticket Zak already acted on keeps its
+    # state through a re-score that no longer proposes it.
+    attested = _attested(stored)
+    missing = attested - {(r[0], r[1]) for r in written} if attested else set()
+    if not rows and not missing:
+        if attested is None:
+            return _sheet_without_tickets(stored)
+        return _gauge("sheet", "green", f"no live tickets for {stored['session_date']}: all "
+                                        f"{len(written)} written and since withdrawn",
+                      tickets=0, withdrawn=len(written))
+    bad = [f"{_named([pair])}: decided by score and never written"
+           for pair in sorted(missing, key=lambda p: (p[1] != "sell", p[0]))]
+    unsized = 0
     nav = stored["nav"]
+    detail = stored.get("detail") or {}
+    # A session `score` attested after v1.1's sizing landed carries `sizing` — None on a night with
+    # no buy, a dict otherwise. One without the key was sized by NAV / 5 alone and is held to it.
+    v11 = "sizing" in detail
+    sizing = detail.get("sizing") or {}
+    alloc = sizing.get("alloc")
+    shortfall = sizing.get("shortfall")
+    # The park's draw, re-derived from the shortfall the desk recorded, lot by lot in the desk's
+    # order. A lot the desk did not draw has no entry, so a fund sell of it is not one §3.5 made.
+    fund_want, left = {}, shortfall
+    for d in sorted(sizing.get("park") or [], key=lambda d: d["ticker"]):
+        if left is None or left <= 0:
+            break
+        q = engine.park_draw(float(left), float(d["lot"]), float(d["mark"]))
+        fund_want[d["ticker"]] = q
+        left -= q * float(d["mark"])
+    if alloc is not None:
+        bad += _deployable_re_added(written, sizing, nav)
+    cur.execute("""select ticker, addv from engine_ranks
+                    where session_date = %s and mode = %s and addv is not null""",
+                (stored["session_date"], stored.get("mode") or "live"))
+    addv_of = {t: float(a) for t, a in cur.fetchall()}
     for tk, action, qty, mark, rank, state, clause in rows:
-        if clause not in ("fill", "rank_exit", "displaced", "gate_off", "phase0",
-                          "fund", "top_up"):
+        if attested is not None and (tk, action) not in attested:
+            # Beyond tonight's decision. One Zak has acted on was sized by an earlier pass of this
+            # close, against that pass's cash, so tonight's share cannot re-derive it — and it is
+            # his trade, not tonight's order (see completeness above). One still `proposed` is
+            # neither: write_tickets withdraws every proposal its own pass did not make, so a live
+            # proposal score never decided is a line on Zak's sheet that nothing stands behind.
+            if state == "proposed":
+                bad.append(f"{_named([(tk, action)])}: proposed on the sheet and never decided "
+                           f"by score")
+            continue
+        if clause not in ("fill", "rank_exit", "displaced", "gate_off", "phase0", "fund"):
+            # `top_up` left this list with v1.1 (§3.5: a slot filled below weight "is never topped
+            # up"), so a top-up proposed tonight is a clause the plan no longer has.
             bad.append(f"{tk}: clause {clause!r} is not a recognised clause")
         if clause == "fund":
-            # The park's cash leg (§6.5). Not §3.5 arithmetic — its quantity is the park position,
-            # not NAV/5 — so the sizing check below must not measure it against a slot. The sell
-            # branch's own completeness check (a sell must carry a positive quantity) still runs.
-            if action != "buy" and (qty is None or float(qty) <= 0):
+            # The park's cash leg: its quantity is a draw on a lot, not a slot, so the slot
+            # arithmetic below must not measure it. It must be an executable sell, and since v1.1
+            # it must be the draw the recorded shortfall gives — never the lot because a lot
+            # exists (A6), never beside buys that were not sized (A23).
+            if action != "sell":
+                bad.append(f"{tk}: a fund {action} — the park's draw is a sell")
+            elif qty is None or float(qty) <= 0:
                 bad.append(f"{tk}: a fund sell with no quantity cannot be executed")
+            elif v11 and tk not in fund_want:
+                bad.append(f"{tk}: a fund sell of {float(qty):g} the session's sizing does not "
+                           f"draw — the park pays the shortfall of sized buys and only that "
+                           f"(§3.5, v1.1)")
+            elif v11 and float(qty) != float(fund_want[tk]):
+                bad.append(f"{tk}: fund sell {float(qty):g} but the recorded shortfall of "
+                           f"{float(shortfall):,.2f} draws {float(fund_want[tk]):g}")
             continue
         if action != "buy":
             if qty is None or float(qty) <= 0:
@@ -268,30 +457,89 @@ def sheet_arithmetic(cur, stored):
             # and a traceback here takes down the proof instead of delivering it.
             bad.append(f"{tk}: sized at {qty:g} with no decision close to size against")
             continue
-        want = engine.position_size(nav, float(mark))
-        if clause == "top_up":
-            # §6.5's top-up: the slot less the line already held. The held quantity is read from
-            # the book NOW rather than stored on the ticket — safe because this gauge runs minutes
-            # after `score` in the same chain and nothing trades in between; a re-run after Zak
-            # executes would find the position at weight and the cancelled ticket excluded above.
-            cur.execute("""select coalesce(sum(qty), 0) from book
-                            where ticker = %s and account = %s and status = 'open'""",
-                        (tk, stored.get("account") or "TFSA"))
-            held_now = float(cur.fetchone()[0])
-            want = max(0, want - int(held_now))
+        if v11 and alloc is None:
+            bad.append(f"{tk}: sized at {qty:g} but the session's sizing recorded none — "
+                       f"{sizing.get('unsized') or 'no buy was sized'}")
+            continue
+        want = (engine.capped_size(nav, float(mark), float(alloc)) if v11
+                else engine.position_size(nav, float(mark)))
         if int(qty) != want:
-            bad.append(f"{tk}: qty {qty:g} but §3.5 gives {want} for clause {clause}")
+            bad.append(f"{tk}: qty {qty:g} but §3.5 gives {want} for clause {clause}"
+                       + (f" (NAV ÷ 5 or {float(alloc):,.2f} of deployable cash, the lesser)"
+                          if v11 else ""))
+        # §3.5's participation cap, re-derived from the ADDV `score` ranked the name on. "A
+        # correctness check, not a live constraint at current size" — which is why it is checked
+        # here: a cap that never fires at this size is the one that fires silently at a larger
+        # one. Unknown liquidity is not permission (engine.participation_ok), and every buy comes
+        # from a ranked name, so a buy with no ranked ADDV is itself a failure.
+        addv = addv_of.get(tk)
+        if not engine.participation_ok(float(qty), float(mark), addv):
+            bad.append(f"{tk}: qty {qty:g} at {float(mark):g} is "
+                       + (f"{float(qty) * float(mark) / addv:.2f}x the name's ADDV "
+                          f"({addv:,.0f}); §3.5 caps an order at {engine.MAX_PARTICIPATION}x"
+                          if addv else "a buy with no ranked ADDV — its participation cannot "
+                                       "be checked against §3.5"))
 
     if bad:
-        return _gauge("sheet", "red", f"{len(bad)} arithmetic or completeness failure(s)",
+        # The reason carries the first failures, not just their count: the brief renders this
+        # string and nothing else from the gauge, so a count alone tells Zak something is wrong
+        # with the sheet without saying which line.
+        return _gauge("sheet", "red", f"{len(bad)} arithmetic or completeness failure(s): "
+                                      + "; ".join(bad[:3]) + ("; …" if len(bad) > 3 else ""),
                       failures=bad[:20], tickets=len(rows))
     if unsized:
-        return _gauge("sheet", "amber", f"{unsized} buy ticket(s) carry no quantity — the session "
-                                        f"recorded no engine NAV, so they are unsized and none of "
-                                        f"them can be executed; `score`'s own amber holds the buys "
-                                        f"through the freshness rule (§4.4)", unsized=unsized)
+        return _gauge("sheet", "amber", f"{unsized} buy ticket(s) carry no quantity — "
+                                        + (sizing.get("unsized") or "the session recorded no "
+                                                                    "engine NAV")
+                                        + " — so none of them can be executed; `score`'s own amber"
+                                          " holds the buys through the freshness rule (§4.4)",
+                      unsized=unsized)
     return _gauge("sheet", "green", f"{len(rows)} ticket(s), every quantity re-derived from §3.5",
                   tickets=len(rows))
+
+
+def _deployable_re_added(written, sizing, nav):
+    """v1.1's deployable cash, added up again from what was written. Returns [failure, ...].
+
+    The share every fill is re-derived against is `deployable ÷ buys`, and deployable is three
+    parts: the cash the store stated (re-added from its own legs), tonight's sells at their
+    tickets' quantity × decision close, and the park's draw likewise. A share that does not follow
+    from its parts sizes every buy on the sheet wrong at once, so each step is checked to the cent
+    — money is counted in cents, and VALUATION_TOLERANCE is half of one.
+    """
+    out = []
+    cash = sizing.get("cash") or {}
+    legs = float(cash.get("usd") or 0) + (float(cash.get("cad") or 0) / float(cash["usdcad"])
+                                          if cash.get("cad") else 0.0)
+    if abs(max(legs, 0.0) - float(cash.get("in_usd") or 0)) > VALUATION_TOLERANCE:
+        out.append(f"the attested cash {float(cash.get('in_usd') or 0):,.2f} USD does not follow "
+                   f"from its own legs ({legs:,.2f})")
+    sells = {r[0]: r for r in written if r[1] == "sell" and r[6] != "fund"}
+    proceeds = 0.0
+    for s in sizing.get("sold") or []:
+        r = sells.get(s["ticker"])
+        if r is None or r[2] is None or r[3] is None:
+            out.append(f"SELL {s['ticker']}: its proceeds count toward deployable cash and its "
+                       f"ticket carries no quantity × decision close")
+            continue
+        proceeds += float(r[2]) * float(r[3])
+    drawn = sum(float(r[2]) * float(r[3]) for r in written
+                if r[6] == "fund" and r[2] is not None and r[3] is not None)
+    deployable = float(cash.get("in_usd") or 0) + proceeds + drawn
+    if abs(deployable - float(sizing["deployable"])) > VALUATION_TOLERANCE:
+        out.append(f"deployable cash attested {float(sizing['deployable']):,.2f} but cash + "
+                   f"tonight's sells + the park's draw re-add to {deployable:,.2f}")
+    if abs(deployable / int(sizing["buys"]) - float(sizing["alloc"])) > VALUATION_TOLERANCE:
+        out.append(f"each buy's share attested {float(sizing['alloc']):,.2f} but "
+                   f"{deployable:,.2f} over {int(sizing['buys'])} buy(s) is "
+                   f"{deployable / int(sizing['buys']):,.2f}")
+    if sizing.get("shortfall") is not None and nav:
+        need = int(sizing["buys"]) * nav / engine.SLOTS - (float(cash.get("in_usd") or 0)
+                                                           + proceeds)
+        if abs(need - float(sizing["shortfall"])) > VALUATION_TOLERANCE:
+            out.append(f"the park's shortfall attested {float(sizing['shortfall']):,.2f} but "
+                       f"{int(sizing['buys'])} slot(s) less cash and proceeds is {need:,.2f}")
+    return out
 
 
 # ---- 5. book-vs-broker reconciliation age ------------------------------------------------------
@@ -321,12 +569,34 @@ def reconciliation_age(cur):
                     order by id desc limit 1""")
     newest = cur.fetchone()
     if newest and newest[0] == "red":
-        breaks = (newest[1] or {}).get("breaks") or []
+        run = newest[1] or {}
+        breaks = run.get("breaks") or []
+        refused = run.get("refused") or []
+        # A receipt the ledger refused (QC A21) is a red with no position break behind it: its
+        # ticker and the ledger's reason ride in the run's `refused`, and a brief that printed only
+        # "0 position break(s)" over held buys named nothing to repair. A run that died with
+        # neither says how it died, where the heartbeat or the autopsy recorded it.
+        said = []
+        if breaks:
+            said.append(f"{len(breaks)} position break(s): "
+                        + "; ".join(f"{b['ticker']} broker={b['broker']} book={b['book']}"
+                                    for b in breaks[:8]))
+        # Since 075 a split reconcile could not record rides in `refused` too, carrying `split`:
+        # the book may hold the pre-split count, which is the same reason to hold the buys.
+        splits = [r for r in refused if r.get("split")]
+        receipts = [r for r in refused if not r.get("split")]
+        if splits:
+            said.append(f"{len(splits)} split(s) on a held name not recorded: "
+                        + "; ".join(f"{r['account']} {r['ticker']} ({r['split']}): {r['why']}"
+                                    for r in splits[:8]))
+        if receipts:
+            said.append(f"{len(receipts)} receipt(s) the ledger refused: "
+                        + "; ".join(f"{r['account']} {r['ticker']}: {r['why']}"
+                                    for r in receipts[:8]))
         return _gauge("reconciliation", "red",
-                      f"the last reconcile went red on {len(breaks)} position break(s): "
-                      + "; ".join(f"{b['ticker']} broker={b['broker']} book={b['book']}"
-                                  for b in breaks[:8]),
-                      breaks=breaks[:8], **detail)
+                      "the last reconcile went red — "
+                      + (" · ".join(said) or run.get("fatal") or "no reason recorded"),
+                      breaks=breaks[:8], refused=refused[:8], **detail)
 
     if attested is None:
         return _gauge("reconciliation", "amber",

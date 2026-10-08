@@ -9,6 +9,7 @@ pytest catches it in under a second. GitHub catches it after a push, a dispatch,
 reader.
 """
 import pathlib
+import re
 
 import pytest
 import yaml
@@ -89,8 +90,8 @@ def test_reconcile_runs_before_score():
 
 
 def test_the_chain_runs_the_engine_and_not_the_retired_machine():
-    """§6.3 retires the legacy jobs from the SCHEDULE. They remain on disk as dispatch-only
-    tooling, so nothing but this assertion stops the chain quietly running them again."""
+    """§6.3 retires the legacy jobs from the SCHEDULE. Their source stays on disk with no workflow
+    (learning 66), so nothing but this assertion stops the chain quietly running them again."""
     runs = " ".join(step.get("run") or ""
                     for spec in _pipeline()["jobs"].values()
                     for step in spec.get("steps") or [])
@@ -106,6 +107,154 @@ def test_the_retired_engines_buttons_are_gone():
     buys, and their 403 landed a red under the ingest verb. Retired means no workflow runs it."""
     for name in ("check.yml", "ingest-filings.yml", "phase0.yml", "fills.yml"):
         assert not (ROOT / ".github" / "workflows" / name).exists(), f"{name} is retired"
+
+
+# ---- a rehearsal says it is one (QC 2026-10-07, A9 and A24; learning 67) -------------------------
+#
+# `dry_run` promises "compute everything, write nothing". A job that never hears it writes a live
+# row on a rehearsal, and a live row of the wrong colour holds — or releases — the desk.
+
+DRY = "${{ inputs.dry_run || 'false' }}"
+
+
+def _is_autopsy(step):
+    return "src/report_fail.py" in (step.get("run") or "")
+
+
+def _runs_a_job(step):
+    run = step.get("run") or ""
+    return "src/" in run and ".py" in run and not _is_autopsy(step)
+
+
+def test_every_chain_job_hears_that_the_dispatch_is_a_rehearsal():
+    """A9: `check` was the one job in the chain without DRY_RUN (and `notify` the other), so a dry
+    dispatch wrote a live check row — the newest verdict the brief reads — on a rehearsal."""
+    for name, spec in _pipeline()["jobs"].items():
+        for step in spec.get("steps") or []:
+            if _runs_a_job(step):
+                assert (step.get("env") or {}).get("DRY_RUN") == DRY, \
+                    f"pipeline.yml:{name} runs {step['run']!r} without the dispatch's DRY_RUN"
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_an_autopsy_records_a_rehearsal_as_a_rehearsal(path):
+    """A24: the autopsy writes the row for a job that died before its heartbeat, so it must carry
+    the DRY_RUN its job carried — or a dry dispatch's death is a live red under a price-critical
+    name, and `freshness()` holds the buys on it."""
+    for name, spec in (yaml.safe_load(path.read_text()).get("jobs") or {}).items():
+        steps = spec.get("steps") or []
+        told = {(s.get("env") or {}).get("DRY_RUN") for s in steps if _runs_a_job(s)} - {None}
+        assert len(told) <= 1, f"{path.name}:{name} gives its steps different DRY_RUNs"
+        want = next(iter(told), None)
+        for step in filter(_is_autopsy, steps):
+            assert (step.get("env") or {}).get("DRY_RUN") == want, \
+                f"{path.name}:{name}'s autopsy does not get the DRY_RUN its job gets"
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_an_autopsy_also_runs_when_the_job_is_cancelled(path):
+    """QC 2026-10-07 (A45): a cancel — by hand, by `timeout-minutes`, by a lost runner — is not a
+    failure() to GitHub, so an `if: failure()` autopsy never ran on one and the killed job's row
+    read `running` for ever (production's run 905, since 2026-09-14). Every autopsy runs on a
+    cancel as well, judged by its own job's work step: a cancel after a green finish is no death."""
+    for name, spec in (yaml.safe_load(path.read_text()).get("jobs") or {}).items():
+        steps = spec.get("steps") or []
+        work = {s.get("id") for s in steps if _runs_a_job(s)}
+        if not work:
+            continue                        # nothing of its own to autopsy
+        for step in filter(_is_autopsy, steps):
+            cond = str(step.get("if", ""))
+            assert "failure()" in cond and "cancelled()" in cond, \
+                f"{path.name}:{name}'s autopsy never runs on a cancel: {cond!r}"
+            judged_by = set(re.findall(r"steps\.([\w-]+)\.outcome", cond))
+            assert judged_by and judged_by <= work - {None}, \
+                f"{path.name}:{name}'s autopsy must judge a cancel by its own work step's outcome"
+
+
+def test_a_cancelled_scheduled_ingest_is_recorded_by_the_chain_behind_it():
+    """QC 2026-10-07 (A48). `workflow_run: completed` fires on a cancelled ingest too, and a run
+    GitHub cancelled while it waited in `yuna-writes` never started: no row, no autopsy, and the
+    chain re-scored yesterday's tape under a green line. The `slot` job — in no concurrency group,
+    so nothing can drop it — records that run, naming IT rather than itself, and on every other
+    night skips the steps that would."""
+    slot = _pipeline()["jobs"]["slot"]
+    assert "concurrency" not in slot, "the job that records a dropped run must not be droppable"
+    recorders = [s for s in slot["steps"] if _is_autopsy(s)]
+    assert len(recorders) == 1, "exactly one step records the cancelled trigger"
+    step, = recorders
+    gate = step["if"]
+    assert "github.event.workflow_run.conclusion == 'cancelled'" in gate
+    assert "github.event.workflow_run.event == 'schedule'" in gate, "a dispatch may be a rehearsal"
+    env = step["env"]
+    assert env["AUTOPSY_RUN_ID"] == "${{ github.event.workflow_run.id }}"
+    assert env["AUTOPSY_RUN_ATTEMPT"] == "${{ github.event.workflow_run.run_attempt }}"
+    assert env["AUTOPSY_CANCELLED"] == "true"
+    for s in slot["steps"]:
+        if s.get("id") != "pick":
+            assert s.get("if") == gate, "an ordinary night pays nothing for this"
+
+
+def test_every_writer_waits_its_turn_rather_than_dropping_the_one_waiting():
+    """QC 2026-10-07 (A48). A concurrency group holds one run and ONE pending by default, and a
+    newcomer cancels the pending one — so a writer dispatched at night could drop both ingest
+    firings without a trace. `queue: max` makes the group the queue its comments always said it
+    was; every member must say it (one group, one rule), and GitHub refuses it beside
+    `cancel-in-progress: true`."""
+    members = []
+    for path in WORKFLOWS:
+        doc = yaml.safe_load(path.read_text())
+        blocks = [("the workflow", doc.get("concurrency"))]
+        blocks += [(name, spec.get("concurrency"))
+                   for name, spec in (doc.get("jobs") or {}).items()]
+        members += [(path.name, where, c) for where, c in blocks
+                    if isinstance(c, dict) and c.get("group") == "yuna-writes"]
+    assert members, "no workflow writes through yuna-writes — the search is wrong, not the repo"
+    for workflow, where, c in members:
+        assert c.get("queue") == "max", f"{workflow}:{where} drops a writer that is waiting"
+        assert c.get("cancel-in-progress") is False, \
+            f"{workflow}:{where} would kill a running writer"
+
+
+def test_the_suite_runs_on_every_push_and_skips_only_a_tree_already_tested():
+    """QC 2026-10-07 (A66). A commit pushed to a pull request's branch ran the 7-8 minute suite
+    twice. The dedupe must never cost a run that tests something new: every push runs, a fork's
+    pull request runs, and a pull request's run steps aside only when GitHub's merge onto the base
+    is the head's own tree — the one its push run is testing."""
+    doc = yaml.safe_load((ROOT / ".github" / "workflows" / "tests.yml").read_text())
+    assert doc[True]["push"] is None, "the push trigger is filtered by nothing — every branch runs"
+    assert "pull_request" in doc[True]
+    suite = doc["jobs"]["pytest"]
+    assert suite["needs"] == "scope"
+    assert suite["if"] == "${{ !cancelled() && needs.scope.outputs.duplicate != 'true' }}", \
+        "skipped only on the duplicate verdict, and still run if the check itself fails"
+    tree, = [s for s in doc["jobs"]["scope"]["steps"] if s.get("id") == "tree"]
+    assert "github.event_name == 'pull_request'" in tree["if"]
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in tree["if"], \
+        "a fork's pull request has no push run here, so it is never the duplicate"
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_every_python_setup_caches_its_downloads_keyed_on_the_pins(path):
+    """QC 2026-10-07 (A67): every job fetched the pinned set from PyPI cold, five of them in series
+    on the brief's path. The cache is keyed on requirements.txt, so moving a pin is a new cache,
+    never a stale wheel — and the pins themselves are untouched."""
+    for name, spec in (yaml.safe_load(path.read_text()).get("jobs") or {}).items():
+        for step in spec.get("steps") or []:
+            if str(step.get("uses", "")).startswith("actions/setup-python"):
+                given = step.get("with") or {}
+                assert given.get("cache") == "pip", f"{path.name}:{name} installs cold"
+                assert given.get("cache-dependency-path") == "requirements.txt", \
+                    f"{path.name}:{name} keys its cache on something other than the pins"
+
+
+@pytest.mark.parametrize("name", ["backtest.yml", "backtest-compounders.yml"])
+def test_the_backtests_are_dispatch_only_tooling(name):
+    """CLAUDE.md and the README: both backtests are dispatch-only tooling. QC 2026-10-07 (A33):
+    backtest.yml also ran on every push and pull request touching the plan or a migration — the
+    RETIRED law-v0 engine, re-measured against production for 10-14 minutes — while the live
+    engine's own files triggered nothing. Nothing but a person's dispatch runs either."""
+    doc = yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
+    assert set(doc[True]) == {"workflow_dispatch"}, f"{name} runs on {sorted(doc[True])}"
 
 
 def test_the_composed_kind_is_the_kind_notify_expects():

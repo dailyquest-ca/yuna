@@ -11,6 +11,42 @@ now.** This file is the new contract, in the form a Routine needs it.
 
 ---
 
+## 0. Where the Routines read the law — not from this repository
+
+The Routines run in the claude.ai project with no checkout of this repository. Both prompts — the
+weekday morning note and the Saturday letter — read, every run, with the Projects tool:
+`yuna_plan.md` as the law, then `runbooks/routines_contract.md`. Those are **the project's own
+copies**, not `docs/yuna_plan.md` and not this file, and the prompts quote §3's and §6's SQL
+inline. So a change here, or to the plan here, reaches a Routine only when someone carries it into
+the project copy **and** into both prompts by hand. This repository cannot see whether the project's
+contract matches this file.
+
+**The project's plan is not this repository's plan** (compared 2026-10-07, against the project copy
+as of 2026-10-06). The project copy is v1.1, which it records as promoted by Zak on 2026-10-06 —
+buys sized to deployable TFSA cash, an interim cash park — and `docs/yuna_plan.md` does not carry.
+It was also rewritten from a base older than the repository's, so it **lacks the three amendments
+this repository's plan carries**:
+
+- **2026-09-02 — §5.2, the drawdown record.** Run 624's table of how often the cell of record sat
+  10–50% below its running high, the two recoveries (−60.3% on 2009-03-09 to a new high on
+  2013-09-10; −45.9% on 2025-11-21 to 2026-04-30), the rule that the brief prints them every
+  session, §5.1's "with the drawdown record beside it (§5.2)", and the §7 changelog entry.
+- **2026-09-13 — four §5.6 entries.** The 2026-08-05 operating rulings (stale means the bars; drift
+  never turns a job amber; monthly work is guarded by whether it has run); §4.4's "any red holds
+  buys" binding the check suite and the price-critical jobs, with the census's red a warning; the
+  operating constants of record (bars older than 4 days hold buys, a job's newest run within
+  36 hours is its state, lateness under 30 minutes is not printed, the retry looks back 4 hours);
+  and the census admission floors (a close ≥ $4 and ≥ $5M traded on census day).
+- **2026-09-14 — §4.3 and two §5.6 entries.** §4.3's body is back to the old line "Amber/red
+  pipeline: no new buy tickets." — so an amber from the check suite's own gauges holds buys there
+  and warns here — and the entries recording that amendment and §4.4's screen band of
+  session-to-session change are gone. The project's §5.6 keeps only the 2026-08-15 entry.
+
+Both prompts still call that file "plan v1.0". Until Zak makes one copy authoritative, a Routine
+reading its law can contradict the pipeline it reports on.
+
+---
+
 ## 1. The nightly brief — the whole message, already written
 
 The brief is composed as prose by `brief.py`. A Routine does not need to assemble anything; it
@@ -26,10 +62,15 @@ select session_date, summary, body, at
 ```
 
 - **`body`** is the complete brief — freshness banner, gate and latch, the order sheet, the book,
-  NAV and drawdown, the levered layer, the top 12, reconciliation, learnings. Send it as-is.
-- **`summary`** is a one-liner for a push title: `gate ON · 6 order(s)`.
-- **`detail->>'engine' = 'v1'`** matters. The retired `compose.py` also writes `kind = 'nightly'`,
-  and it is still dispatchable. Without this filter a Routine can pick up the old engine's row.
+  NAV and drawdown, the levered layer, account cash, the top 12, reconciliation, learnings. Send
+  it as-is.
+- **`summary`** is a one-liner for a push title: `gate ON · 6 order(s)`. The count is of ORDERS —
+  proposed and approved tickets. A ticket the engine withdrew, Zak cancelled, or Zak already
+  executed is not one; the body lists those apart, under "Not orders" (migration 068).
+- **`detail->>'engine' = 'v1'`** matters. The retired `compose.py` also wrote `kind = 'nightly'` —
+  its rows for sessions 2026-07-31 to 08-17 are still in `briefs` — and its source is still on
+  disk, though no workflow runs it (learning 66). Without this filter a Routine can pick up the old
+  engine's row.
 
 **What changed from the old contract**
 
@@ -45,7 +86,15 @@ select session_date, summary, body, at
 
 Same shape, `kind = 'saturday'`. It carries §4.1's six weekly items — gate flips on record, rank
 stability across the week, drawdown, live-vs-shadow divergences, learnings, and NAV against §1's
-destination. It is composed by the chain hanging off `ingest-universe`, Saturdays.
+destination — and §3.2's exclusion table, which §3.2 says "is surfaced in the payload and the
+Saturday letter". The destination line is the household as the store holds it on the session:
+every holding at its close, every account's cash anchor carried by the ledger, less the facility
+(it used to print a `nav_snapshots` row nothing has written since 2026-08-15). It is composed by
+the chain hanging off `ingest-universe`, Saturdays.
+
+The letter does **not** carry a count of the week's sessions with the gate ON or of the week's
+orders — neither §4.1 nor this contract asks for one. A Routine that wants either has no number in
+the body to copy, and must not compute one in chat (§0.4).
 
 ---
 
@@ -56,16 +105,76 @@ close is the newest session all weekend, so a brief composed Friday night is *co
 a three-hour window would call it silence. That exact bug was live on 2026-08-17 and is what this
 file exists to stop being repeated in the Routines.
 
-The session is the anchor:
+**The session is the anchor — the session that ought to exist, not two tables agreeing with each
+other.** Until 2026-10-07 this section compared `max(engine_sessions.session_date)` with
+`max(briefs.session_date)` and called them equal "the desk has spoken". Both lag together: on a
+night the chain has not run, both still name the previous session, and the test passes. That is how
+the morning note served 2026-08-25's sheet on 08-27 and 08-26's on 08-28 as that morning's orders,
+when the queue held the night's ingest past the note (learning 58). Nobody traded a wrong order —
+the desk was still in shadow on 08-27, and a person caught 08-28 — but on any night both firings
+are dropped it would re-serve a sheet Zak has already executed.
+
+The expected session is the last trading day before the morning the Routine fires, in New York:
+the close whose sheet executes at that morning's open. Three facts about it, one read:
 
 ```sql
-select (select max(session_date) from engine_sessions where mode = 'live') as newest_session,
+with e as (
+  select d as fire_date,
+         d - case extract(isodow from d)::int
+               when 1 then 3              -- Monday: the Friday before
+               when 7 then 2              -- Sunday: the Friday before
+               else 1 end                 -- any other day: the day before
+           as expected_session
+    from (select (now() at time zone 'America/New_York')::date as d) f
+)
+select e.fire_date, e.expected_session,
+       (select max(session_date) from engine_sessions where mode = 'live') as newest_session,
        (select max(session_date) from briefs
-         where kind = 'nightly' and detail->>'engine' = 'v1') as briefed_session;
+         where kind = 'nightly' and detail->>'engine' = 'v1')            as briefed_session,
+       exists (select 1 from runs
+                where job = 'ingest-daily' and status = 'green' and not dry_run
+                  and not (detail ? 'awaiting_vendor')
+                  and started_at > (e.expected_session + time '16:00')
+                                   at time zone 'America/New_York')       as ingest_landed
+  from e;
 ```
 
-Equal → the desk has spoken for the current session. Different → the chain scored a session it
-never composed, which is worth saying out loud rather than swallowing.
+`ingest_landed` asks for the night's own ingest: a green, non-dry `ingest-daily` that started
+after the expected session's 16:00 New York close, which every slot follows (22:23 UTC on
+weekdays). A first firing that found the vendor not yet published is green and landed nothing
+(`awaiting_vendor`, learning 58), so it does not count; a retry that exits because the night is
+already green does, because it found a firing that landed.
+
+The first row that matches, top to bottom, is the reading:
+
+| reading | when | what the Routine does |
+|---|---|---|
+| **scored, not composed** | `newest_session > briefed_session` | says the chain scored a session it never composed — out loud, not swallowed — and relays **no order** from the older sheet |
+| **not in yet** | `briefed_session < expected_session` | says the sheet for `expected_session` is not in — the night's run never came (`ingest_landed` false) or has not finished (true) — and relays **no order** from the older sheet. The older brief may ride as the attachment, under its own date |
+| **sheet current, night red** | not `ingest_landed` | the sheet is the right session's but the night's ingest is red or missing: FLAT, the order sheet exactly as the body prints it (its banner already holds the buys; exits stand), and §6 names the job |
+| **current** | otherwise | delivers the brief |
+
+Only *older* than expected reads not in yet, never merely different: a hand run in the evening,
+after the chain, sees tonight's session, which is newer than the morning's expected one and just as
+current.
+
+**The calendar is weekends only, on purpose.** This system holds no exchange holiday calendar
+(`db.next_session`, `ingest.tape_already_landed`), and a list typed in here would be a constant
+with no source. So the morning after an NYSE holiday reads *not in yet* though nothing was missed:
+the safe direction. The note says what it sees, never decides the market was shut, and the previous
+session's sheet — the one that still stands — rides as the attachment under its own date. The store
+cannot settle it alone: on Labor Day 2026 the vendor posted a 311-row tape dated 2026-09-07, the
+ingest went green writing 132 of its bars, and the engine's newest session stayed 2026-09-04
+because SPY did not print — the same shape a real session with a missing SPY bar would leave.
+
+Replayed over the 37 weekday mornings from 2026-08-17 to 10-06 (from `runs`, which keeps the time
+each compose finished): the old test passed all 37; this one passes 33, catches 08-27, 08-28 and
+09-01 (session 08-31 never scored), and reads 09-08 — the morning after Labor Day — as not in yet.
+
+**The Saturday letter** uses the same read with `kind = 'saturday'`: it is current when its session
+is at or after the expected one (Friday's) and equals `newest_session`. Its chain hangs off the
+census, whose red holds nothing (§5.6, 2026-09-13), so it needs no ingest of its own; when it is not
+current, §6 says which job has not run.
 
 ---
 
@@ -74,10 +183,24 @@ never composed, which is worth saying out loud rather than swallowing.
 An interactive session — as opposed to a Routine pushing a message — reads **`v_session_payload`**
 once and then judges. It never recomputes a score, a rank or a gate in chat.
 
-Its nine keys are §4.2's list, and they are all new:
+Its keys carry §4.2's nine items, and they are all new:
 
 `gate` · `book` · `order_sheet` · `top12` · `exclusions` · `nav` · `facilities` · `tranches` ·
-`check_report` · `pipeline` · `reconciliation` · `learnings`
+`check_report` · `pipeline` · `reconciliation` · `learnings` · `not_orders`
+
+Three of them answer for tonight and nothing else (migration 068):
+
+- **`order_sheet`** is the orders: tonight's tickets in `proposed` or `approved`. **`not_orders`**
+  is the rest of tonight's tickets — withdrawn (`cancelled`, `expired`) or done (`executed`,
+  `reconciled`). Never present a `not_orders` row as something to execute.
+- **`check_report`** is the newest live, non-dry `check` that began after tonight's session row
+  was written, naming that session — or a check that died before it could name one. **Null means
+  no check has proved tonight's sheet, and buys are held.** A row with no `verdict` (a crash, a
+  pre-heartbeat death, still `running`) holds them too; only a finished green or amber verdict
+  releases them.
+- **`nav`**'s drawdown is measured on engine NAV (positions + TFSA cash, USD), not on the
+  positions alone. `nav.household` is the last `nav_snapshots` row — dated, provisional, and not
+  refreshed by any scheduled job; the Saturday letter computes the household itself.
 
 The old keys — `armed`, `queue`, `bench`, `unruled_at_the_line`, `ruled_at_the_line`,
 `escalated_awaiting_zak`, `quarantined_watchlist` — are gone. They belonged to the fundamentals
@@ -110,9 +233,29 @@ Every row carries a `grade` saying where its authority comes from:
 | `broker` | a row from the bank's export | **law** — never contradicted, only replaced by a later export of the same trade |
 | `stated` | Zak's word, ahead of the export | **true, and provisional** — the engine runs on it until the export trues it |
 
-and one of three verbs in `side`: `buy`, `sell`, or `confirm`. **`confirm` is an opening balance** —
-a position that predates the ledger, recorded with its cost basis so the sells that follow it have
-something to net against. It moves no cash.
+and one of four verbs in `side`: `buy`, `sell`, `confirm` or `split`. **`confirm` is an opening
+balance** — a position that predates the ledger, recorded with its cost basis so the sells that
+follow it have something to net against. It moves no cash.
+
+**`split` is written by the pipeline** (Zak's ruling of 2026-10-07, "Pipeline records splits": a
+vendor-reported split on a held name enters the ledger, quantity only and no cash, before score
+runs, and the brief shows it; ticker changes and takeovers still fail closed until he records
+them). Each night `reconcile` writes one `split` row per position the split reaches — `qty`
+is the ratio (2 for a 2:1, 0.1 for a 1:10), `price` 0, `trade_date` the vendor's ex-date — once it
+has checked the split against the raw closes, and the row restates every earlier row of the
+position: the shares move, the cost basis carries, no cash moves (migration 075). **Do not write
+one yourself, and do not record a split as a `confirm`.** If Zak reports a post-split count before
+the pipeline has recorded the split, say so and leave the ledger alone — the next reconcile records
+it once the vendor has posted it (`select * from corporate_actions where ticker = '<name>' and kind
+= 'split'`). The one exception is a split his broker shows that the pipeline will not record —
+the vendor never posts it, or reconcile's amber says the tape contradicts the vendor's posting:
+that is his word like any other statement, and on it you write the row exactly as reconcile would
+(`side = 'split'`, `qty` the ratio, `price` 0, `trade_date` the first session his broker shows on
+the new count, `grade = 'stated'`, `source` naming his words). One per position and date, ever, so
+a later posting of the same date collides instead of doubling, and a vendor posting the tape
+contradicts goes quiet once a split row after it restates the position. Quantity-only rows (price
+0) on or after a split's date are read as his own record of that split: reconcile leaves rows that
+are the split's arithmetic as they are, and goes red, by name, on rows that are not.
 
 ### Zak says he sold something
 
@@ -159,9 +302,17 @@ reference for the rules; a session does it in SQL because a session has no shell
 
 - **`ledger drives TFSA SPMO.US to -810 shares — the history for this name is incomplete`** — a sell
   of a position bought before this ledger existed. Record the opening balance first, as a `confirm`
-  row with the quantity and cost the book already holds, then re-record the sell.
+  row with the quantity and cost the book already holds, then re-record the sell. **Unless the sell
+  is larger than everything ever bought** — the share count after a split, or a mistyped quantity.
+  After a split the vendor has posted (`select * from corporate_actions where ticker = '<name>' and
+  kind = 'split'`), the sell is right and early: write it on its exit ticket (`fill_qty`,
+  `fill_price`, `fill_date`) instead, and tonight's reconcile records the split first and lands the
+  sale after it. Otherwise the sell is the wrong row, and a `confirm` row would invent shares and
+  move the cost basis: check it against the broker and ask Zak.
 - **`NOPE.US is not in universe`** — check the symbol in EODHD form (`NUE.US`, `CNQ.TO`).
-- **anything about `guard_book`** — you tried to write `book`. Write `transactions` instead.
+- **anything about `guard_book` or `book_one_open_row_per_position`** — you tried to write `book`.
+  Write `transactions` instead: a second purchase of a position is a second ledger row, never a
+  second book row (migration 069).
 
 ### The NAV is derived — the chat no longer relays it
 
@@ -169,15 +320,19 @@ Since 2026-08-19 the pipeline derives engine NAV itself: TFSA marked equity (par
 cash, CAD at the session's USDCAD. A session never computes it (§0.4) and never needs to pass it.
 `config.engine_nav` still works and OUTRANKS the derivation — writing it is a ruling, so only do it
 when Zak states a number in so many words, and prefer telling him the derived figure already on the
-sheet. Keeping the cash anchors current (below) is what keeps the derived number honest.
+sheet. Keeping the cash anchors current (below) is what keeps the derived number honest — and no
+clause says who keeps them current or how often: v1.0 defines neither engine NAV nor an anchor duty,
+so an anchor moves only when Zak states his cash. That gap is a §0.3 amendment waiting on Zak, not
+something a session fills by habit.
 
 ### Zak says how much cash he has
 
 > *"…or the current dollar availability etc."*
 
-That is not a trade and does not belong in `transactions`. §2.0: **balances are truth, prices are the
-extrapolation.** `balances` is an append ledger read latest-wins per account, and it is
-session-writable — a new row is a new reading, never an edit of the old one:
+That is not a trade and does not belong in `transactions`. **Balances are truth, prices are the
+extrapolation** — the retired plan's §2.0, which v1.0 does not carry; the derived NAV above stands
+on it by Zak's 2026-08-19 ruling. `balances` is an append ledger read latest-wins per account, and
+it is session-writable — a new row is a new reading, never an edit of the old one:
 
 ```sql
 insert into balances (account, as_of, cash_cad, cash_usd, source)
@@ -198,8 +353,14 @@ decides whether an account can fund a trade. And do not carry a figure forward: 
 currency, write that one and leave the other null rather than repeating yesterday's number as if it
 were today's reading.
 
-`cash_by_account` carries the newest anchor forward by the ledger, so a fill recorded after the
-reading is already accounted for — do not subtract it by hand.
+`cash_by_account` carries the newest anchor forward by the ledger, so a fill after the reading is
+already accounted for — do not subtract it by hand. **Write the reading when Zak gives it**: the
+row's `recorded_at` is the only clock the store has for it. A reading written before the open is
+known to precede that day's fills, and they count. A reading written after the open is taken to
+include every fill dated that day — right for a screenshot taken after the trades, wrong for a
+figure Zak gave before he traded — and the derived NAV's breakdown names those fills
+(`cash_same_day_assumed_inside`). So if you are writing a pre-open figure after the open, date it to
+the previous session instead: `as_of` is the last session whose fills the reading includes.
 
 ### A statement the export passed over
 
@@ -250,9 +411,10 @@ select * from v_ledger_vs_book;
 ```
 
 Empty is the goal. A row with `predates_the_ledger = false` is a real break and something wrote one
-side without the other. A row with `predates_the_ledger = true` is a holding older than its own
-history — true of the book today, not a defect, and it heals itself when the export lands. Today
-that is SPMO in the TFSA and the RRSP, bought with the §6.1 proceeds.
+side without the other — a row left open after the ledger sold the name out included, and a
+position held in more than one open book row (`open_rows`), which the ledger refuses to move. A row
+with `predates_the_ledger = true` is a holding with no ledger rows behind it at all — not a defect,
+and it heals itself when the export lands.
 
 ---
 
@@ -262,7 +424,10 @@ that is SPMO in the TFSA and the RRSP, bought with the §6.1 proceeds.
 - **Never write a ticket to `approved`.** That is Zak's word, in chat, and `reconcile` looks for a
   receipt against it afterwards.
 - **Never write `book` directly.** Write the ledger (§4b) and let the position follow. A book poked
-  by hand is a book that agrees with nothing, and `guard_book` refuses it.
+  by hand is a book that agrees with nothing. `guard_book` refuses it for every role but the owner
+  — and the chat connector logs in as the owner, which is how a second VXC.TO row reached the book
+  on 2026-09-28 and the brief showed 418 shares against 279 held for nine days. Since migration 069
+  a second open row for a position is refused for every role.
 - **Never invent a price, a quantity or a date to complete a ledger row.** If the export is
   ambiguous, say which row and which field — a `stated` row with a number Zak did not give is worse
   than no row, because it looks exactly like one he did.
@@ -271,25 +436,54 @@ that is SPMO in the TFSA and the RRSP, bought with the §6.1 proceeds.
 - **Never suppress the brief because the check is red.** §4.4 holds the *buys*; §5.4 makes exits
   unblockable. The brief already carries `**buys held; exits stand**` at the top when that applies,
   and a red night is exactly the night Zak needs the message.
+- **Never relay an older session's orders as this morning's.** When §3 reads anything but current,
+  no order from the older sheet goes into the note or the push line (§0.4: a stale pipeline means
+  no new tickets). The older brief may still ride as the attachment, named for its own session —
+  which is also how a sheet that still stands, the morning after a market holiday, reaches Zak.
 
 ---
 
 ## 6. Health, in one line
 
+The chain behind the session being delivered — the last trading session's, §3's expected one —
+not a fixed window:
+
 ```sql
-select job, status, finished_at, detail->'amber', detail->'red'
-  from (select distinct on (job) * from runs
-         where started_at > now() - interval '36 hours'
-         order by job, id desc) r
- order by job;
+with e as (
+  select d - case extract(isodow from d)::int when 1 then 3 when 7 then 2 else 1 end
+           as expected_session
+    from (select (now() at time zone 'America/New_York')::date as d) f
+)
+select r.job, r.status, r.finished_at, r.detail->'amber' as amber, r.detail->'red' as red
+  from e, lateral (select distinct on (job) * from runs
+                    where not dry_run
+                      and started_at > (e.expected_session + time '16:00')
+                                       at time zone 'America/New_York'
+                    order by job, id desc) r
+ order by r.job;
 ```
 
-Six jobs on an ordinary night: `reconcile · score · shadow · check · compose · notify`.
+The newest non-dry run of each job since the expected session's close. Seven jobs on an ordinary
+weeknight: `ingest-daily · reconcile · score · shadow · check · compose · notify`. On a Monday it is
+Friday night's chain and Saturday's re-run of it, plus `ingest-universe` and `backup` — the whole
+weekend, which is exactly what the Monday note has to vouch for.
+
+Until 2026-10-07 this read `started_at > now() - interval '36 hours'`. Thirty-six hours is
+`db.freshness`'s constant of record (§5.6, 2026-09-13) and it is right where it lives, at compose
+time, inside the night it describes. Read at a fixed morning hour it is wrong one weekday in five:
+on a Monday the window opens on Sunday evening, when nothing runs, so it returned no rows at all on
+09-07, 09-21, 09-28 and 10-05. On 09-07 the weekend it hid held a red backup, a red census and a red
+check (learnings 63, 64 and 67). It also read DRY_RUN rows, which `db.freshness` stopped doing on
+2026-09-13 (learning 67).
 
 - `notify` **green** means the words exist and are deliverable.
 - `notify` **red** means the doorbell is about to ring on an empty doorstep — say so.
 - `score` **amber** with `frozen: true` in its detail is not a fault; it is §5.5, and the brief
   leads with Zak's own words.
+- `ingest-universe` **red** is a warning on the freshness line and holds nothing (§5.6,
+  2026-09-13).
+- **No row** for a nightly job means it has not run since that close. On a weekday morning with no
+  `ingest-daily` row, §3 already reads *not in yet*.
 
 ---
 
