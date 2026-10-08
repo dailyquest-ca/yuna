@@ -481,3 +481,114 @@ def test_topups_cannot_pyramid_winners_once_the_park_is_empty(db, migrated):
         s = desk.sheet(cur, days[-1], 200_000.0)
     assert not [o for o in s["orders"] if o["clause"] in ("top_up", "fund")]
     assert [u["ticker"] for u in s["underweight"]] == ["N00.US"], "still visible, never bought"
+
+
+def test_the_tape_is_read_over_the_window_the_engine_reads_and_decides_as_the_whole_tape(
+        db, migrated, monkeypatch):
+    """QC 2026-10-07, A34. The load read every bar since 2003 — 9.2M rows a call, 73.7 s on average
+    and 117.1 s at worst against the server's 120 s statement timeout — for a decision that reads
+    the last 253 sessions. Both halves have to hold: nothing before the window reaches the arrays,
+    and the sheet is exactly the one the whole tape gives.
+
+    The depth is stated here from §3's constants rather than read back from `desk.reads()`: the
+    deepest reads are §3.3's formation close and its 252-return vol window, and §3.7(3)'s
+    252-return pair test.
+    """
+    import bars
+    deepest = max(engine.FORMATION, engine.SKIP, engine.VOL_WINDOW, engine.SCREEN_WINDOW - 1,
+                  engine.ADDV_WINDOW - 1, bars.TWIN_WINDOW)
+    with db.cursor() as cur:
+        days = _world(cur, held=("N03.US", "N15.US"))     # one kept, one a rank exit
+        # a listed name that stopped printing long ago: it has bars, and none in the window
+        cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                       values ('GONE.US','GONE.US','stock','USD','active')""")
+        for d in days[:200]:
+            cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                           values ('GONE.US',%s,30,30,30,30,30,9000000)""", (d,))
+    db.commit()
+    with db.cursor() as cur:
+        sessions, tickers, adj, raw, dv, _ = desk.load(cur, days[-1])
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    i = len(sessions) - 1
+    first = i - deepest
+    assert first > 0, "the fixture must reach further back than the window, or this proves nothing"
+    for name, a in (("adj", adj), ("raw", raw), ("dv", dv)):
+        assert np.isnan(a[:first]).all(), f"{name}: a bar from before the window was loaded"
+    printing = [j for j, t in enumerate(tickers) if t != "GONE.US"]
+    assert np.isfinite(adj[first:, printing]).all(), "and every bar inside it was"
+    assert "GONE.US" in tickers and s["universe"] == 21, \
+        "a name with no bar in the window keeps its column — universe_count means what it did"
+    assert [o["ticker"] for o in s["orders"] if o["action"] == "sell"] == ["N15.US"]
+
+    # The same code with the window opened to every session: the decision may not move.
+    monkeypatch.setattr(desk, "reads", lambda: {"the whole tape": len(sessions)}, raising=False)
+    with db.cursor() as cur:
+        whole = desk.sheet(cur, days[-1], 200_000.0)
+    assert whole == s
+
+
+def _split(cur, days, ticker, *, ratio, at, turnover, drift=0.0013):
+    """A name stored the way the vendor's per-ticker history stores a split once it is re-pulled:
+    the RAW close on every bar — before `at`, `ratio` times the adjusted close (2.0 for a 2:1, 0.1
+    for a 1:10 reverse) — the adjusted close continuous, and the volume restated in post-split
+    shares. Production's APH.US is this shape. It trades `turnover` dollars every session, straight
+    through the split, and its drift is above the ladder's so that if it is ranked it ranks first.
+    """
+    wiggle = np.cumsum(np.random.default_rng(3).normal(0, 0.006, len(days)))
+    cur.execute("""insert into universe (ticker,name,kind,currency,status)
+                   values (%s,%s,'stock','USD','active')""", (ticker, ticker))
+    for k, d in enumerate(days):
+        a = 50.0 * float(np.exp(drift * k + wiggle[k]))
+        c = a * ratio if k < at else a
+        cur.execute("""insert into prices (ticker,d,open,high,low,close,adj_close,volume)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (ticker, d, c, c * 1.01, c * 0.99, c, a, int(round(turnover / a))))
+
+
+def test_a_split_leaves_a_names_liquidity_where_it_was(db, migrated):
+    """QC 2026-10-07, A7. §3.2's floor and pool ask how much a name trades, and a split changes
+    nothing about that. Live ADDV was the raw close times the stored volume, and the stored volume
+    is split-adjusted once a name is re-pulled — so every bar before a split read at the split
+    factor times its turnover (APH.US, 2:1 on 2026-09-03, read 1.67x on 10-05). The code of record
+    prices it on the adjusted close, where the factor cancels.
+
+    This name trades $7M a day through a 2:1 split ten sessions before the decision. Its ADDV is
+    $7M on every session across the split, it sits below §3.2's $10M floor, and it is not ranked —
+    under the raw close it read $14M, ranked first and was bought."""
+    turnover = 7_000_000.0
+    with db.cursor() as cur:
+        days = _world(cur)
+        _split(cur, days, "SPL.US", ratio=2.0, at=len(days) - 10, turnover=turnover)
+    db.commit()
+    with db.cursor() as cur:
+        sessions, tickers, adj, raw, dv, _ = desk.load(cur, days[-1])
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    i, j = len(sessions) - 1, tickers.index("SPL.US")
+    addv = [float(engine.median_addv(dv, k)[j]) for k in range(i - 60, i + 1)]
+    assert max(abs(a / turnover - 1) for a in addv) < 1e-4, \
+        f"ADDV stepped across the split: {min(addv):,.0f} .. {max(addv):,.0f}"
+    assert raw[i, j] >= engine.SCREEN_MIN_PRICE, "the $5 floor still reads the print, and passes"
+    assert "SPL.US" not in [r["ticker"] for r in s["ranks"]], "below the $10M floor: not ranked"
+    assert "SPL.US" not in [o["ticker"] for o in s["orders"]], "and never bought"
+
+
+def test_a_reverse_split_does_not_sell_a_liquid_holding(db, migrated):
+    """The mirror. Before a 1:10 reverse split the raw prints sit at a tenth of the adjusted close
+    beside volume restated in post-split shares, so the raw close read a tenth of the turnover: a
+    $40M name read $4M, failed §3.2's $10M floor, fell out of the rank, and — held — was queued to
+    sell as a rank exit (§3.5) for something that never happened to its trading."""
+    turnover = 40_000_000.0
+    with db.cursor() as cur:
+        days = _world(cur, held=("N00.US",))
+        _split(cur, days, "RVS.US", ratio=0.1, at=len(days) - 10, turnover=turnover)
+        cur.execute("""insert into book (ticker,account,sleeve,qty,avg_cost,status)
+                       values ('RVS.US','TFSA','momentum',100,40.0,'open')""")
+    db.commit()
+    with db.cursor() as cur:
+        s = desk.sheet(cur, days[-1], 200_000.0)
+    rank = {r["ticker"]: r for r in s["ranks"]}
+    assert "RVS.US" in rank, "a $40M name passes the $10M floor and is ranked"
+    assert abs(rank["RVS.US"]["addv"] / turnover - 1) < 1e-4
+    assert rank["RVS.US"]["rank"] == 1
+    assert "RVS.US" not in [o["ticker"] for o in s["orders"] if o["action"] == "sell"], \
+        "a held name ranked first is kept, not sold"

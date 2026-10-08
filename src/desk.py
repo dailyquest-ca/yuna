@@ -27,27 +27,89 @@ import engine                                                             # noqa
 from db import cash_by_account, connect                                    # noqa: E402
 
 # §3.2: the universe is `.US` common stocks from `universe`, minus `universe_excluded`, minus
-# delisted. Every clause of that sentence is in the query below and none of it is inferred.
+# delisted. Every clause of that sentence is in this predicate and none of it is inferred.
+UNIVERSE = """
+           u.kind = 'stock'
+       and u.ticker like '%%.US'
+       and u.status <> 'delisted'
+       and not exists (select 1 from universe_excluded e where e.ticker = u.ticker)
+"""
+# The universe's bars over the window §3 reads (`reads` below). Unordered on purpose: `grid` files
+# every bar by (ticker, session), so a sort would cost the server time and change nothing.
 TAPE = """
     select p.ticker, p.d, coalesce(p.adj_close, p.close), p.close, p.volume
       from prices p
       join universe u on u.ticker = p.ticker
-     where u.kind = 'stock'
-       and u.ticker like '%%.US'
-       and u.status <> 'delisted'
-       and not exists (select 1 from universe_excluded e where e.ticker = p.ticker)
-       and p.d <= %s
-     order by p.ticker, p.d
+     where """ + UNIVERSE + """
+       and p.d >= %s and p.d <= %s
+"""
+# Every name with a column on the tape: any bar at all on or before the session, inside the window
+# or not. A name that stopped printing before the window keeps its (empty) column, so the column
+# set — and `engine_sessions.universe_count`, "names with a column on the tape after §3.2's
+# exclusions" (migration 051) — is what the whole-history read always gave. Each name's NEWEST bar
+# is probed, backward from the session: the pages TAPE has just read, not the name's first bar
+# from 2003. Production, 2026-10-06: 97 ms, against 1.5 s for the same question asked forward.
+NAMES = """
+    select u.ticker from universe u
+     cross join lateral (select 1 from prices p where p.ticker = u.ticker and p.d <= %s
+                          order by p.d desc limit 1) newest
+     where """ + UNIVERSE + """
 """
 
 
-def load(cur, as_of):
-    """The tape as (sessions, tickers, adj, raw, dollar-volume), on the benchmark's own calendar.
+def reads():
+    """Every read §3 makes of a name's bars, as sessions back from the decision session `i`.
 
-    The calendar comes from `SPY.US` rather than from the union of every name's dates. Taking it
-    from the union is what put New Year's Day into a research grid, because a handful of junk
-    listings print on a day the market is shut — and on a session where nothing real prints, a book
-    sells everything (selling carries the last mark) and buys nothing (buying refuses a stale one).
+    The window `tape` loads is derived from these and from nothing else, and each is a constant of
+    record (`engine.py`, §3.6) or §3.7(3)'s pair window (`bars.py`) — no number is chosen here. A
+    run of N closes ending at `i` reaches N-1 back; N daily returns ending at `i` reach N back.
+    Built at call time, so a constant edited in `engine.py` moves the window with it.
+
+    Today every entry is 252 or less, so §3 reads the last 253 sessions — of the 5,821 the
+    benchmark had printed by 2026-10-06. The gate is not here: §3.4 reads `SPY.US`, which `tape`
+    loads in full.
+    """
+    return {
+        "§3.3 formation close, adj[i - FORMATION]": engine.FORMATION,
+        "§3.3 skip close, adj[i - SKIP]": engine.SKIP,
+        "§3.3 vol, VOL_WINDOW daily returns ending at i": engine.VOL_WINDOW,
+        "§3.2 finite bars, the last SCREEN_WINDOW closes": engine.SCREEN_WINDOW - 1,
+        "§3.2 ADDV, the median of the last ADDV_WINDOW sessions": engine.ADDV_WINDOW - 1,
+        "§3.7(3) pair test, TWIN_WINDOW daily returns ending at i": bars.TWIN_WINDOW,
+    }
+
+
+def covered(need, i, lo):
+    """Halt unless calendar rows `lo..i` reach every read in `need`, or `lo` is the first session.
+
+    `tape` derives `lo` from these same reads, so this cannot fire as written. It is here for the
+    day it can: a window narrowed by hand, or derived from a subset of the reads, would otherwise
+    hand the engine NaN where there are bars — and a NaN reads exactly like a name that never
+    printed, so the screen drops it and nothing is raised anywhere.
+    """
+    short = sorted(f"{what} ({back} back)" for what, back in need.items()
+                   if lo > 0 and i - back < lo)
+    if short:
+        raise SystemExit(f"the tape window reaches {i - lo} session(s) back from session {i}, and "
+                         f"these reads go further: {'; '.join(short)}")
+
+
+def tape(cur, as_of, *, also=None):
+    """The benchmark's whole series, every name with a column, and the universe's bars over the
+    window the engine reads. Returns (sessions, index_px, tickers, rows).
+
+    **Bounded since 2026-10-07 (QC finding A34).** TAPE had no lower date, so score, shadow and
+    check each pulled every bar since 2003 — 9.2M rows a call, 73.7 s on average and 117.1 s at
+    worst against the server's 120 s `statement_timeout`, which none of the three raises. That is
+    learning 60's `QueryCanceled` one slow night from recurring, possibly in `score` itself: no
+    sheet, protective sells included. The window is the last `max(reads())` sessions plus the
+    decision session; the rows before it never reach the arrays, and no decision reads them.
+
+    `also` adds a caller's own reads (`shadow.py` passes `concentrated.rank_at`'s); the window
+    covers every one. A caller that reads deeper than §3 and does not say so reads NaN.
+
+    The benchmark is read in full, deliberately: §3.4's latch is walked forward from its first
+    evaluable session (`engine.gate_history`), and it is one name's bars.
     """
     cur.execute("""select d, coalesce(adj_close, close) from prices
                     where ticker = %s and d <= %s order by d""", (engine.REGIME_SOURCE, as_of))
@@ -56,11 +118,46 @@ def load(cur, as_of):
         raise SystemExit(f"no {engine.REGIME_SOURCE} bars at or before {as_of} — no calendar, no run")
     sessions = [r[0] for r in bench]
     index_px = np.array([float(r[1]) for r in bench])
-    at = {d: i for i, d in enumerate(sessions)}
+    i = len(sessions) - 1
+    need = {**reads(), **(also or {})}
+    lo = max(0, i - max(need.values()))
+    covered(need, i, lo)
 
-    cur.execute(TAPE, (as_of,))
+    cur.execute(TAPE, (sessions[lo], as_of))
     rows = cur.fetchall()
-    tickers = sorted({r[0] for r in rows})
+    cur.execute(NAMES, (as_of,))
+    names = {r[0] for r in cur.fetchall()}
+    # The union, not NAMES alone: the two reads are two statements, and a name excluded or delisted
+    # between them keeps the column for the bars this tape did read.
+    tickers = sorted(names | {r[0] for r in rows})
+    return sessions, index_px, tickers, rows
+
+
+def grid(sessions, tickers, rows):
+    """`tape`'s rows as (adj, raw, dollar-volume) arrays: a row per session, a column per name.
+
+    Rows before the window stay NaN. They are full height anyway, so session `i` is the same row
+    here as in `index_px` and every caller's `len(sessions) - 1` keeps meaning tonight.
+
+    **Dollar volume is the adjusted close times the volume** — the code of record's basis
+    (`concentrated.build_grid`, and `backtest.py` since 2026-08-11), and since 2026-10-07 this
+    one's (QC finding A7). The vendor's per-ticker history carries the RAW close beside
+    split-ADJUSTED volume, so the raw close times the volume that stood here from 2026-08-17 read
+    every bar before a split at the split factor times its turnover once the name was re-pulled:
+    APH.US, 2:1 on 2026-09-03, read 1.67x its true ADDV on 10-05, and a reverse split reads a
+    fraction. It is learning 34's basis, removed from the sim and left live — look-ahead in a
+    backtest; here, where the split has happened by the time the history is restated, the same
+    factor inflating the trailing 50 sessions — and the market-mechanics rule it breaks:
+    `adj_close x volume` cancels the split factor, `raw_close x adjusted volume` compounds it.
+    The adjusted close cancels it however the bar is stored: a re-pulled bar is adjusted on both
+    sides, a bar that landed nightly and was never restated is raw on both. A bar with no
+    positive adjusted close is no bar, as in build_grid. The adjusted close folds in dividends
+    too, so a payer reads a little under its raw turnover — on the cell of record's basis as
+    well, and on an ordinary night that is what moves a name across the pool's 500th place.
+
+    The raw close stays in `raw`, for the one clause that wants the actual print: §3.2's $5 floor.
+    """
+    at = {d: i for i, d in enumerate(sessions)}
     col = {t: j for j, t in enumerate(tickers)}
     shape = (len(sessions), len(tickers))
     adj, raw, dv = (np.full(shape, np.nan) for _ in range(3))
@@ -71,7 +168,21 @@ def load(cur, as_of):
         j = col[tk]
         adj[i, j] = float(a)
         raw[i, j] = float(c)
-        dv[i, j] = float(c) * float(v) if c is not None and v is not None else np.nan
+        dv[i, j] = float(a) * float(v) if v is not None and a > 0 else np.nan
+    return adj, raw, dv
+
+
+def load(cur, as_of, *, also=None):
+    """The tape as (sessions, tickers, adj, raw, dollar-volume, index_px), on the benchmark's own
+    calendar, filled over the window §3 reads (`tape`).
+
+    The calendar comes from `SPY.US` rather than from the union of every name's dates. Taking it
+    from the union is what put New Year's Day into a research grid, because a handful of junk
+    listings print on a day the market is shut — and on a session where nothing real prints, a book
+    sells everything (selling carries the last mark) and buys nothing (buying refuses a stale one).
+    """
+    sessions, index_px, tickers, rows = tape(cur, as_of, also=also)
+    adj, raw, dv = grid(sessions, tickers, rows)
     return sessions, tickers, adj, raw, dv, index_px
 
 

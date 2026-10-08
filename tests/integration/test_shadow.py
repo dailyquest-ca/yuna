@@ -9,10 +9,13 @@ import pathlib
 import subprocess
 import sys
 
+import numpy as np
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+import desk                                                               # noqa: E402
 import shadow                                                             # noqa: E402
-from test_desk import _world                                              # noqa: E402
+from test_desk import _split, _world                                      # noqa: E402
 
 
 def test_the_live_engine_and_the_sim_agree_on_real_arrays(db, migrated):
@@ -29,6 +32,46 @@ def test_the_live_engine_and_the_sim_agree_on_real_arrays(db, migrated):
     rank = next(r for r in rows if r[0] == "rank")
     assert rank[4]["first_disagreement_at"] is None
     assert rank[4]["ranked_live"] == rank[4]["ranked_sim"] == 20
+
+
+def test_a_live_loader_on_another_dollar_volume_basis_is_a_divergence(db, migrated, monkeypatch):
+    """QC 2026-10-07, A7. Both sides used to rank on `desk.load`'s dollar volume, so for seven
+    weeks live priced §3.2's ADDV as the raw close times split-adjusted volume, the sim's grid as
+    the adjusted close times volume, and this comparison attested a match every night: it could
+    not see the difference by construction. The sim side now builds its dollar volume from the bars
+    the way `concentrated.build_grid` does, so the same defect put back on the live side alone is
+    a divergence — named, at rank 1 — and on the code of record's basis the two agree on every
+    name's ADDV, not merely on the order."""
+    with db.cursor() as cur:
+        days = _world(cur)
+        # $7M a day through a 2:1 split ten sessions back: below §3.2's $10M floor in truth, $14M
+        # under the raw close — which ranks it first
+        _split(cur, days, "SPL.US", ratio=2.0, at=len(days) - 10, turnover=7_000_000.0)
+        db.commit()
+
+        def raw_close_basis(sessions, tickers, rows):
+            """The live loader as it stood until 2026-10-07: dollar volume on the raw close."""
+            at = {d: i for i, d in enumerate(sessions)}
+            col = {t: j for j, t in enumerate(tickers)}
+            adj, raw, dv = (np.full((len(sessions), len(tickers)), np.nan) for _ in range(3))
+            for tk, d, a, c, v in rows:
+                if d in at:
+                    adj[at[d], col[tk]], raw[at[d], col[tk]] = a, c
+                    dv[at[d], col[tk]] = c * v if v is not None else np.nan
+            return adj, raw, dv
+
+        with monkeypatch.context() as m:
+            m.setattr(desk, "grid", raw_close_basis, raising=False)
+            broken = next(r for r in shadow.compare(cur, days[-1]) if r[0] == "rank")
+        fixed = next(r for r in shadow.compare(cur, days[-1]) if r[0] == "rank")
+
+    assert broken[1] is False, "a live loader on another ADDV basis must read as a divergence"
+    assert broken[2][0] == "SPL.US" and "SPL.US" not in broken[3]
+    assert broken[4]["first_disagreement_at"] == 1
+    assert broken[4]["addv_differs"] >= 1 and "SPL.US" in broken[4]["addv_differs_first"]
+
+    assert fixed[1] is True and "SPL.US" not in fixed[2]
+    assert fixed[4]["addv_differs"] == 0, "one basis: every name's ADDV agrees, not only the order"
 
 
 def test_the_gate_comparison_walks_the_latch_rather_than_reading_a_point(db, migrated):
