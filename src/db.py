@@ -613,7 +613,21 @@ def late_minutes(detail):
     return m if m > 0 else None
 
 
-def freshness(conn, *, stale_days=4):
+# The newest STOCK bar — what `freshness` and `data_date` both ask — as an ordered probe rather
+# than an aggregate (QC 2026-10-07, A35). `max(p.d)` over the join with `universe` read every price
+# row: Postgres rewrites a bare max() into an index probe but not across a join, so the question
+# cost 9.3 s on average, 30.7 s at worst and ~0.9 GB of reads, growing with the tape. Walking
+# `prices_d_idx` backwards and stopping at the first row whose ticker is a stock gives the same
+# date — `d` is NOT NULL (it is in the primary key) and `universe.ticker` is unique, so the newest
+# qualifying row's date IS the max — in milliseconds (planned cost 1.42 against 271,106 on
+# production). The outer scalar select keeps an empty store's answer NULL, as max() gave.
+NEWEST_STOCK_BAR = """select (select p.d from prices p
+                               where exists (select 1 from universe u
+                                              where u.ticker = p.ticker and u.kind = 'stock')
+                               order by p.d desc limit 1)"""
+
+
+def freshness(conn, *, stale_days=4, own_run=None):
     """The one-line answer to "is it safe to speak" (§4.2): `ingest ✓ score ✓ check ✓`.
 
     `stale_days=4` and the 36-hour window below are operating constants of record (§5.6,
@@ -622,12 +636,24 @@ def freshness(conn, *, stale_days=4):
     lets Saturday's rows fall out by Monday night.
 
     Returns (line, tickets_allowed). §5.6, ruled 2026-08-05 — **stale means the bars, not the
-    clock**. Tickets are held on exactly three conditions:
+    clock**. Tickets are held on exactly four conditions:
 
       * the bars are old,
       * a price-critical job failed (red, or the half-failure the 2026-08-05 ruling calls amber),
+      * a price-critical job's newest run has not FINISHED — see below,
       * the chain ran **out of order** — an ingest landed rows after the `score` beside it, so the
         derived numbers ranked yesterday's world.
+
+    **A run still reading `running` is not a result** (QC 2026-10-07, A45). It is an ingest still
+    landing bars or a score still rewriting the sheet, or it is a job that died without closing
+    its row: a runner GitHub lost, and — until the autopsy steps learned to run on a cancel the
+    same day — any cancel or timeout (production's run 905 has read `running` since 2026-09-14).
+    This line used to print either as ✓ and release the buys. Neither can vouch for the prices, so a price-critical one holds buys
+    the way that job's amber does (§4.3 as amended 2026-09-14), and the line says what is known —
+    "still running or died". No age decides between the two: the question is whether a result
+    exists, and a running row has none. `own_run` is the asking job's own runs id; a run that asks
+    from inside itself is not waiting on itself. Everything else running — `check` asking this
+    very question, compose, the census — prints as it always did.
 
     **Lateness alone holds nothing.** It rides the line as `late: <job> +NNNm` and decides nothing:
     a job queued three hours behind its slot with current bars is a punctuality note, not a data
@@ -637,21 +663,23 @@ def freshness(conn, *, stale_days=4):
         # stock bars only. FX and the index come from the same nightly pull, so in a clean run this
         # is the same date — but a half-failed ingest that landed USDCAD and no equities would
         # otherwise read as fresh, and "stale data ⇒ no new tickets" would quietly not apply.
-        cur.execute("""select max(p.d) from prices p join universe u on u.ticker = p.ticker
-                       where u.kind = 'stock'""")
+        cur.execute(NEWEST_STOCK_BAR)
         last_bar = cur.fetchone()[0]
         # `not dry_run`, as the timeline query below always had: a DRY_RUN dispatch of the chain
         # that ended red was the newest row for its job and held the live desk (2026-09-13)
-        cur.execute("""select distinct on (job) job, status, detail from runs
+        cur.execute("""select distinct on (job) job, status, detail, id from runs
                        where started_at > now() - interval '36 hours' and not dry_run
                        order by job, id desc""")
-        recent = [(j, s, d) for j, s, d in cur.fetchall()]
+        recent = cur.fetchall()
         # every non-dry run in the window — the ordering question is about runs, not jobs
         cur.execute("""select job, started_at, finished_at, coalesce(rows_written, 0) from runs
                        where started_at > now() - interval '36 hours' and not dry_run""")
         timeline = cur.fetchall()
 
-    status = {j: s for j, s, _ in recent}
+    status = {j: s for j, s, _, _ in recent}
+    # a price-critical run with no result yet (see the docstring): amber-equivalent, never ✓
+    unfinished = sorted(j for j, s, _, i in recent
+                        if s == "running" and j in PRICE_CRITICAL and i != own_run)
     marks = []
     for verb, jobs in VERBS.items():
         seen = [status[j] for j in jobs if j in status]
@@ -659,13 +687,13 @@ def freshness(conn, *, stale_days=4):
             marks.append(f"{verb} —")
         elif any(s == "red" for s in seen):
             marks.append(f"{verb} ✗")
-        elif any(s == "amber" for s in seen):
+        elif any(s == "amber" for s in seen) or any(j in unfinished for j in jobs):
             marks.append(f"{verb} ⚠")
         else:
             marks.append(f"{verb} ✓")
     line = " · ".join(marks)
 
-    late = sorted(f"late: {j} +{m:.0f}m" for j, _, d in recent
+    late = sorted(f"late: {j} +{m:.0f}m" for j, _, d, _ in recent
                   if (m := late_minutes(d)) and m >= LATE_MINUTES_FLOOR)
     if late:
         line += " · " + " · ".join(late)
@@ -684,14 +712,14 @@ def freshness(conn, *, stale_days=4):
     score_start = max((s for j, s, _, _ in timeline if j in VERBS["score"]), default=None)
     out_of_order = bool(ingest_end and score_start and ingest_end > score_start)
 
-    bad = [f"{j} {s}" for j, s, _ in recent if s in ("red", "amber")]
+    bad = [f"{j} {s}" for j, s, _, _ in recent if s in ("red", "amber")]
     price_bad = [x for x in bad if x.split()[0] in PRICE_CRITICAL]
     stale = (dt.date.today() - last_bar).days if last_bar else 999
     if stale > stale_days:
         return f"⚠️ bars stale — last close {last_bar} ({stale}d) · {line}", False
-    if price_bad:
-        return (f"⚠️ {', '.join(sorted(set(price_bad)))} — data {last_bar}, tickets held · {line}",
-                False)
+    if price_bad or unfinished:
+        why = sorted(set(price_bad)) + [f"{j} still running or died" for j in unfinished]
+        return f"⚠️ {', '.join(why)} — data {last_bar}, tickets held · {line}", False
     if out_of_order:
         return (f"⚠️ chain out of order — an ingest landed rows after the score beside it "
                 f"({ingest_end.astimezone(dt.timezone.utc):%H:%M} > "
@@ -710,8 +738,7 @@ def data_date(cur):
     nightly pull, so a half-failed ingest that landed USDCAD and no equities would otherwise report
     a date the equities never reached.
     """
-    cur.execute("""select max(p.d) from prices p join universe u on u.ticker = p.ticker
-                   where u.kind = 'stock'""")
+    cur.execute(NEWEST_STOCK_BAR)
     return cur.fetchone()[0]
 
 
@@ -815,7 +842,13 @@ def chain_already_current(conn, hb, job, *, must_match=()):
 
 class Heartbeat:
     """with Heartbeat(conn, 'daily') as hb: ...  — opens a running row, closes it green,
-    or red with the traceback if the body raises. hb.detail / hb.calls / hb.rows are yours."""
+    or red with the traceback if the body raises. hb.detail / hb.calls / hb.rows are yours.
+
+    **A body that raises leaves nothing behind but its red.** Whatever it had not committed is
+    rolled back before the red is written, so a job that crashed, refused, or was interrupted
+    half-way through its writes cannot leave the half it reached looking like a result. A job
+    whose earlier work must survive a later failure commits that work itself, at the point it
+    stands on (`ingest` per stage, `reconcile` after the chat route)."""
 
     def __init__(self, conn, job, dry_run=None, scheduled_utc=None):
         self.conn, self.job = conn, job
@@ -887,11 +920,16 @@ class Heartbeat:
         self.detail.setdefault("red", []).append(why)
 
     def __exit__(self, et, ev, tb):
+        # `clock_timestamp()`, never `now()`, on both closing writes (QC 2026-10-07, A37). `now()`
+        # is the start of the current TRANSACTION, and a job that reads without committing — check,
+        # compose, notify, backup, a quiet reconcile — is still inside the one its first query
+        # opened: check's 115-second run was recorded as 0.015 seconds, and every duration and
+        # finish time read off this table was the moment the job began.
         if et is None:
             self.detail["dry_run"] = self.dry_run
             with self.conn.cursor() as cur:
-                cur.execute("""update runs set finished_at=now(), status=%s, calls_used=%s,
-                               rows_written=%s, detail=%s where id=%s""",
+                cur.execute("""update runs set finished_at=clock_timestamp(), status=%s,
+                               calls_used=%s, rows_written=%s, detail=%s where id=%s""",
                             (self.status, self.calls[0], 0 if self.dry_run else self.rows,
                              json.dumps(self.detail, default=str), self.id))
             self.conn.commit()
@@ -899,12 +937,28 @@ class Heartbeat:
         else:
             self.detail["fatal"] = f"{et.__name__}: {ev}"
             self.detail["trace"] = "".join(traceback.format_exception(et, ev, tb))[-1200:]
+            # Roll back FIRST, then write the red on a clean transaction (QC 2026-10-07, A49 and
+            # A75). The red used to ride the job's own transaction, which went wrong both ways:
+            #   * on a Python exception — a SystemExit refusal, an interrupt, a bug — the commit
+            #     that recorded the red also committed every write the job had half-done, so
+            #     reconcile could "refuse" a manifest after folding half of it;
+            #   * on a database error the transaction was already aborted, the red UPDATE failed
+            #     inside it, and `except: pass` hid that, leaving the run `running` with its
+            #     traceback lost.
             try:
+                self.conn.rollback()
                 with self.conn.cursor() as cur:
-                    cur.execute("""update runs set finished_at=now(), status='red', calls_used=%s,
-                                   detail=%s where id=%s""",
+                    cur.execute("""update runs set finished_at=clock_timestamp(), status='red',
+                                   calls_used=%s, detail=%s where id=%s""",
                                 (self.calls[0], json.dumps(self.detail, default=str), self.id))
                 self.conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                # Never raised: the job's own exception is the one the autopsy and the reader need,
+                # and an exception from here would replace it. Never silent either — this line
+                # lands in the output tail the workflow's autopsy step (report_fail.py) writes
+                # into the row it closes. A dead connection ends here, and only a fresh one could
+                # do better.
+                print(f"{self.job}: could not record the red on run {self.id} — "
+                      f"{type(e).__name__}: {e}. The job's own error follows; the autopsy step "
+                      f"closes the row.", file=sys.stderr)
         return False

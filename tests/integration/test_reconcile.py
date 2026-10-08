@@ -547,6 +547,41 @@ def test_the_job_folds_chat_receipts_on_a_night_with_no_manifest(db, migrated, t
         assert cur.fetchone() == (0.0, "closed")
 
 
+def test_a_refused_manifest_folds_nothing_and_the_chat_route_still_lands(db, migrated, tmp_path):
+    """QC 2026-10-07 (A49). `fold_fill` refuses a receipt it cannot recognise on a re-run — and the
+    heartbeat used to commit everything before the refusal along with the red: the manifest's valid
+    first fill was folded into the book by a job whose last word was "refusing to fold".
+
+    The refusal now means what it says (the heartbeat rolls back before it writes the red), and the
+    chat route is committed on its own before any manifest is read — so one bad export cannot hold
+    every fill Zak reported in chat out of the book, night after night, until the file is fixed."""
+    with db.cursor() as cur:
+        _universe(cur, "MU.US", "SNDK.US", "NUE.US")
+        _filled_ticket(cur, "MU.US", "buy", 41, 971.66)            # reported in chat
+    db.commit()
+    bad = _fill("ws-21", "NUE.US", "buy", 10, 180.0)
+    del bad["price"]
+    (tmp_path / "r.json").write_text(json.dumps(
+        {"account": "TFSA", "fills": [_fill("ws-20", "SNDK.US", "buy", 24, 1650.10), bad],
+         "positions": [{"ticker": "SNDK.US", "qty": 24}, {"ticker": "NUE.US", "qty": 10}]}))
+
+    out = subprocess.run([sys.executable, str(ROOT / "src" / "reconcile.py")],
+                         capture_output=True, text=True,
+                         env={"DATABASE_URL": migrated, "DB_SSLMODE": "disable",
+                              "RECONCILE_GLOB": str(tmp_path / "*.json"), "PATH": "/usr/bin:/bin"})
+    assert out.returncode != 0 and "refusing to fold" in out.stderr
+    with db.cursor() as cur:
+        cur.execute("select count(*) from transactions where broker_ref is not null")
+        assert cur.fetchone()[0] == 0, "the refused manifest folded nothing — not its first fill"
+        cur.execute("select count(*) from book where ticker = 'SNDK.US'")
+        assert cur.fetchone()[0] == 0
+        cur.execute("select qty from book where ticker = 'MU.US' and status = 'open'")
+        assert cur.fetchone()[0] == 41.0, "the chat-reported fill is in the book regardless"
+        cur.execute("select status, detail->>'fatal' from runs where job = 'reconcile'")
+        status, fatal = cur.fetchone()
+        assert status == "red" and "refusing to fold" in fatal
+
+
 def _reconcile(migrated, tmp_path):
     """The job as `pipeline.yml` runs it, on a night with no manifest unless the test writes one."""
     return subprocess.run([sys.executable, str(ROOT / "src" / "reconcile.py")],

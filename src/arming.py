@@ -1485,7 +1485,8 @@ def run(conn, hb, *, held=frozenset(), apply_ledger_first=True):
                                     balances_as_of=n["anchored"]))))
         conn.commit()
 
-    fresh, ok = freshness(conn)
+    # asked from inside this `score` run, whose own row still reads `running` (db.freshness)
+    fresh, ok = freshness(conn, own_run=hb.id)
     if not ok:
         hb.amber(fresh)
 

@@ -71,15 +71,17 @@ src/          ingest + compute jobs (Python); db.py holds the shared heartbeat c
 
 **Dispatch-only.** `desk.py` (tonight's sheet, read-only) · `migrate.py` · `backfill.py` ·
 `verify_run.py` · `concentrated.py` and the rest of the research grid. **Hand-run, no workflow:**
-`closeout.py` (§6.2, once, from a shell). The retired legacy machine (`score.py`, `check.py`,
-`compose.py`, `fills.py`, `arming.py`, `rank.py`, `fundamentals.py`, `phase0.py`) keeps its source
-for history and has no workflow at all — the last of its buttons were deleted 2026-09-13 (learning
-66). **`signals.py` is not part of it:** it was the retired engine's formula library, and the
-nightly `ingest.py` still calls three of its functions for quarantine and split handling, while
-`shadow` reaches it through `concentrated.py` → `backtest.py`.
+`closeout.py` (§6.2, once, from a shell) · `restore.py` (a `backup` dump into a freshly migrated
+database). The retired legacy machine (`score.py`, `check.py`, `compose.py`, `fills.py`,
+`arming.py`, `rank.py`, `fundamentals.py`, `phase0.py`) keeps its source for history and has no
+workflow at all — the last of its buttons were deleted 2026-09-13 (learning 66). **`signals.py` is
+not part of it:** it was the retired engine's formula library, and the nightly `ingest.py` still
+calls three of its functions for quarantine and split handling, while `shadow` reaches it through
+`concentrated.py` → `backtest.py`.
 
 Debug from `runs.detail`, never from Actions log downloads — those 302 to a blob store that
 403s even unauthenticated. Every job embeds its traceback in the heartbeat, and an
-`if: failure()` autopsy step catches deaths that happen before the heartbeat opens.
+autopsy step — run on a failure, and on a cancel or timeout that lands before the work finishes —
+catches deaths that happen before the heartbeat opens and closes rows a killed job left `running`.
 
 *First light: 2026-07-30. The engine took production: 2026-08-16.* 🌙

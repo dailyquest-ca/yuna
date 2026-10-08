@@ -66,6 +66,44 @@ def month_backed_up(cur):
     return (row[0] if row else None), month_file()
 
 
+def dump(conn, stamp):
+    """Every table but SKIP, as `row_to_json` rows, read in ONE snapshot. Returns (dump, rows).
+
+    One snapshot because a dump is only worth what a restore can do with it (`src/restore.py`,
+    QC 2026-10-07, A68). Read table by table under READ COMMITTED, a session writing between two
+    tables — a ticket and the transaction that settles it, say — leaves a transaction whose ticket
+    the dump never saw, and the restore refuses a dangling reference. REPEATABLE READ, READ ONLY
+    reads every table as of one instant, and the closing commit ends that read-only transaction
+    before the heartbeat writes its row.
+    """
+    conn.commit()                      # the guard's read is over; the snapshot starts clean
+    with conn.cursor() as cur:
+        cur.execute("set transaction isolation level repeatable read, read only")
+        cur.execute("""select table_name from information_schema.tables
+                       where table_schema='public' and table_type='BASE TABLE'
+                       order by table_name""")
+        tables = [r[0] for r in cur.fetchall() if r[0] not in SKIP]
+        out, total = {}, 0
+        for t in tables:
+            cur.execute(f'select row_to_json(x) from "{t}" x')
+            rows = [r[0] for r in cur.fetchall()]
+            out[t] = rows
+            total += len(rows)
+        cur.execute("select count(*), max(d) from prices")
+        n_bars, last_bar = cur.fetchone()
+    conn.commit()
+    out["_meta"] = {"taken": stamp, "tables": len(tables), "rows": total,
+                    "excluded": sorted(SKIP),
+                    "prices_excluded": {"rows": n_bars, "last_bar": str(last_bar)}}
+    return out, total
+
+
+def write(content, path):
+    """The dump as the file `restore.py` reads: gzipped JSON."""
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump(content, f, default=str)
+
+
 def git(*args):
     """One git command, failing with the server's words rather than an exit code."""
     out = subprocess.run(["git", *args], capture_output=True, text=True)
@@ -113,33 +151,19 @@ def main():
                 print(f"backup: the ledger says {ledger_at} backed this month up, but no file of "
                       f"this month is in the checkout — rebuilding")
             hb.detail["stage"] = "dump"
-            with conn.cursor() as cur:
-                cur.execute("""select table_name from information_schema.tables
-                               where table_schema='public' and table_type='BASE TABLE'
-                               order by table_name""")
-                tables = [r[0] for r in cur.fetchall() if r[0] not in SKIP]
-            dump, total = {}, 0
-            with conn.cursor() as cur:
-                for t in tables:
-                    cur.execute(f'select row_to_json(x) from "{t}" x')
-                    rows = [r[0] for r in cur.fetchall()]
-                    dump[t] = rows
-                    total += len(rows)
-                cur.execute("select count(*), max(d) from prices")
-                n_bars, last_bar = cur.fetchone()
-            dump["_meta"] = {"taken": stamp, "tables": len(tables), "rows": total,
-                             "excluded": sorted(SKIP),
-                             "prices_excluded": {"rows": n_bars, "last_bar": str(last_bar)}}
+            content, total = dump(conn, stamp)
+            meta = content["_meta"]
             os.makedirs(OUT, exist_ok=True)
             path = f"{OUT}/yuna-{stamp}.json.gz"
-            with gzip.open(path, "wt", encoding="utf-8") as f:
-                json.dump(dump, f, default=str)
+            write(content, path)
             size = os.path.getsize(path)
             hb.rows = total
-            hb.detail.update(path=path, bytes=size, tables=len(tables), excluded=sorted(SKIP),
-                             prices_rows=n_bars, prices_excluded=True)
-            print(f"backup: {path} — {total} rows across {len(tables)} tables, {size/1024:.0f} KB")
-            print(f"  (prices excluded: {n_bars} bars through {last_bar})")
+            hb.detail.update(path=path, bytes=size, tables=meta["tables"], excluded=sorted(SKIP),
+                             prices_rows=meta["prices_excluded"]["rows"], prices_excluded=True)
+            print(f"backup: {path} — {total} rows across {meta['tables']} tables, "
+                  f"{size/1024:.0f} KB")
+            print(f"  (prices excluded: {meta['prices_excluded']['rows']} bars through "
+                  f"{meta['prices_excluded']['last_bar']})")
             if size > GITHUB_FILE_LIMIT:
                 os.remove(path)          # the checkout holds only dumps GitHub will accept
                 raise RuntimeError(f"{path} is {size/2**20:.0f} MiB and GitHub refuses files over "

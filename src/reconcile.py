@@ -483,8 +483,12 @@ def main():
                 # leave the night's red without a name.
                 derived = derive_ticket_fills(cur, refused)
                 chat = apply_unapplied(cur, refused)
-                # Committed on its own: the ordinary route's receipts are not hostage to a manifest
-                # that dies below.
+                # The chat route stands on its own, so it is committed before any manifest is
+                # read. A malformed receipt below stops the job (`fold_fill`'s SystemExit) and the
+                # heartbeat rolls back whatever the job had not committed (db.Heartbeat,
+                # 2026-10-07): the refused manifest folds nothing, as its message says, and
+                # without this line every chat-reported fill would go down with it — every night
+                # until the file was fixed, which is the 2026-08-18 ghost book again.
                 conn.commit()
 
             for name, doc in docs:
