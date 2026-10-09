@@ -94,6 +94,22 @@ def covered(need, i, lo):
                          f"these reads go further: {'; '.join(short)}")
 
 
+def first_read(cur, as_of):
+    """The first session `tape` reads for a decision on `as_of`: the bar the deepest of §3's reads
+    reaches back to (`reads`), on the benchmark's calendar exactly as `tape` counts it. None when
+    the benchmark has fewer sessions than that read — the window is then the whole series.
+
+    A split scales the adjusted closes BEFORE its date, so one dated on or before this session
+    moves no bar the engine reads tonight, and none it reads on any later night: the window only
+    moves forward. `ingest`'s split sweep asks about nothing older (2026-10-09).
+    """
+    cur.execute("""select d from prices where ticker = %s and d <= %s
+                    order by d desc offset %s limit 1""",
+                (engine.REGIME_SOURCE, as_of, max(reads().values())))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 def tape(cur, as_of, *, also=None):
     """The benchmark's whole series, every name with a column, and the universe's bars over the
     window the engine reads. Returns (sessions, index_px, tickers, rows).

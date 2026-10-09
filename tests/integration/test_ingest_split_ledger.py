@@ -86,7 +86,8 @@ def test_a_pool_names_split_posted_late_is_applied_the_first_night_the_ledger_li
     assert raised is None and run["status"] == "green", run["detail"].get("amber")
     assert run["detail"]["split_ledger"]["found"] == {
         "POOL.US": f"split 6.665:1 on {night.day(1)}"}
-    assert first["detail"]["split_ledger"] == dict(asked=2, errors={}, found={})
+    # `after` is None: two sessions of SPY.US make no window, so the whole ledger is judged
+    assert first["detail"]["split_ledger"] == dict(asked=2, errors={}, after=None, found={})
     assert "OUT.US" not in vendor.pulled("splits/"), "outside the pool and the book: never asked"
     assert "OLD.US" not in vendor.pulled("eod/"), "a split the store carries costs nothing"
 
