@@ -576,11 +576,15 @@ def ledger_breaks(cur):
 def last_statement(cur):
     """When a broker statement was last compared with the book: the newest reconcile run that read
     a manifest's positions, or None. §4.4 (v1.2) shows it beside the gauge and never colours it —
-    no statement feed exists, so its age measures Zak's exports, not the system's health."""
+    no statement feed exists, so its age measures Zak's exports, not the system's health.
+
+    Neither condition may throw on any `detail`: runs 453-486 recorded `manifests` as a count, and
+    SQL does not evaluate an AND left to right, so a type test cannot guard `jsonb_array_length`
+    beside it. The first night on this gauge died on exactly that (2026-10-09)."""
     cur.execute("""select max(finished_at) from runs
                     where job = 'reconcile' and not dry_run and status in ('green', 'amber')
                       and jsonb_typeof(detail->'manifests') = 'array'
-                      and jsonb_array_length(detail->'manifests') > 0""")
+                      and detail->'manifests' <> '[]'::jsonb""")
     return cur.fetchone()[0]
 
 
