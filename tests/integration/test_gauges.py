@@ -862,3 +862,27 @@ def test_a_book_that_agrees_with_its_ledger_is_green_and_says_so(db, migrated):
     assert g["status"] == "green", g
     assert g["why"].startswith("the book agrees with the ledger")
     assert g["ledger_breaks"] == [] and g["last_statement"] is None
+
+
+def test_a_reconcile_row_that_counted_its_manifests_does_not_crash_the_check(db, migrated):
+    """The first night on this gauge, 2026-10-09: the check died twice, `cannot get array length of
+    a scalar`, and held the buys on a night the gauge had nothing to say. Runs 453-486 recorded
+    `manifests` as a count, 0, before reconcile began listing them, and an AND does not order its
+    operands in SQL, so `jsonb_typeof(..) = 'array'` guarded nothing. The statement date still
+    comes from the run that compared one."""
+    with db.cursor() as cur:
+        _name(cur, "N05.US")
+        _bought(cur, "N05.US", 10)
+        for _ in range(40):         # enough of the early shape that a plan reads them
+            cur.execute("""insert into runs (job, status, finished_at, detail)
+                           values ('reconcile', 'green', now() - interval '60 days',
+                                   '{"manifests": 0}')""")
+        cur.execute("""insert into runs (job, status, finished_at, detail)
+                       values ('reconcile', 'green', '2026-09-30 12:00+00',
+                               '{"manifests": [{"file": "positions.csv"}]}')""")
+        _attested(cur)
+        db.commit()
+        cur.execute("analyze runs")
+        g = gauges.reconciliation_age(cur)
+    assert g["status"] == "green", g
+    assert "last broker statement compared: 2026-09-30" in g["why"]
