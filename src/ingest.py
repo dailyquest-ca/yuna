@@ -37,6 +37,7 @@ import sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 from db import (connect, config, data_date, dry, fx_pair, get, jsonb, load_bars, observe,
                 scheduled_run, stops_breached, Heartbeat)
+import desk
 import engine
 import signals as sg
 
@@ -545,8 +546,9 @@ def repull(cur, ticker, held_from, bars):
     """Replace a name's whole stored history with the vendor's re-pull, if the reply confirms it.
 
     `held_from` is the name's earliest stored bar (`earliest_bar`), the date the re-pull was asked
-    from; `bars` is the vendor's reply. Returns (rows written, None), or (0, why the stored rows
-    were kept).
+    from; `bars` is the vendor's reply. Returns (rows written, None, None), or (0, why the stored
+    rows were kept, the newest stored session the reply contradicted or left out) — the night uses
+    that last date to tell a restated past from a disagreement inside the bars a decision reads.
 
     A corporate action rewrites the ADJUSTED history and never a raw close, so the reply is checked
     against the raw closes the store already holds before anything is deleted (A14). Run 593 is
@@ -575,15 +577,16 @@ def repull(cur, ticker, held_from, bars):
     if (contradicted or missing) and agree <= len(contradicted) + len(missing):
         held = agree + len(contradicted) + len(missing)
         example = ", ".join(str(d) for d in (contradicted or missing)[:3])
-        return 0, (f"the vendor's reply confirmed {agree} of {held} stored closes — "
-                   f"{len(contradicted)} contradicted, {len(missing)} missing (e.g. {example})")
+        why = (f"the vendor's reply confirmed {agree} of {held} stored closes — "
+               f"{len(contradicted)} contradicted, {len(missing)} missing (e.g. {example})")
+        return 0, why, max(contradicted[-1:] + missing[-1:])       # both lists run oldest first
     dates = sorted(b["date"] for b in bars if b.get("date"))
     if dry() or not dates:
-        return 0, None
+        return 0, None, None
     if held_from is not None:
         cur.execute("delete from prices where ticker = %s and d >= %s and d <= %s",
                     (ticker, dt.date.fromisoformat(dates[0]), dt.date.fromisoformat(dates[-1])))
-    return upsert(cur, ticker, bars), None
+    return upsert(cur, ticker, bars), None, None
 
 
 def deferred_repulls(cur, run_id):
@@ -667,9 +670,19 @@ def carries_split(cur, ticker, on, ratio):
     return abs(step + math.log(ratio)) < abs(step)
 
 
-def splits_not_carried(conn, hb, names):
-    """[(ticker, row)] — every split the vendor's per-ticker ledger lists for `names` that the
-    stored series does not carry, plus {ticker: why} for every name it could not judge."""
+def splits_not_carried(conn, hb, names, since=None):
+    """[(ticker, row)] — every split the vendor's per-ticker ledger lists for `names` after `since`
+    that the stored series does not carry, plus {ticker: why} for every name it could not judge.
+
+    `since` is the first session tonight's decision reads (`desk.first_read`); None judges the
+    whole ledger. A split dated on or before it moves no bar any decision reads, tonight or later.
+    The first night this ran unbounded (2026-10-09) it judged ledgers back to 2005: it re-pulled
+    the whole history of seven pool names for spin-off, consolidation and stock-dividend factors
+    dated 2007-2023 (ASML.US 0.888889:1 on 2007-10-01, LH.US 1.164:1 on 2023-07-03, ...), had two
+    of those re-pulls refused because the vendor has since restated their older closes, and found
+    three factors the vendor's own history does not carry — two ambers on a price-critical job,
+    for bars no rank has read in years.
+    """
     found, errors = [], {}
     with conn.cursor() as cur:
         for ticker in names:
@@ -686,6 +699,8 @@ def splits_not_carried(conn, hb, names):
                     on = None
                 if on is None or not ratio or ratio <= 0:
                     errors[ticker] = f"a split it cannot read: {entry!r}"
+                    continue
+                if since is not None and on <= since:
                     continue
                 if ratio != 1 and carries_split(cur, ticker, on, ratio) is False:
                     found.append((ticker, dict(code=ticker.rsplit(".", 1)[0], date=on.isoformat(),
@@ -788,14 +803,15 @@ def main():
             # actions here, and its re-pull runs through the same checked path as any other.
             with conn.cursor() as cur:
                 population = [t for t in split_population(cur) if t in names]
-            late, unjudged = splits_not_carried(conn, hb, population)
+                since = desk.first_read(cur, as_of)     # the first bar tonight's decision reads
+            late, unjudged = splits_not_carried(conn, hb, population, since)
             late = [(t, r) for t, r in late
                     if not any(k == "split" and str(x.get("date") or as_of) == r["date"]
                                for k, x in actions.get(t, []))]     # tonight's file had it
             for t, r in late:
                 actions.setdefault(t, []).append(("split", r))
             hb.detail["split_ledger"] = dict(
-                asked=len(population), errors=unjudged,
+                asked=len(population), errors=unjudged, after=str(since) if since else None,
                 found={t: f"{describe_action('split', r)} on {r['date']}" for t, r in late})
 
             if actions and not dry():
@@ -852,7 +868,7 @@ def main():
                           for t, why, _ in skipped if why.startswith("corporate action")})
             hb.detail["repull_deferred"] = owing
 
-            errors, per_name, refused = {}, {}, {}
+            errors, per_name, refused, restated = {}, {}, {}, {}
             with conn.cursor() as cur:
                 for ticker, why, have in repairs:
                     full = why.startswith("corporate action")
@@ -871,7 +887,19 @@ def main():
                             owing[ticker] = "the re-pull failed"
                         continue
                     if full:
-                        landed, kept = repull(cur, ticker, held_from, bars)
+                        landed, kept, latest = repull(cur, ticker, held_from, bars)
+                        if kept and ticker not in actions and since and latest < since:
+                            # Owed from an earlier night, with no action tonight, and the vendor
+                            # disagrees only about closes older than any bar a decision reads: it
+                            # has restated its past (LH.US's pre-2023 closes, FLUT.US's pre-2020
+                            # ones), and asking again every night cannot change that. Recorded,
+                            # no longer owed, and it holds nothing. A split inside the window is
+                            # still guarded — the sweep finds it again each night as tonight's
+                            # action, which is never this branch.
+                            restated[ticker] = kept
+                            owing.pop(ticker, None)
+                            per_name[ticker] = f"{why}: kept the stored rows, owed no more — {kept}"
+                            continue
                         if kept:
                             refused[ticker] = kept
                             owing[ticker] = "the vendor's reply contradicted the store"
@@ -931,7 +959,8 @@ def main():
                              corporate_actions={k: [describe_action(kd, r) for kd, r in v]
                                                 for k, v in actions.items()},
                              repairs=per_name, repair_errors=errors,
-                             repairs_skipped=[r[0] for r in skipped], repull_refused=refused)
+                             repairs_skipped=[r[0] for r in skipped], repull_refused=refused,
+                             repull_restated=restated)
             if errors:
                 hb.amber(f"{len(errors)} per-ticker pull(s) failed")
             if unjudged:
